@@ -1,0 +1,14 @@
+{
+  "name": "overnight",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Say it at lunch. Use it at breakfast. Overnight hears app ideas through Bee, asks on the wrist, and has Kiro build them while you sleep.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@beeai/cli": "0.7.3"
+  }
+}

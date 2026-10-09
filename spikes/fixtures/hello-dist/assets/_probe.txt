@@ -1,0 +1,2 @@
+Synthetic fixture for spike 7. This file name starts with an underscore on purpose:
+GitHub Pages' Jekyll step drops such files unless the repo has a .nojekyll file.

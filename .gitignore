@@ -1,0 +1,26 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+
+# Secrets. Only .env.example is committed.
+.env
+.env.*
+!.env.example
+
+# Bee data, transcripts, screenshots and databases never go in the repo.
+# Overnight keeps them in ~/.overnight; these lines are a second safety net.
+.overnight/
+*.db
+*.db-*
+*.sqlite
+*.jsonl
+spikes/out/
+screenshots/
+
+# Local noise
+.DS_Store
+*.log
+.claude/settings.local.json
