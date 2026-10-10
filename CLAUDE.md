@@ -45,7 +45,7 @@ Overnight hears app ideas through Bee (Apple Watch). It asks on the wrist whethe
 - Never print, log or hand tokens (Bee, Kiro, GitHub) to the coding agent, and never put them in briefs. Publishing happens only in the deliver step.
 - All Bee access goes through `packages/bee`, and it must really call Bee at runtime. That's a hackathon requirement.
 - Generated apps follow the app contract in SPEC.md §6: static, no backend, no keys. Published apps are public, so briefs never contain personal details.
-- Don't weaken Kiro Crew's sandbox or approval settings.
+- Kiro Crew: the nightly build job, and only that job, runs with `--approval-mode auto` (Henry's decision, Oct 9, after spike 5 showed that default approvals deny every build step). Crew's sandbox runs at its `strict` level. Change no other Crew sandbox or approval setting.
 - No code, data, accounts or hardware from NQB8/Zelcast. Everything in this repo is Henry's.
 - Keep the MIT `LICENSE` file at the repo root.
 

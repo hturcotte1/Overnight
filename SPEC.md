@@ -275,7 +275,7 @@ Checked on Oct 9, 2026 with the real phone and watch (spikes 1 to 4, written up 
 
 What spike 5 changed:
 - **Our own timer starts the job.** Crew delays daily jobs by a random 0 to 59 minutes (seen in spike 5) and, per its source, skips a run if the Mac is asleep (not tested). So a launchd timer at `BUILD_TIME` runs `kirocrew cron trigger <job id>`, which starts the job within a second; launchd should catch up after a wake (per Apple's docs, not tested). The Crew job's own schedule must never be due at `BUILD_TIME`: a job that is already waiting out its random delay answers `cron trigger` with `Error: HTTP 409` and still exits 0. Which schedule the real job gets is settled in M2. The trigger wrapper checks for the `Triggered job:` reply, not the exit code.
-- **Open decision: approvals.** Under Crew's default approval settings our unattended agent job was denied the one file write and the one shell command it tried (and was still recorded as a success). Crew's default agent config pre-approves only reading tools, so such a job can look but not build. Crew's documented setting for unattended jobs is the per-job flag `--approval-mode auto`. Using it loosens an approval setting, so Henry decides before M2. The alternative that touches no approval setting is for Crew to start our `kiro-cli` builder as a scheduled command job. See `docs/spikes.md`, "Decisions needed before Milestone 2".
+- **Approvals (decided Oct 9).** Under Crew's default approval settings our unattended agent job was denied the one file write and the one shell command it tried (and was still recorded as a success). Crew's default agent config pre-approves only reading tools, so such a job can look but not build. Crew's documented setting for unattended jobs is the per-job flag `--approval-mode auto`. Henry's decision: the nightly build job, and only that job, gets that flag, and Crew's sandbox is raised to its `strict` level at the same time. Crew's deny rules stay on. M2 starts with a test that shows what the `strict` sandbox does and doesn't block before any real build runs.
 - The Crew gateway must be running (`kirocrew service install`), and the Mac must be awake.
 
 **Fallback: kiro-cli headless** (proved in spike 6: a hello-world Vite app in 52 seconds).
@@ -331,13 +331,13 @@ It's the main visual in the demo video, so it must look good: clean, phone-frien
   - anything in `~/.overnight`
 - Fixtures are synthetic and say so on their first line.
 - Bee hears everyone nearby. The README tells users to let people know. The demo only shows people who agreed to be filmed.
-- Kiro Crew runs with its sandbox and default protections on. Don't weaken them. (The one open question, the per-job approval flag for the nightly build, is Henry's decision; see §6.)
+- Kiro Crew runs with its sandbox on (at the `strict` level) and its deny rules on. The one loosened setting is `--approval-mode auto` on the nightly build job alone (Henry's decision, Oct 9; see §6). Change nothing else.
 
 ## 10. Milestones
 
 Dates are targets. A milestone ends when its checks pass and the docs are updated.
 
-**M0: Spikes (Fri Oct 9 – Sat Oct 10).** Prove each outside piece before building on it. **All eight spikes ran on Oct 9; results are in `docs/spikes.md`.** Four decisions for Henry came out of them and are listed at the end of that file.
+**M0: Spikes (Fri Oct 9 – Sat Oct 10).** Prove each outside piece before building on it. **All eight spikes ran on Oct 9; results are in `docs/spikes.md`.** Four decisions came out of them; they are listed, with what was decided, at the end of that file.
 - One script per spike in `spikes/`. Results go in `docs/spikes.md`.
 - Henry doesn't use Terminal. Claude Code runs everything and asks Henry for phone, watch and account steps one at a time.
 - Every surprise goes in `docs/friction-log.md`.

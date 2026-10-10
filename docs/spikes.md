@@ -293,9 +293,9 @@ Checked in a real browser too: the page loaded its script through the relative p
 - Publishing takes roughly 20 to 60 seconds. Deliver should poll the page for content unique to the new build (not just a 200), with a timeout of a few minutes. `gh api repos/<owner>/<repo>/pages/builds/latest` gives `status` (`building`, then `built`) and `duration` in milliseconds as a second signal.
 - The default `gh auth login` scopes (`repo`, `read:org`, `gist`) were enough to create the repo, push and enable Pages.
 
-## Decisions needed before Milestone 2
+## Decisions that came out of the spikes
 
-1. **How the nightly Kiro Crew job is allowed to work** (finding 2). Options: (a) give that one job `--approval-mode auto`, Crew's documented setting for unattended jobs, and at the same time tighten Crew's sandbox to its `strict` level; or (b) leave every Crew setting at its default and have Crew only start our own `kiro-cli` builder on schedule. Option (a) is the stronger Kiro Crew story for the AWS Builder prize; option (b) touches no approval setting.
+1. **How the nightly Kiro Crew job is allowed to work** (finding 2). **Decided on Oct 9:** that one job gets `--approval-mode auto`, Crew's documented setting for unattended jobs, and Crew's sandbox is raised to its `strict` level at the same time. No other Crew setting changes. (The alternative, leaving every Crew setting alone and having Crew only start our own `kiro-cli` builder, was the weaker Kiro Crew story and no safer.)
 2. **Keeping logins away from the builder** (finding 3). Needs its own small spike in M2: Crew's `strict` sandbox level, Kiro permission rules, and what a build can still reach.
-3. **Keeping the Mac awake at 1:00 a.m.** It's a MacBook that sleeps after a minute of idle. It must be plugged in with the lid open, plus a keep-awake helper that we install with the background jobs.
+3. **Keeping the Mac awake at 1:00 a.m.** It's a MacBook that sleeps after a minute of idle. **Agreed on Oct 9:** Henry keeps it plugged in with the lid open on build nights, and the background jobs hold it awake while they run.
 4. **Kiro content sharing. Decided on Oct 9: switched off.** By default Kiro may use prompts from individual accounts to improve its service, and the detector will send transcript text. Both settings (`codeWhisperer.shareCodeWhispererContentWithAWS` and `telemetry.enabled`) are now `false` on this Mac, in the default settings folder and in the detector's own `KIRO_HOME`. Any new `KIRO_HOME` we create needs the same two settings before real text goes through it.
