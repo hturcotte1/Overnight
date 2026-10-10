@@ -322,7 +322,7 @@ It's the main visual in the demo video, so it must look good: clean, phone-frien
 ## 9. Privacy and safety
 
 - All transcripts stay in `~/.overnight`. Only the detector's Kiro call and the one-page brief leave the machine. Published apps are public.
-- Kiro may use prompts from individual accounts to improve its service unless that's switched off. Before any real Bee text goes through the detector, turn off `codeWhisperer.shareCodeWhispererContentWithAWS` and `telemetry.enabled` in Kiro's settings (for the detector's own `KIRO_HOME` too).
+- Kiro may use prompts from individual accounts to improve its service unless that's switched off. Henry had both settings switched off on Oct 9 (`codeWhisperer.shareCodeWhispererContentWithAWS` and `telemetry.enabled`, in the default settings folder and the detector's own `KIRO_HOME`). The detector checks both are `false` at start-up and refuses to send real text otherwise.
 - Never commit any of these:
   - Bee data or transcripts
   - Real names

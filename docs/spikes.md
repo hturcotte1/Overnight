@@ -32,7 +32,7 @@ Everything except Kiro CLI is installed per user, with no Homebrew. Kiro CLI's i
 
 `~/.zshenv` adds `~/.local/bin` and `~/.local/node/bin` to `PATH`. Background jobs (launchd) don't read that file, so they must use full paths.
 
-Kiro: `kiro-cli` is signed in with GitHub on the **Kiro Pro** plan (1,000 credits a month). All of today's Kiro tests together, including a second run of each script, used about 1.1 credits. Kiro Crew settings changed from their defaults: `stt.enabled false` (voice typing, unused), `timezone America/Boise`, `auto_update false`. Sandbox and approval settings are untouched.
+Kiro: `kiro-cli` is signed in with GitHub on the **Kiro Pro** plan (1,000 credits a month). All of today's Kiro tests together, including a second run of each script, used about 1.1 credits. Kiro Crew settings changed from their defaults: `stt.enabled false` (voice typing, unused), `timezone America/Boise`, `auto_update false`. Sandbox and approval settings are untouched. Kiro CLI settings changed: `codeWhisperer.shareCodeWhispererContentWithAWS false` and `telemetry.enabled false`, in the default settings folder and in the detector's own `KIRO_HOME` (Henry's decision, Oct 9).
 
 GitHub: `gh` is logged in as `hturcotte1` (token in the macOS keychain, scopes `repo`, `read:org`, `gist`). This folder's `origin` is `https://github.com/hturcotte1/Overnight.git`.
 
@@ -298,5 +298,4 @@ Checked in a real browser too: the page loaded its script through the relative p
 1. **How the nightly Kiro Crew job is allowed to work** (finding 2). Options: (a) give that one job `--approval-mode auto`, Crew's documented setting for unattended jobs, and at the same time tighten Crew's sandbox to its `strict` level; or (b) leave every Crew setting at its default and have Crew only start our own `kiro-cli` builder on schedule. Option (a) is the stronger Kiro Crew story for the AWS Builder prize; option (b) touches no approval setting.
 2. **Keeping logins away from the builder** (finding 3). Needs its own small spike in M2: Crew's `strict` sandbox level, Kiro permission rules, and what a build can still reach.
 3. **Keeping the Mac awake at 1:00 a.m.** It's a MacBook that sleeps after a minute of idle. It must be plugged in with the lid open, plus a keep-awake helper that we install with the background jobs.
-4. **Kiro content sharing.** By default Kiro may use prompts from individual accounts to improve its service. The detector will send transcript text, so the two settings `codeWhisperer.shareCodeWhispererContentWithAWS` and `telemetry.enabled` should be turned off before any real Bee text goes through Kiro.
-
+4. **Kiro content sharing. Decided on Oct 9: switched off.** By default Kiro may use prompts from individual accounts to improve its service, and the detector will send transcript text. Both settings (`codeWhisperer.shareCodeWhispererContentWithAWS` and `telemetry.enabled`) are now `false` on this Mac, in the default settings folder and in the detector's own `KIRO_HOME`. Any new `KIRO_HOME` we create needs the same two settings before real text goes through it.
