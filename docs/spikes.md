@@ -326,7 +326,8 @@ The background listener, installed the night before in quiet mode, had run for 1
 | 10:13 | Asking switched on (`overnight resume`). An app idea was then said out loud in a new recording: 5 lines, 49 words. Bee added it to the same conversation |
 | 10:15:50 | Detector ran on **only the 5 new lines**: an idea, confidence 0.92, buildable, 6.1 s |
 | 10:15:51 | Bee to-do created (`💡 Build tonight? <title>`), alarm two minutes out |
-| 10:21:21 | Ticked in the Bee app; the next 10-second poll saw it and the idea became `approved` |
+| about 10:18 | The alarm went off: **the wrist buzzed** (the wearer's report) |
+| 10:21:21 | Ticked in the Bee app on the phone; the next 10-second poll saw it and the idea became `approved` |
 | after | `overnight queue --approved --json` lists it for the builder |
 
 What this settles:
@@ -334,6 +335,7 @@ What this settles:
 - **One stream asking for several event types works.** Utterances and conversation events (with both the uuid and the numeric id, through to `COMPLETED`) all arrived on the single stream.
 - **Stream latency over 31 real lines:** 1.5 s minimum, 8.4 s median, 18.5 s maximum.
 - **"Lines since the last run" works.** The idea was spoken inside a conversation the detector had already judged, and was still picked up by itself.
+- Not yet tried: ticking from the watch instead of the phone.
 - Not yet tried with real speech: rejecting by deleting the to-do, and letting an ask expire. Both paths are covered by tests, and deletion was seen for real in spike 3.
 
 ## Decisions that came out of the spikes
