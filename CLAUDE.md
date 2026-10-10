@@ -51,15 +51,16 @@ Overnight hears app ideas through Bee (Apple Watch). It asks on the wrist whethe
 
 ## Stack
 
-- TypeScript (strict), Node 20+, ESM, npm workspaces
+- TypeScript (strict), Node 22.18+ (we use Node 24 LTS), ESM, npm workspaces
 - SQLite via better-sqlite3; zod for every model output and every config value
 - Tests: vitest. Browser smoke tests: Playwright.
-- Detector runs through Kiro headless (`kiro-cli chat --no-interactive`, no tools)
+- Detector runs through Kiro headless (`kiro-cli chat --no-interactive` with the no-tools `overnight-detector` agent)
 - Publishing: GitHub Pages via the GitHub CLI (`gh`) login
 - Times stored in UTC, shown in America/Boise
 
 ## Commands (keep this list accurate as they're built)
 
+- Built so far (Milestone 0): `node spikes/<name>.ts`, one script per spike. See `docs/spikes.md`. The commands below are planned, not built yet.
 - `npm install` · `npm test` · `npm run typecheck` · `npm run lint`
 - `npm run eval:detector`: detector golden set (precision ≥ 0.85, recall ≥ 0.7)
 - `npx overnight listen` · `npx overnight queue --approved --json` · `npx overnight build-now <id>` · `npx overnight deliver` · `npx overnight pause|resume`

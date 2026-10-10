@@ -1,0 +1,7 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+[19:02:00] Good evening, I am your host and here are tonight's top stories.
+[19:02:06] Lawmakers met again today to discuss the transportation budget.
+[19:02:12] Coming up after the break, a new app that promises to change how you order groceries.
+[19:02:19] But first, a look at the weekend weather with our meteorologist.
+[19:02:25] Thanks. We are tracking a cold front moving in from the northwest.

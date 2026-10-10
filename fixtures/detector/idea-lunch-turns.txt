@@ -1,0 +1,8 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+[12:14:02] Okay so who paid last time, was it me or you?
+[12:14:06] I honestly have no idea, I think you got the tacos.
+[12:14:11] We do this every single week.
+[12:14:15] Someone should build a tiny app where you just tap who paid and it tells you whose turn it is next.
+[12:14:22] Like no accounts, no splitting math, just whose turn.
+[12:14:26] I would use that every Friday.

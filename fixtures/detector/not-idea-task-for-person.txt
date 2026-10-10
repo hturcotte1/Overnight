@@ -1,0 +1,6 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+[09:15:03] I need to email Sam about the invoice before noon.
+[09:15:08] And remind me to call the dentist.
+[09:15:12] Also we are out of coffee filters.
+[09:15:17] I will grab some on the way home.

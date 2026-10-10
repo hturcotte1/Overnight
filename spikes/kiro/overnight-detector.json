@@ -1,0 +1,10 @@
+{
+  "name": "overnight-detector",
+  "description": "Reads one conversation transcript and answers with one JSON object. No tools.",
+  "prompt": "You are a careful classifier. You have no tools: you cannot read files, run commands or browse. Answer with exactly one JSON object and nothing else: no prose, no code fences.",
+  "tools": [],
+  "allowedTools": [],
+  "resources": [],
+  "mcpServers": {},
+  "includeMcpJson": false
+}
