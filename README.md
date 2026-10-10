@@ -11,7 +11,7 @@ Built for Amazon's "Build, Ship, Shape" developer hackathon (Bee track, plus the
 | Milestone | What | State |
 |---|---|---|
 | 0 | Prove each outside piece (Bee, Kiro, GitHub Pages) with a small script against the real tools | Done. Results in [docs/spikes.md](docs/spikes.md) |
-| 1 | Hear, notice, ask: an always-on listener that saves what Bee hears, spots ideas with Kiro, asks through a Bee to-do and tracks the answer | Built and tested. Running on real Bee data in quiet mode |
+| 1 | Hear, notice, ask: an always-on listener that saves what Bee hears, spots ideas with Kiro, asks through a Bee to-do and tracks the answer | Done. Running on real Bee data; the first real idea was heard, asked about on the wrist and approved on Oct 10 |
 | 2 | Build and deliver: Kiro Crew builds approved ideas overnight; Overnight tests, publishes and sends the link | Next |
 | 3 to 5 | Dashboard, real nights, submission | Later |
 

@@ -315,6 +315,27 @@ Found while building and reviewing the listener, each checked read-only against 
 - **First real run of the listener, in quiet mode** (no one was speaking): Bee login checked, one stream with five event types opened and connected in about a second, the first catch-up call saved a starting cursor, and the detector's set-up passed (Kiro signed in, both sharing settings switched off in its own settings folder). The same thing then worked as a launchd background job, including `kiro-cli` under launchd's bare environment. A hand-run listener and the background job were briefly started together: the second one refused to start, and took over within 20 seconds of the first one stopping. A stop signal ended the listener in under a second.
 - **Detector on the golden set** (66 synthetic transcripts, `claude-haiku-4.5`, one run after the last prompt change): 24 of 24 ideas asked, 0 of 42 non-ideas asked, precision 1.00, recall 1.00, 63 seconds, about 1.1 Kiro credits. Earlier runs on 64 transcripts scored 0.88, 0.88 and 0.96 precision with recall 1.00 each time, so expect some run-to-run variation. In the last run 13 replies had a word-for-word quote longer than the 25-word limit; we cut those in code.
 
+## First real end-to-end run of the listening half (2026-10-10)
+
+The background listener, installed the night before in quiet mode, had run for 10 hours (43 stream reopenings, no errors). Then, with the wearer and the watch:
+
+| Time (local) | What happened |
+|---|---|
+| 10:09 to 10:13 | An ordinary conversation: 26 lines, 154 words, saved as they arrived |
+| 10:13:04 | Detector ran on it (2 quiet minutes after its last line): **not an idea**, 8.4 s |
+| 10:13 | Asking switched on (`overnight resume`). An app idea was then said out loud in a new recording: 5 lines, 49 words. Bee added it to the same conversation |
+| 10:15:50 | Detector ran on **only the 5 new lines**: an idea, confidence 0.92, buildable, 6.1 s |
+| 10:15:51 | Bee to-do created (`💡 Build tonight? <title>`), alarm two minutes out |
+| 10:21:21 | Ticked in the Bee app; the next 10-second poll saw it and the idea became `approved` |
+| after | `overnight queue --approved --json` lists it for the builder |
+
+What this settles:
+
+- **One stream asking for several event types works.** Utterances and conversation events (with both the uuid and the numeric id, through to `COMPLETED`) all arrived on the single stream.
+- **Stream latency over 31 real lines:** 1.5 s minimum, 8.4 s median, 18.5 s maximum.
+- **"Lines since the last run" works.** The idea was spoken inside a conversation the detector had already judged, and was still picked up by itself.
+- Not yet tried with real speech: rejecting by deleting the to-do, and letting an ask expire. Both paths are covered by tests, and deletion was seen for real in spike 3.
+
 ## Decisions that came out of the spikes
 
 1. **How the nightly Kiro Crew job is allowed to work** (finding 2). **Decided on Oct 9:** that one job gets `--approval-mode auto`, Crew's documented setting for unattended jobs, and Crew's sandbox is raised to its `strict` level at the same time. No other Crew setting changes. (The alternative, leaving every Crew setting alone and having Crew only start our own `kiro-cli` builder, was the weaker Kiro Crew story and no safer.)

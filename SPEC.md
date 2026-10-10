@@ -161,7 +161,7 @@ Checked on Oct 9, 2026 with the real phone and watch (spikes 1 to 4, written up 
 **Live events:**
 - Read them with `createBeeClient().sse.streamJson({ types: [...] })`, which runs `bee stream --json` and returns `{ events, close, process }`; `events` is an async iterable of `{ data, raw }`.
 - Types we need: `new-utterance`, `new-conversation`, `update-conversation`, `delete-conversation`, `todo-deleted`.
-- **Every event we received had a top-level `type` field with the event name** (Bee's docs say there is none). Plan on one stream with several `--types` and switch on `data.type`; M1 starts by checking that one stream behaves like the per-type streams the spikes used. The first line on a stream is `{ timestamp }` with no `type`; skip it.
+- **Every event we received had a top-level `type` field with the event name** (Bee's docs say there is none). The listener uses one stream with several `--types` and switches on `data.type`; the first real run on Oct 10 confirmed that utterances and conversation events all arrive on it. The first line on a stream is `{ timestamp }` with no `type`; skip it.
 - `new-utterance` is `{ type, conversation_uuid, utterance: { id, sample_id, start, end, text, spoken_at } }`. Dedupe by `utterance.id`. Order by `spoken_at`, never by `start` (those offsets reset within a conversation). There is no speaker field.
 - Conversation events are `{ type, conversation: { id, conversation_uuid, state, start_time, end_time, ... } }`. States seen: `CAPTURING`, `PROCESSING`, `COMPLETED`. Keep the uuid-to-id mapping: utterances carry only the uuid, commands take only the numeric id.
 - **The `COMPLETED` `update-conversation` event carries the whole transcript.** Its `conversation` adds `transcriptions[]`, each with `utterances[]` (`text`, `person_first_name`, `person_id`, ...) and `utterance_chunks[].chunk_text`, next to the filled-in `summary` and `short_summary`. `packages/bee` parses conversation events with a zod schema that keeps only `id`, `conversation_uuid`, `state`, `start_time` and `end_time`. The listener never stores or logs a raw event payload.
@@ -379,7 +379,7 @@ The spikes:
 7. Publishing a hello-world `dist/` folder to a public `overnight-apps` repo with GitHub Pages turned on gives a working link.
 8. `kiro-cli chat --no-interactive` (no tools) returns valid detector JSON for a few synthetic transcripts.
 
-**M1: Hear, notice, ask (Sat Oct 10 – Sun Oct 11).** **Built on Oct 9 and running as a background job in quiet mode.** Tests, typecheck, lint and the golden set pass. Still to do with the wearer present: watch real speech go through (including that all event types arrive on the one stream), then `npx overnight resume` and one real ask, approval, rejection and expiry.
+**M1: Hear, notice, ask (Sat Oct 10 – Sun Oct 11).** **Built on Oct 9 and running as a background job in quiet mode.** Tests, typecheck, lint and the golden set pass. On Oct 10 the whole listening half ran for real: speech heard, an ordinary conversation judged not an idea, a spoken idea detected, the wrist asked, the tick seen, the idea queued (see `docs/spikes.md`). Asking has been on since then. Not yet tried with real speech: a rejection and an expiry.
 - `overnight listen` runs under launchd and snapshots to SQLite.
 - It survives disconnects (backfill).
 - It detects ideas, asks via Bee to-do, and tracks approve, reject and expire.
