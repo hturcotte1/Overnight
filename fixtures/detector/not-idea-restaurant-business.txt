@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: near-miss
+# note: A business idea for a breakfast place; "somebody should do it" is about biscuits, not software.
+[19:50:10] I'm telling you, this town needs a real breakfast place.
+[19:50:14] There's the diner.
+[19:50:16] The diner closes at eleven and the coffee tastes like a penny. I mean biscuits. Real ones. Six tables, open at five for the guys going out to the fields.
+[19:50:27] You'd have to get up at three.
+[19:50:29] I get up at four now for free.
+[19:50:32] Where would you put it?
+[19:50:34] The old hardware building. It's been empty two years, the rent has to be nothing.
+[19:50:40] Somebody should do it.
+[19:50:42] I should do it. I'd call it Sunup.
+[19:50:45] You'd need a hood and a grease trap. That's twenty grand right there.
+[19:50:50] I know. I'm just saying. I'd eat there.

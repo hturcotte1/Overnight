@@ -1,0 +1,17 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: task
+# note: A run of errands and reminders for people to do; "build that ramp" is carpentry, not software.
+[09:02:14] Okay. What's the order?
+[09:02:16] Post office first, they close at noon.
+[09:02:19] Then the feed store.
+[09:02:21] Then the feed store, then I need to drop the library books, they're two weeks late.
+[09:02:27] Do we need anything at the hardware store?
+[09:02:30] Furnace filter. Sixteen by twenty five by one. I wrote it on my hand.
+[09:02:36] And I have to pick up the dry cleaning before five.
+[09:02:39] That's across town.
+[09:02:41] I know. And remind me to call the vet about Tuesday.
+[09:02:45] Call the vet. Got it.
+[09:02:47] Oh and we need to build that ramp for the shed before it snows.
+[09:02:52] That's a tomorrow problem.
+[09:02:54] Tomorrow. Okay. Seat belt.

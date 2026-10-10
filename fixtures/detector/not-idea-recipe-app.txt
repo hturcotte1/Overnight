@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: existing-product
+# note: Recommending an existing recipe app and its features; nobody wants something new.
+[18:20:05] How do you have all these on your phone?
+[18:20:08] It's an app, Paprika. You give it the link and it strips out the recipe. No ads, no story about grandma.
+[18:20:16] Does it cost anything?
+[18:20:18] Five bucks, once. Had it for years.
+[18:20:21] And it does the shopping list?
+[18:20:23] Shopping list, and it scales. See, I hit two x and it doubles everything.
+[18:20:29] Okay that's actually great.
+[18:20:31] It keeps the screen on while you cook too.
+[18:20:34] Send me the name. Paprika like the spice?
+[18:20:37] Like the spice.
+[18:20:39] Okay. Stir that, it's sticking.

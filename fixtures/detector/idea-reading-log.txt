@@ -1,0 +1,22 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "You know what I'd actually use" for a plain reading log with a yearly count, between dog-walk small talk.
+[07:10:03] Come on. Leave it. Leave it.
+[07:10:07] She found the same chicken bone as yesterday.
+[07:10:10] Good girl. Okay. Cold this morning.
+[07:10:14] Supposed to warm up by noon.
+[07:10:17] Did you call your brother back?
+[07:10:20] Tonight. He just wants to talk about the boat.
+[07:10:24] Of course he does.
+[07:10:27] Did you finish that one about the lighthouse?
+[07:10:30] Last night. Stayed up way too late. That's, I want to say eleven this year?
+[07:10:36] You don't know?
+[07:10:38] I lose count every year around June. You know what I'd actually use, is a plain little page where I put in the title, the day I finished, and one line about it. And it just says twelve books this year at the top.
+[07:10:52] Like a diary.
+[07:10:54] Smaller than a diary. A list with a number on it.
+[07:10:58] Hm. Heel. Heel.
+[07:11:02] The people on the corner got their fence fixed.
+[07:11:05] About time. Okay, cross here.
+[07:11:09] Wait for the car.
+[07:11:12] I see the car.

@@ -1,0 +1,17 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: media
+# note: Scripted sitcom dialogue with a punchline about an app and a "stay tuned" bumper; TV audio.
+[20:02:11] Marcy, I told you, I am not going to the reunion.
+[20:02:14] You bought a suit.
+[20:02:16] I bought a suit for a funeral.
+[20:02:18] Whose funeral?
+[20:02:20] Nobody yet. I like to be prepared.
+[20:02:23] You're going. Gary's going to be there.
+[20:02:26] Gary with the boat or Gary with the neck?
+[20:02:29] Boat Gary.
+[20:02:31] Ugh. There should be an app that tells you which Gary is coming before you say yes to things.
+[20:02:37] It's called asking, Dennis.
+[20:02:39] I'm not asking. I have a suit and I have my dignity.
+[20:02:43] You have a suit.
+[20:02:45] Stay tuned, scenes from next week's episode are coming up right after this.

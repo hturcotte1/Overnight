@@ -1,0 +1,23 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "It'd be so cool if" you typed a word list and got shuffled printable bingo cards; all done in the browser.
+[15:21:08] Is this the decaf?
+[15:21:11] Orange lid is decaf.
+[15:21:14] There's no orange lid.
+[15:21:17] Then it's all regular. Live a little.
+[15:21:21] I've got bus duty in ten minutes, I can't be shaking.
+[15:21:26] Did they ever fix the heat in your room?
+[15:21:29] It's either off or it's eighty five. I teach in a coat or a t-shirt.
+[15:21:35] Mine's the opposite. We should trade.
+[15:21:40] Are you doing anything for the last day before break?
+[15:21:44] Vocabulary bingo. If I can face making the cards.
+[15:21:48] How many kids?
+[15:21:50] Twenty eight. So twenty eight different cards, by hand, in a table, and I always end up with two the same.
+[15:21:58] Oof.
+[15:21:59] It'd be so cool if you could just type in your word list and it spat out however many shuffled cards, five by five, free space in the middle, ready to print.
+[15:22:10] And a call sheet for you.
+[15:22:12] Yes! And the call sheet. That's a whole planning period I'd get back.
+[15:22:17] I'd use it for the spelling words.
+[15:22:20] Right? Anyway. Is the copier fixed?
+[15:22:23] It's doing the stripe thing again.

@@ -60,12 +60,22 @@ Overnight hears app ideas through Bee (Apple Watch). It asks on the wrist whethe
 
 ## Commands (keep this list accurate as they're built)
 
-- Built so far (Milestone 0): `node spikes/<name>.ts`, one script per spike. See `docs/spikes.md`. The commands below are planned, not built yet.
+Built and working (Milestones 0 and 1):
+
 - `npm install` · `npm test` · `npm run typecheck` · `npm run lint`
-- `npm run eval:detector`: detector golden set (precision ≥ 0.85, recall ≥ 0.7)
-- `npx overnight listen` · `npx overnight queue --approved --json` · `npx overnight build-now <id>` · `npx overnight deliver` · `npx overnight pause|resume`
+- `npm run eval:detector`: detector golden set (precision ≥ 0.85, recall ≥ 0.7). Uses about 1 Kiro credit.
+- `npx overnight listen`: the always-on listener (one per data folder)
+- `npx overnight status [--json] [--check]` · `npx overnight ideas [--json] [--all]`
+- `npx overnight pause|resume`: Overnight starts paused (quiet mode); `resume` turns asking on
+- `npx overnight queue --approved --json`: what the nightly builder reads
+- `scripts/install-agents.sh install|uninstall|restart|status`: the launchd background job for `listen`
+- `node packages/bee/src/smoke.ts`: read-only check that Bee is reachable and logged in
+- `node spikes/<name>.ts`: the Milestone 0 spikes (see `docs/spikes.md`)
+
+Planned, not built yet:
+
+- `npx overnight build-now <id>` · `npx overnight deliver`
 - `npm run dashboard` → http://localhost:4321
-- `scripts/install-agents.sh`: installs or reloads the launchd agents
 
 ## Code style
 

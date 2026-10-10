@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: Indirect ("what if you just paste in the list and it quizzes you"): a flashcard page that repeats missed cards.
+[14:12:05] Did you finish the bio packet?
+[14:12:08] Half. The vocab part is killing me, there's like sixty terms.
+[14:12:13] Mitosis, my toe sis. I keep mixing up the phases.
+[14:12:18] I made paper ones last time and lost them in my locker.
+[14:12:23] Okay but what if, like, you just paste in the list, term comma definition, and it quizzes you. Shows the term, you flip it, you say if you got it or not.
+[14:12:35] And it keeps showing you the ones you missed.
+[14:12:38] Yeah, till you get them all. I could make that be a web page, I think. For the phone.
+[14:12:44] Would you actually though.
+[14:12:46] I mean I want it. The quiz is Thursday.
+[14:12:50] Shh, he's looking over here.
+[14:12:53] What page are we on?

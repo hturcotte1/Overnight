@@ -1,0 +1,24 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: media
+# note: Play-by-play from a sports broadcast; nobody in the room is wishing for anything.
+[19:44:10] Third and six for Ridgeview at their own thirty eight.
+[19:44:14] They've got to throw here, you'd think.
+[19:44:17] Shotgun snap. He's got time. Looks left, throws over the middle, caught!
+[19:44:23] And he's dragged down at the forty nine. That'll be enough for the first down.
+[19:44:28] Nice route by the sophomore, number eighty one. He's had a night.
+[19:44:33] Seven catches now, by my count.
+[19:44:36] Clock is running. Four twelve to go in the third quarter, Lakeside still up by three.
+[19:44:42] You're listening to Friday night football on your home for valley sports.
+[19:44:47] First and ten. Handoff up the gut, gain of maybe two.
+[19:44:52] Lakeside's front four has been solid all night.
+[19:44:55] Flag on the play.
+[19:45:01] Holding, on the offense. That's going to bring it back ten.
+[19:45:06] And that's the third one on that left side tonight.
+[19:45:10] Coach is not happy. You can hear him from up here.
+[19:45:14] So first and twenty now from the Ridgeview forty one.
+[19:45:19] While they sort that out, a reminder that tonight's game is brought to you by the valley farm supply, serving growers since nineteen sixty two.
+[19:45:28] Good people over there.
+[19:45:30] Back to the action. Quick snap, screen pass to the right, and he's got blockers!
+[19:45:36] Thirty five, thirty, pushed out of bounds at the Lakeside twenty eight.
+[19:45:41] What a call. They got all of that back and then some.

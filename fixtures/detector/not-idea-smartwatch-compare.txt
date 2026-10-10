@@ -1,0 +1,16 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: existing-product
+# note: Comparing two smartwatches that already exist; product talk only.
+[15:08:30] Is that the new one?
+[15:08:32] The Garmin, yeah. I switched from the Apple Watch.
+[15:08:36] Why? I thought you liked it.
+[15:08:38] Battery. This goes like ten days. The other one I was charging every night.
+[15:08:44] But can you answer texts on it?
+[15:08:47] Sort of. Canned replies. It's not as good for that.
+[15:08:51] See I'd miss that. And the tap to pay.
+[15:08:54] This has pay too, my bank just doesn't support it.
+[15:08:58] So it doesn't have pay.
+[15:09:00] For me it doesn't have pay.
+[15:09:03] How's the sleep tracking?
+[15:09:05] Tells me I sleep badly. I knew that.

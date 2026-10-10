@@ -1,0 +1,14 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: media
+# note: A YouTube product review playing nearby; the reviewer's "it should just be a simple page" is part of the video.
+[21:15:03] What's up everybody, welcome back to the channel.
+[21:15:06] Today we are finally unboxing the Vanta Buds Pro. A lot of you have been asking for this one.
+[21:15:13] Full disclosure, the company sent these over, but they are not paying for this video and they don't get to see it first.
+[21:15:20] So in the box you've got the case, three sizes of tips, and a very short cable.
+[21:15:26] Battery life they're claiming nine hours. I got closer to seven.
+[21:15:31] The companion app is honestly where this falls down. It asks you to make an account just to change the equalizer.
+[21:15:39] Come on. It should just be a simple page with five sliders, no login. Somebody fix that.
+[21:15:46] Noise cancelling though, really good. Like top three I've tested this year.
+[21:15:52] If this is helping you out, hit that like button and subscribe, it really does help the channel.
+[21:15:58] Okay. Let's talk about the microphone.

@@ -54,7 +54,8 @@ const schema = z.object({
   MAX_BUILDS_PER_NIGHT: z.preprocess(blankToUndefined, intInRange(2, 0, 10)),
   BUILD_TIMEOUT_MIN: z.preprocess(blankToUndefined, intInRange(45, 1, 240)),
   WRITE_BEE_FACTS: z.preprocess(blankToUndefined, bool(true)),
-  PAUSED: z.preprocess(blankToUndefined, bool(false)),
+  // Quiet until told otherwise: a fresh install listens and detects but never buzzes a wrist.
+  PAUSED: z.preprocess(blankToUndefined, bool(true)),
 });
 
 export interface Config {
@@ -90,8 +91,11 @@ export function parseConfig(env: Record<string, string | undefined>): Config {
     throw new ConfigError(`Bad setting. ${problems}`);
   }
   const value = parsed.data;
+  const dataDir = expandHome(value.OVERNIGHT_DATA_DIR ?? path.join(homedir(), ".overnight"));
+  // A relative path would mean a different folder depending on where a command is run from.
+  if (!path.isAbsolute(dataDir)) throw new ConfigError("Bad setting. OVERNIGHT_DATA_DIR: must be a full path or start with ~/");
   return {
-    dataDir: path.resolve(expandHome(value.OVERNIGHT_DATA_DIR ?? path.join(homedir(), ".overnight"))),
+    dataDir: path.resolve(dataDir),
     githubPagesRepo: value.GITHUB_PAGES_REPO,
     timeZone: value.TZ,
     askCutoff: value.ASK_CUTOFF,

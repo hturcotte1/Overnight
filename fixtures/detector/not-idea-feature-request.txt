@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: near-miss
+# note: Feature requests for apps that already exist (Spotify, a maps app); not a new tool.
+[08:12:30] This playlist is all over the place.
+[08:12:33] It's on shuffle.
+[08:12:35] I know it's on shuffle. I wish Spotify would let you say shuffle but keep the albums together. Like play a whole album, then jump to a random other one.
+[08:12:45] Doesn't it do that?
+[08:12:47] Not that I can find. They should add a button. It can't be that hard.
+[08:12:52] Write them a review.
+[08:12:54] I did. Two stars. And I want the maps one to warn me before a toll road, not after I'm on it.
+[08:13:01] There's a setting for that.
+[08:13:03] Is there?
+[08:13:04] Avoid tolls. Under routes.
+[08:13:07] Huh. Okay, that one's on me.

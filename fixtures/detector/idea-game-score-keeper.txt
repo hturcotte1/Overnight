@@ -1,0 +1,16 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "Why isn't there a score pad for this on the phone?": players, rounds and running totals on one device.
+[20:15:09] Okay who's keeping score?
+[20:15:11] Not me, I can't add.
+[20:15:13] Where's the pad that comes in the box?
+[20:15:16] We used the last sheet at Thanksgiving.
+[20:15:19] So it's the back of an envelope again.
+[20:15:22] Why isn't there a score pad for this on the phone? You put in the players, and every round you tap in what each person got and it keeps the running total.
+[20:15:33] And tells you who's winning so nobody has to ask.
+[20:15:36] And who deals next.
+[20:15:38] That's getting fancy. Players, rounds, totals.
+[20:15:42] I'd take it. Okay, envelope. Everybody starts at zero.
+[20:15:46] I'm blue.
+[20:15:47] You're always blue. Shuffle.

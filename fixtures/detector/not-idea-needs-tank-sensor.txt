@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: not-buildable
+# note: Needs a water-level sensor, power and a phone signal out in a pasture; hardware, not a web page.
+[06:20:14] Tank in the far pasture was bone dry again.
+[06:20:17] The float stuck?
+[06:20:19] Float stuck. They'd been without since who knows when.
+[06:20:23] That's a long drive to check a float.
+[06:20:25] Twenty minutes each way, twice a day. It'd be cool if the tank just told my phone when the level drops. A little alert. Tank three is low, go look.
+[06:20:35] You'd need something sitting in the water. And a signal out there.
+[06:20:39] There's one bar by the gate.
+[06:20:41] And a battery, or a little solar panel.
+[06:20:44] I know, I know. It's a whole project.
+[06:20:47] Co-op might sell something.
+[06:20:49] I'll ask Thursday. Hand me the wrench.

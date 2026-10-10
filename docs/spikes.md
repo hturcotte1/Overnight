@@ -293,6 +293,28 @@ Checked in a real browser too: the page loaded its script through the relative p
 - Publishing takes roughly 20 to 60 seconds. Deliver should poll the page for content unique to the new build (not just a 200), with a timeout of a few minutes. `gh api repos/<owner>/<repo>/pages/builds/latest` gives `status` (`building`, then `built`) and `duration` in milliseconds as a second signal.
 - The default `gh auth login` scopes (`repo`, `read:org`, `gist`) were enough to create the repo, push and enable Pages.
 
+## Extra checks before Milestone 1 (2026-10-09)
+
+Three small questions the listener's design depends on, answered on this Mac:
+
+| Question | Answer |
+|---|---|
+| Can a macOS background job (LaunchAgent) read this repo, which lives in `~/Documents`, and use the Bee login in the Keychain? | **Yes to both.** A one-off test job read a repo file and ran `bee me` with exit code 0, with no permission prompt. Its `PATH` was only `/usr/bin:/bin:/usr/sbin:/sbin`, so every program must be given by full path. |
+| Do utterance ids on the stream match the ids in Bee's stored transcript? | **No.** Stream ids match the *realtime* transcription inside the `COMPLETED` event (32 of 32). `bee conversations transcript` returns only the *final* transcription, whose ids are all different (0 of 32 in common). So lines recovered after a disconnect can't be matched to saved lines by id; the listener compares time and text instead. |
+| Does `bee conversations get` include the conversation's uuid? | **No**, only the numeric id. The uuid-to-id link only ever arrives on the stream, so the store lets a conversation be known by either id and merges the two when it learns they're the same. |
+
+## What building Milestone 1 added (2026-10-09)
+
+Found while building and reviewing the listener, each checked read-only against the real tools:
+
+- **`bee todos list --limit 20`** returns `{ todos: [{ id, text, completed, created_at, alarm_at, corrections }], next_cursor, timezone }`, newest first, completed ones included. We use it to find a to-do whose creation reply was lost.
+- **Real Bee error texts** the Bee package now relies on: `Unable to connect. Is the computer able to access the url?` (offline or wrong host), `The socket connection was closed unexpectedly...` (dropped connection), `Request failed with status 503` (server error). Only the first, and a 4xx status, prove that nothing happened on Bee's side.
+- **`bee conversations transcript --since`** means "spoken at or after", and is applied after the whole transcript has been downloaded, so it saves no network time. Stored lines carry `spoken_at` as epoch milliseconds; stream lines carry it as an ISO string.
+- **One stream asking for five event types** connects in about 260 ms and closes cleanly. Whether all five types really arrive on it while someone is talking is checked by the first real quiet-mode run.
+- **`kiro-cli whoami`** exits 0 and prints the sign-in method and the account's email address when signed in. We use the exit code and never keep the output.
+- **First real run of the listener, in quiet mode** (no one was speaking): Bee login checked, one stream with five event types opened and connected in about a second, the first catch-up call saved a starting cursor, and the detector's set-up passed (Kiro signed in, both sharing settings switched off in its own settings folder). The same thing then worked as a launchd background job, including `kiro-cli` under launchd's bare environment. A hand-run listener and the background job were briefly started together: the second one refused to start, and took over within 20 seconds of the first one stopping. A stop signal ended the listener in under a second.
+- **Detector on the golden set** (66 synthetic transcripts, `claude-haiku-4.5`, one run after the last prompt change): 24 of 24 ideas asked, 0 of 42 non-ideas asked, precision 1.00, recall 1.00, 63 seconds, about 1.1 Kiro credits. Earlier runs on 64 transcripts scored 0.88, 0.88 and 0.96 precision with recall 1.00 each time, so expect some run-to-run variation. In the last run 13 replies had a word-for-word quote longer than the 25-word limit; we cut those in code.
+
 ## Decisions that came out of the spikes
 
 1. **How the nightly Kiro Crew job is allowed to work** (finding 2). **Decided on Oct 9:** that one job gets `--approval-mode auto`, Crew's documented setting for unattended jobs, and Crew's sandbox is raised to its `strict` level at the same time. No other Crew setting changes. (The alternative, leaving every Crew setting alone and having Crew only start our own `kiro-cli` builder, was the weaker Kiro Crew story and no safer.)

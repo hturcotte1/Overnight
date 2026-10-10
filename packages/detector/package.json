@@ -1,0 +1,13 @@
+{
+  "name": "@overnight/detector",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@overnight/core": "*",
+    "zod": "4.6.5"
+  }
+}

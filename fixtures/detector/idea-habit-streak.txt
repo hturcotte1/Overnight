@@ -1,0 +1,16 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: An indirect plan ("I keep meaning to make myself a little streak thing"): one button and a day counter.
+[06:42:18] Did you do your stretches?
+[06:42:20] Yesterday I did.
+[06:42:22] And the day before?
+[06:42:24] No comment.
+[06:42:26] The physical therapist said every day or it doesn't count.
+[06:42:30] I know. I do better when I can see it. Remember the calendar with the stickers?
+[06:42:35] From when you quit soda.
+[06:42:37] That worked. I keep meaning to make myself a little streak thing. One button, did it today, and it shows the chain of days. If I miss one it goes back to zero and I feel bad.
+[06:42:49] On your phone.
+[06:42:50] Just a page I keep open. I don't need it to nag me, I just need to see the number.
+[06:42:56] So do them now and that's day one.
+[06:42:59] After coffee.

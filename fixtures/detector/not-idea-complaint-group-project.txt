@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: complaint
+# note: A complaint about a group project partner; no product anywhere.
+[13:55:10] Did Tyler send his part?
+[13:55:13] No. He said last night, then he said this morning.
+[13:55:17] It's due at three.
+[13:55:19] I know when it's due. I did the intro, I did the charts, I did the whole conclusion.
+[13:55:25] I did the sources.
+[13:55:27] You did the sources. And he's going to get the same grade as us.
+[13:55:32] It's every time. Group projects are the worst.
+[13:55:36] Should we tell her?
+[13:55:38] She'll just say work it out as a team.
+[13:55:41] So we write his part.
+[13:55:43] So we write his part. Again. I'm so mad.

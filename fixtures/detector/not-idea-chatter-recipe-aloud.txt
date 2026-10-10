@@ -1,0 +1,18 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: chatter
+# note: A recipe read aloud while cooking; ordinary kitchen talk.
+[17:02:30] Okay read it to me.
+[17:02:32] Two pounds of chuck, cut in one inch cubes.
+[17:02:36] Done.
+[17:02:37] Brown the meat in batches, don't crowd the pan.
+[17:02:41] It's crowded. It's fine.
+[17:02:43] Then one large onion, diced, three cloves of garlic, two tablespoons of tomato paste.
+[17:02:50] Slow down. Onion. Garlic. How much paste?
+[17:02:54] Two tablespoons. Then a cup of red wine, scrape up the brown bits.
+[17:02:59] We don't have red.
+[17:03:01] It says or beef stock.
+[17:03:03] Stock then.
+[17:03:05] Add the carrots and potatoes, bay leaf, cover and simmer for two hours.
+[17:03:11] Two hours. So we eat at eight.
+[17:03:14] We eat at eight.

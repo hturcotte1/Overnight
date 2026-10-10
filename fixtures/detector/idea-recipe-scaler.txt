@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "Why isn't there a thing where" you paste ingredients and halve or double them; conversion math only.
+[18:03:20] Okay it says two and a quarter cups of flour but I'm doing half.
+[18:03:25] So one and an eighth?
+[18:03:27] One cup and two tablespoons. I think. And then three quarters teaspoon of baking soda in half is...
+[18:03:35] Three eighths. Good luck measuring that.
+[18:03:38] And this other one's in grams. A hundred and seventy grams of butter, what is that in sticks?
+[18:03:44] Uh. One and a half?
+[18:03:46] Why isn't there a thing where you paste the ingredients in, hit half or double, and it redoes all the amounts for you? And flips grams to cups while it's at it.
+[18:03:57] There's probably something.
+[18:03:59] Everything I find is buried under somebody's life story and ads. I want one box and a button.
+[18:04:05] Preheat's done.
+[18:04:07] Okay. Hand me the brown sugar. It says pact.

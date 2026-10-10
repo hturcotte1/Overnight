@@ -1,0 +1,12 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: media
+# note: A radio advert pitching a made-up budgeting app; scripted media audio, not a person's wish.
+[07:55:30] Do you ever get to the end of the month and wonder where it all went?
+[07:55:35] I used to. Then I found Tallybird.
+[07:55:39] Tallybird is the app that shows every dollar in one place, so you can stop guessing and start saving.
+[07:55:47] Set a goal, track your spending, and get a friendly nudge before you go over.
+[07:55:53] Download Tallybird today and get your first three months free with the code radio.
+[07:55:59] That's Tallybird. Your money, finally making sense.
+[07:56:04] Terms apply. See site for details.
+[07:56:07] Traffic and weather together on the eights, coming up next.

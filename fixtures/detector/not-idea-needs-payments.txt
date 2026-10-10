@@ -1,0 +1,14 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: not-buildable
+# note: A real wish, but it needs card payments, a card reader and a bank account; not a static page.
+[10:12:05] How'd the egg stand do this week?
+[10:12:08] Sold out by Thursday. But the cash box was eleven dollars short again.
+[10:12:13] People don't carry cash.
+[10:12:15] That's what they all say. I wish there was an app where they just tap their card at the stand and it goes straight to my account. And it texts me when somebody buys.
+[10:12:26] You'd need one of those card readers.
+[10:12:28] And it'd have to take a cut, I suppose. And know who paid.
+[10:12:32] Or put up a sign with your number and trust them.
+[10:12:36] I've been trusting them. That's how I'm eleven dollars short.
+[10:12:40] Ha. Fair.
+[10:12:42] Anyway. I've got four dozen more in the fridge if you want some.

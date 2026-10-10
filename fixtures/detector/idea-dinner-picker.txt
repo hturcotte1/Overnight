@@ -1,0 +1,18 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "Someone should build a thing" that picks dinner from a saved list of usual places, one veto each.
+[17:51:10] So what do you want for dinner.
+[17:51:13] I don't care. Whatever you want.
+[17:51:16] Don't do that. Thai?
+[17:51:18] We had Thai Sunday.
+[17:51:20] See, you do care. Pizza.
+[17:51:23] Mm. No.
+[17:51:25] We have this exact conversation every night at this exact light.
+[17:51:30] Someone should build a thing where you put in your, like, seven usual places and it just picks one. And each of us gets one veto.
+[17:51:39] One veto.
+[17:51:41] One. Then you eat what it says. No take backs.
+[17:51:45] And it shouldn't pick the same place twice in a week.
+[17:51:48] Sure, fine, it remembers the last few.
+[17:51:51] Okay so what do you want tonight though.
+[17:51:54] I don't care.

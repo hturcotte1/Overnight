@@ -1,0 +1,16 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "I wish there was just a timer" with work, rest and rounds; a one-page interval timer.
+[06:14:02] How many more?
+[06:14:04] Three rounds. Thirty on, fifteen off.
+[06:14:08] Were you counting that last one? That felt like a minute.
+[06:14:12] I'm looking at the wall clock, it doesn't have a second hand.
+[06:14:16] Use your phone.
+[06:14:18] The app I had wants a subscription now. For a timer.
+[06:14:23] Hah.
+[06:14:25] I wish there was just a timer where I punch in work thirty, rest fifteen, eight rounds, and it's huge numbers and it beeps. Green when you go, red when you rest.
+[06:14:36] That's all you need.
+[06:14:38] That's all anybody needs. Okay. Ready?
+[06:14:42] No.
+[06:14:43] Go.

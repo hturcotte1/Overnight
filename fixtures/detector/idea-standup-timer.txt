@@ -1,0 +1,16 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "What if there was a page I put up on the big screen": a per-person countdown for a daily team meeting.
+[09:28:40] Stand up went twenty five minutes again.
+[09:28:43] It's supposed to be ten.
+[09:28:45] It's supposed to be ten. And I'm the one who has to cut people off, which I hate.
+[09:28:51] Blame the clock.
+[09:28:53] That's actually, hm. What if there was a page I put up on the big screen. You tell it eight people, ninety seconds each, and there's a bar that runs down and it says person three of eight.
+[09:29:06] And a buzzer.
+[09:29:08] A polite buzzer. Then it's not me being rude, it's the page.
+[09:29:12] Would you really use it though?
+[09:29:14] Tomorrow. I would use it tomorrow morning.
+[09:29:18] Okay. I'd try it.
+[09:29:20] Did you see the thing about the parking passes?
+[09:29:23] The email? Yeah. Ridiculous.

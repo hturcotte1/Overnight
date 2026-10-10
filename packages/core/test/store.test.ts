@@ -69,6 +69,17 @@ describe("utterances and detector runs", () => {
     expect(store.pendingUtterances(key).map((u) => u.text)).toEqual(["four"]);
   });
 
+  it("finds nearby lines across conversations and knows when the newest line arrived", () => {
+    expect(store.newestUtteranceReceivedAt()).toBeNull();
+    const a = store.resolveConversation({ uuid: "u-a" }, T0);
+    const b = store.resolveConversation({ beeId: 9 }, T0);
+    store.insertUtterance({ beeUtteranceId: 1, conversationKey: a.key, text: "same words", spokenAt: at(10), receivedAt: at(12), source: "stream" });
+    store.insertUtterance({ beeUtteranceId: null, conversationKey: b.key, text: "same words", spokenAt: at(11), receivedAt: at(90), source: "backfill" });
+    expect(store.utterancesSpokenNear(at(10), 3000).map((u) => u.conversationKey)).toEqual([a.key, b.key]);
+    expect(store.utterancesSpokenNear(at(100), 3000)).toEqual([]);
+    expect(store.newestUtteranceReceivedAt()).toBe(at(90));
+  });
+
   it("finds lines spoken close to a moment", () => {
     const { key } = store.resolveConversation({ uuid: "u-1" }, T0);
     store.insertUtterance({ beeUtteranceId: 1, conversationKey: key, text: "near", spokenAt: at(10), receivedAt: at(12), source: "stream" });
@@ -143,5 +154,39 @@ describe("small values", () => {
     store.setValue("cursor", "v1-1", T0);
     store.setValue("cursor", "v1-2", at(1));
     expect(store.getValue("cursor")).toBe("v1-2");
+  });
+});
+
+describe("database upgrades", () => {
+  it("brings an older database up to date and keeps its data", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const { default: Database } = await import("better-sqlite3");
+    const dir = mkdtempSync(path.join(tmpdir(), "overnight-store-"));
+    try {
+      const file = path.join(dir, "overnight.db");
+      const first = new Store(file);
+      const { key } = first.resolveConversation({ uuid: "u-1" }, T0);
+      first.insertUtterance({ beeUtteranceId: 1, conversationKey: key, text: "kept", spokenAt: at(1), receivedAt: at(2), source: "stream" });
+      first.close();
+
+      // Pretend the file was written before the spoken_at index existed.
+      const raw = new Database(file);
+      raw.exec("DROP INDEX utterances_by_spoken_at");
+      raw.pragma("user_version = 1");
+      raw.close();
+
+      const upgraded = new Store(file);
+      expect(upgraded.utterancesSpokenNear(at(1), 1000).map((u) => u.text)).toEqual(["kept"]);
+      upgraded.close();
+      const check = new Database(file, { readonly: true });
+      expect(check.pragma("user_version", { simple: true })).toBe(2);
+      const plan = check.prepare("EXPLAIN QUERY PLAN SELECT * FROM utterances WHERE spoken_at BETWEEN ? AND ? ORDER BY spoken_at, id").all("a", "b") as Array<{ detail: string }>;
+      expect(plan.map((row) => row.detail).join(" ")).toContain("utterances_by_spoken_at");
+      check.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

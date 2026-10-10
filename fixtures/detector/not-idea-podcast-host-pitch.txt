@@ -1,0 +1,14 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: media
+# note: Podcast audio: a host says "someone should build an app" on air. It is media, so no ask.
+[08:31:02] And we're back. This is episode two hundred and six of the Side Door show, I'm your host, and my guest is still stuck with me.
+[08:31:10] Happily stuck.
+[08:31:12] So before the break you were telling our listeners about the worst part of running a food truck.
+[08:31:18] Parking. It's always parking. Every city has different rules, different hours.
+[08:31:24] You know, someone should build an app that just tells you where you're allowed to park the truck today. I'd pay for that.
+[08:31:32] If any of your listeners want to build it, call me.
+[08:31:35] You heard it here first, folks. Send us your pitch at the address in the show notes.
+[08:31:41] Okay. Let's talk money. Year one, what did you clear?
+[08:31:46] Year one I lost eleven thousand dollars.
+[08:31:49] Wow. We'll dig into that right after a word from our sponsor.

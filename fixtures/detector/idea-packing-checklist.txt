@@ -1,0 +1,17 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "You know what I'd use?" then a tick-and-reset packing list; saving it on the phone is enough.
+[07:48:12] Did you get the stove?
+[07:48:14] It's in the blue bin. I think.
+[07:48:17] You think. Last time we drove two hours without the tent poles.
+[07:48:22] That was one time.
+[07:48:24] And the lighter. And the dog's leash the time before that.
+[07:48:29] Okay, fair.
+[07:48:31] You know what I'd use? A checklist that just remembers the camping list. You tick things off as they go in the car, and next trip you hit reset and it's all unticked again.
+[07:48:44] I have it in my notes somewhere.
+[07:48:47] Yeah and every time you delete the lines when you check them. I want it to stay.
+[07:48:52] Hm. And like a separate list for the lake versus the mountains.
+[07:48:56] Sure. Two lists. That's it.
+[07:48:59] Okay, cooler. Is the ice in the cooler?
+[07:49:02] Ice is last. Ice is always last.

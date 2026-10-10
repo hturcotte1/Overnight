@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: joke
+# note: An obviously absurd "million dollar idea" (a dating app where the dogs swipe), told for laughs.
+[21:40:15] Okay, million dollar idea. You ready?
+[21:40:18] No.
+[21:40:19] It's a dating app, but for people's dogs. The dogs swipe.
+[21:40:24] With their paws.
+[21:40:26] With their noses. And if two dogs match, the owners have to get married. It's in the terms of service.
+[21:40:33] Nobody reads those.
+[21:40:35] Exactly! That's the business model.
+[21:40:38] You should quit your job.
+[21:40:40] I'm putting in my notice Monday. You want in? Ten percent.
+[21:40:45] I want another basket of wings is what I want.
+[21:40:48] Twelve percent. Final offer.

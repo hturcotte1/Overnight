@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: joke
+# note: Banter: a cat-translator "app" that nobody means, traded back and forth as punchlines.
+[19:12:30] He's yelling at the wall again.
+[19:12:33] He's been yelling at that wall for an hour.
+[19:12:36] Someone should build an app that translates cat. You hold the phone up and it tells you what he wants.
+[19:12:43] It'd just say food. Every time. Food. Food. Open the door. Food.
+[19:12:49] Close the door.
+[19:12:50] Open the door again. I hate you. Food.
+[19:12:54] Premium version tells you why he knocked the glass off the table.
+[19:12:59] There is no why.
+[19:13:01] Nine ninety nine a month for there is no why.
+[19:13:05] I'd pay it.
+[19:13:07] Okay I'm feeding him, I can't listen to this.

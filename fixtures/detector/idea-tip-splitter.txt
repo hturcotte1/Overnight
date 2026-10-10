@@ -1,0 +1,16 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "Why isn't there a dead simple page" for splitting a bill with a drinks tick box; pure arithmetic.
+[20:41:07] Did you want the rest of these fries?
+[20:41:10] No, go ahead. Oh, here comes the check.
+[20:41:15] Okay. So it's a hundred and forty two, and there's, what, five of us.
+[20:41:20] But Dana and me didn't drink.
+[20:41:23] Right, right. Ugh. I hate this part.
+[20:41:27] Just do it even.
+[20:41:29] No that's not fair, the wine was like sixty bucks.
+[20:41:34] Why isn't there a dead simple page for this? Like you type the total, the tip, how many people, and then you tick who had drinks and it gives everybody their number.
+[20:41:45] My calculator can't do the drinks part.
+[20:41:48] Yeah. Exactly. Just one screen, nothing to sign up for.
+[20:41:52] Okay I'm putting in twenty percent. Does anybody have cash?
+[20:41:56] I've got a ten.

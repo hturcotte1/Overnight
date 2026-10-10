@@ -1,0 +1,9 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: A brief "somebody should make a page" for a barbell plate calculator, said once in a short gym clip.
+[17:36:50] What's two twenty five again? Is that two plates or two and a quarter?
+[17:36:55] Two plates a side.
+[17:36:57] I can never do the math under the bar. Somebody should make a page where you type the weight and it draws which plates go on each side.
+[17:37:06] It's just forty five times, you know what, never mind.
+[17:37:10] Spot me?

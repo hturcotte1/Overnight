@@ -1,7 +1,9 @@
 import { homedir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { ConfigError, dataPaths, parseConfig } from "../src/index.ts";
+import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { ConfigError, dataPaths, ensureDataDirs, parseConfig } from "../src/index.ts";
 
 describe("config", () => {
   it("uses the spec defaults when nothing is set", () => {
@@ -17,7 +19,7 @@ describe("config", () => {
       maxBuildsPerNight: 2,
       buildTimeoutMin: 45,
       writeBeeFacts: true,
-      pausedByDefault: false,
+      pausedByDefault: true,
     });
   });
 
@@ -26,10 +28,10 @@ describe("config", () => {
   });
 
   it("reads overrides", () => {
-    const config = parseConfig({ OVERNIGHT_DATA_DIR: "~/somewhere", MAX_ASKS_PER_DAY: "1", PAUSED: "true", ASK_CUTOFF: "22:30" });
+    const config = parseConfig({ OVERNIGHT_DATA_DIR: "~/somewhere", MAX_ASKS_PER_DAY: "1", PAUSED: "false", ASK_CUTOFF: "22:30" });
     expect(config.dataDir).toBe(path.join(homedir(), "somewhere"));
     expect(config.maxAsksPerDay).toBe(1);
-    expect(config.pausedByDefault).toBe(true);
+    expect(config.pausedByDefault).toBe(false);
     expect(config.askCutoff).toBe("22:30");
   });
 
@@ -41,8 +43,26 @@ describe("config", () => {
     expect(() => parseConfig({ PAUSED: "yes" })).toThrow("PAUSED");
   });
 
+  it("refuses a data folder that is not a full path", () => {
+    expect(() => parseConfig({ OVERNIGHT_DATA_DIR: "overnight-data" })).toThrow("OVERNIGHT_DATA_DIR");
+    expect(() => parseConfig({ OVERNIGHT_DATA_DIR: "./data" })).toThrow(ConfigError);
+    expect(parseConfig({ OVERNIGHT_DATA_DIR: "/tmp/overnight-x" }).dataDir).toBe("/tmp/overnight-x");
+  });
+
   it("keeps every data path under the data folder", () => {
     const paths = dataPaths("/tmp/overnight-test");
     for (const value of Object.values(paths)) expect(value.startsWith("/tmp/overnight-test")).toBe(true);
+  });
+
+  it("makes the data folders private even when they already existed with open permissions", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "overnight-paths-"));
+    try {
+      const paths = dataPaths(path.join(root, "data"));
+      mkdirSync(paths.logs, { recursive: true, mode: 0o755 });
+      ensureDataDirs(paths);
+      for (const dir of [paths.root, paths.logs, paths.ideas]) expect(statSync(dir).mode & 0o777).toBe(0o700);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

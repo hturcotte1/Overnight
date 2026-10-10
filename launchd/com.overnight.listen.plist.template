@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Overnight's always-on listener, as a macOS background job (a "LaunchAgent").
+  This is a template: scripts/install-agents.sh replaces the names written in capitals between
+  double underscores with real paths, and puts the result in
+  ~/Library/LaunchAgents/com.overnight.listen.plist. Do not install this file by hand.
+
+  Background jobs do not read shell profiles. Their PATH is /usr/bin:/bin:/usr/sbin:/sbin, so
+  node is called by its full path and its folder is added to PATH here.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.overnight.listen</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__REPO__/packages/cli/src/main.ts</string>
+    <string>listen</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__NODE_DIR__:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+
+  <!-- Start at login, and start again if it ever stops, but not more than once every 30 seconds. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <!--
+    When macOS stops the job (uninstall, restart, logout) it asks first, and ends it by force only
+    if it is still there after this many seconds. The listener stops within about 10 seconds: it
+    closes the Bee stream and lets the check in progress finish.
+  -->
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+
+  <!--
+    The listener writes its own log, logs/listen.log, and as a background job prints nothing else.
+    This second file catches what is printed outside that log: a crash, or a bad setting that
+    stopped it before it could start.
+  -->
+  <key>StandardOutPath</key>
+  <string>__DATA_DIR__/logs/listen.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__DATA_DIR__/logs/listen.launchd.log</string>
+</dict>
+</plist>

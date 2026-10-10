@@ -1,0 +1,14 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: task
+# note: Household reminders; the "website for the garage sale" is taken back at once and becomes a post to write.
+[07:31:10] Don't let me forget the permission slip.
+[07:31:13] It's on the counter. I signed it.
+[07:31:16] And I have to text the coach that she'll be late Thursday.
+[07:31:20] Do it now or you won't.
+[07:31:22] I'm driving in two minutes. I'll do it at the office. Can you set up the bill pay for the water? It's due the fifteenth.
+[07:31:30] I'll do it at lunch.
+[07:31:32] And we need to make a website for the garage sale, or, not a website, a post. On the neighborhood group.
+[07:31:39] I'll write the post. You take the pictures.
+[07:31:42] Deal. Keys. Where are my keys.
+[07:31:45] Hook.

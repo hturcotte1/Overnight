@@ -1,0 +1,13 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: complaint
+# note: A problem an app could solve, but nobody wishes for one; it stays a complaint.
+[12:31:05] Did I take my pill this morning?
+[12:31:08] I don't know, did you?
+[12:31:10] I can never remember. I look at the bottle and I honestly can't tell you.
+[12:31:16] Get one of those boxes with the days on it.
+[12:31:19] I have one. I forget to fill it.
+[12:31:22] Well.
+[12:31:23] It's so annoying. Getting old is annoying.
+[12:31:27] You're forty four.
+[12:31:29] It's annoying at forty four.

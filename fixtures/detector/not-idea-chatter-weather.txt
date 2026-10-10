@@ -1,0 +1,16 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: chatter
+# note: Weather and garden small talk; nothing to build.
+[06:05:12] Frost on the windshield this morning.
+[06:05:15] First one. Early this year.
+[06:05:18] Radio said twenty eight by Thursday.
+[06:05:21] Then the tomatoes are done.
+[06:05:23] They've been done. You've just been hoping.
+[06:05:27] There's still green ones.
+[06:05:29] Pick them and put them on the windowsill.
+[06:05:32] I might. Is the wind supposed to pick up?
+[06:05:35] This afternoon. Out of the west, they said, twenty, twenty five.
+[06:05:40] Better tie down the tarp on the wood pile.
+[06:05:43] I'll do it after breakfast.
+[06:05:45] You said that Sunday.

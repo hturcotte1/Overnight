@@ -1,0 +1,14 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: not-buildable
+# note: Needs to scrape other sites around the clock and send texts; a server job, not a static page.
+[12:22:11] Any luck on a truck?
+[12:22:13] Nothing under fifteen that isn't rusted through.
+[12:22:17] You've got to be fast. The good ones are gone in an hour.
+[12:22:21] That's the problem, I can't sit there refreshing all day. What I need is something that checks the listings on, like, all four of those sites every ten minutes and texts me the second a half ton under twelve grand shows up.
+[12:22:35] Within a hundred miles.
+[12:22:37] Within a hundred miles. Runs all night while I sleep.
+[12:22:41] Do those sites let you do that?
+[12:22:43] Probably not. I don't care, I just want the truck.
+[12:22:47] My cousin might be selling his.
+[12:22:49] The white one? That thing's been in a ditch.

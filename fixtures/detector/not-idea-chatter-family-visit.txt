@@ -1,0 +1,26 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: chatter
+# note: Family plans for a weekend visit; nothing about software at all.
+[18:10:05] What time are your folks getting in Saturday?
+[18:10:08] Flight lands at two something. Two forty.
+[18:10:12] So we leave at two.
+[18:10:14] Leave at one forty five, there's the bridge work.
+[18:10:18] Okay. And they're staying till Wednesday?
+[18:10:21] Tuesday night. Dad's got a thing Wednesday.
+[18:10:25] Are we doing the ribs or going out?
+[18:10:28] Ribs Saturday, out Sunday. Mom wants to see the new place by the river.
+[18:10:34] I'll get the ribs Friday then.
+[18:10:36] And the guest room needs sheets.
+[18:10:39] They're in the dryer.
+[18:10:41] Look at you.
+[18:10:43] Is your dad still doing the no salt thing?
+[18:10:46] Supposedly. He'll eat the ribs.
+[18:10:49] He'll eat all the ribs.
+[18:10:52] Should we ask the neighbors over Sunday?
+[18:10:55] Let's see how Saturday goes first.
+[18:10:58] Smart.
+[18:11:00] Did you move the car seats? They'll want to take the kids for ice cream.
+[18:11:05] I'll do it in the morning.
+[18:11:07] You'll do it in the morning.
+[18:11:09] I will do it in the morning.

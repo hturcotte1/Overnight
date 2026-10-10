@@ -1,0 +1,5 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: A whole idea in one seven-word sentence with nothing around it, like the short recording in spike 2.
+[21:07:33] Someone should build a dice roller page.

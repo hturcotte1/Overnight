@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: complaint
+# note: Annoyance at a broken office printer; there is no software wish in it.
+[11:03:22] It's jammed again.
+[11:03:24] Did you open the back?
+[11:03:26] I opened the back, I opened the side, I took the tray out. It says paper jam and there is no paper.
+[11:03:33] Turn it off and on.
+[11:03:35] Twice. This thing has never worked right. Not once since they bought it.
+[11:03:41] It printed for me yesterday.
+[11:03:43] It likes you. I have forty packets to do before two.
+[11:03:47] Use the one upstairs.
+[11:03:49] The one upstairs is out of toner. I swear this whole building is held together with tape.
+[11:03:55] Put in a ticket.
+[11:03:57] I put in a ticket in August.

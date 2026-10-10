@@ -1,5 +1,7 @@
 # SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
 # expect: not_idea
+# category: existing-product
+# note: Opinions about notes apps that already exist; nobody wants a new one.
 [14:30:44] Have you tried that new notes app everyone is talking about?
 [14:30:49] Yeah, the sync is really fast but I do not love the editor.
 [14:30:55] I still think the old one has better search.

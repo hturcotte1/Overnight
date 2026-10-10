@@ -1,0 +1,8 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: A single "it'd be cool if" sentence for a countdown page, in a four-line clip.
+[16:05:40] Forty one days. No wait, forty.
+[16:05:44] It'd be cool if there was just a page with a giant number on it, days until the lake house, and the kids could look at that instead of asking me.
+[16:05:53] They'd still ask you.
+[16:05:55] Probably. Pass me that tape?

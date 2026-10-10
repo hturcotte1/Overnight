@@ -1,5 +1,5 @@
 // Where Overnight keeps its data. Always outside the repo (default ~/.overnight), never committed.
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
 export interface DataPaths {
@@ -34,5 +34,11 @@ export function dataPaths(dataDir: string): DataPaths {
 export function ensureDataDirs(paths: DataPaths): void {
   for (const dir of [paths.root, paths.logs, paths.ideas, paths.workspaces, paths.reports, paths.screenshots, paths.detectorKiroHome, paths.detectorCwd]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // mkdir's mode only applies to folders it creates; an older folder may be open to others.
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      // Not ours to change. The files inside are still created private.
+    }
   }
 }

@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: not-buildable
+# note: A sincere wish that needs sign-ins and live sync between several phones, so it needs a backend.
+[18:45:20] Did you get milk?
+[18:45:22] You didn't say milk.
+[18:45:24] I wrote it on the list.
+[18:45:26] The list on the fridge. I was at the store.
+[18:45:29] Okay, see, this is what I want. One grocery list that's on both our phones, and your mom's, and when I add milk at home it pops up on yours while you're standing in the aisle.
+[18:45:40] With a ding.
+[18:45:41] With a ding. And everybody signs in so it shows who added what.
+[18:45:46] So we all need an account.
+[18:45:48] I guess. Whatever it takes so it's the same list everywhere, instantly.
+[18:45:53] I can go back out.
+[18:45:55] No, it's fine. We'll have toast.

@@ -1,0 +1,14 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: not-buildable
+# note: The wish depends on tracking other people's phones and using their contact details.
+[16:30:02] Half the team didn't show Saturday. Nobody told me.
+[16:30:06] Did you send the email?
+[16:30:08] I sent the email. Nobody reads the email.
+[16:30:11] So what do you want to do?
+[16:30:13] Honestly? I want an app where I can see where every kid's parent is on a map before practice. Like, their phones. So I know who's actually on the way.
+[16:30:23] You want to track the parents.
+[16:30:25] Just on practice days! And pull their numbers from the league sign up sheet so it can text them automatically.
+[16:30:32] Yeah, I don't think you get to do that.
+[16:30:35] I know. I know. I just want to know who's coming.
+[16:30:39] Bring fewer cones.

@@ -1,0 +1,14 @@
+{
+  "name": "@overnight/bee",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@beeai/cli": "0.7.3",
+    "@overnight/core": "*",
+    "zod": "4.6.5"
+  }
+}

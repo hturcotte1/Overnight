@@ -1,0 +1,17 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "What I want is a page where I type in the lengths": a cut-list calculator for the shop, math only.
+[10:20:33] Hold that end. Higher.
+[10:20:36] Got it.
+[10:20:38] Okay so I need four at thirty one and a half, six at twenty two, and two at fourteen.
+[10:20:45] Out of eight footers?
+[10:20:47] Out of eight footers. And every time I stand here doing this on a scrap with a pencil and I still come home one board short.
+[10:20:56] Or three boards over.
+[10:20:58] Or that. What I want is a page where I type in the lengths I need and how long the stock is, and it tells me how many boards to buy and which cuts come out of which board.
+[10:21:10] With the blade width.
+[10:21:12] With the curve, yeah, an eighth per cut. Good call.
+[10:21:16] That'd save you a trip.
+[10:21:18] It'd save me forty bucks a project. Okay. Mark it at thirty one and a half.
+[10:21:23] Measure twice.
+[10:21:24] I'm measuring. I'm measuring.

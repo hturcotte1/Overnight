@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "It'd be really nice to have a thing" that works a baking schedule backwards from when you want to eat.
+[21:08:15] Are you feeding that thing again?
+[21:08:18] It's a starter, it has a name, and yes.
+[21:08:22] It's nine at night.
+[21:08:24] Because I messed up the timing. If I want bread out of the oven at noon Saturday I had to start, like, yesterday morning. I can never work it backwards.
+[21:08:35] Write it down.
+[21:08:37] I do, every time, and every time it's different because of when I want it done. It'd be really nice to have a thing where you say when you want to eat it and it lays out the whole schedule backwards. Feed at this time, mix at this time, fold, fridge, bake.
+[21:08:53] Like a train timetable.
+[21:08:55] For bread. Yes. Just the times on one page.
+[21:08:59] Mm hm.
+[21:09:01] You're not listening.
+[21:09:02] I'm listening. Train bread. Did you lock the back door?

@@ -1,14 +1,14 @@
 # Product feedback
 
-Feedback on every tool, API and SDK Overnight uses. The hackathon requires this for each one. Each section answers the same five questions. Specific surprises, with steps, live in [friction-log.md](friction-log.md) (entries F-001 to F-023); test results live in [spikes.md](spikes.md).
+Feedback on every tool, API and SDK Overnight uses. The hackathon requires this for each one. Each section answers the same five questions. Specific surprises, with steps, live in [friction-log.md](friction-log.md) (entries F-001 to F-032); test results live in [spikes.md](spikes.md).
 
-Last updated: 2026-10-09, at the end of Milestone 0 (spikes). Everything below comes from running the real tools on one Mac, one iPhone and one Apple Watch, plus reading their source where we say so. We haven't built the product on top of them yet, so "would we build with it again" is a first impression.
+Last updated: 2026-10-09, after Milestone 0 (spikes) and the build of Milestone 1 (the listener). Everything below comes from running the real tools on one Mac, one iPhone and one Apple Watch, plus reading their source where we say so. The listening half of the product is now built on Bee and Kiro CLI; the building half (Kiro Crew) is not yet, so that section is still a first impression.
 
 ---
 
 ## Bee CLI and live stream (`@beeai/cli` 0.7.3)
 
-- **What we used it for:** Logging a Mac in to a Bee account, and listening to the live event stream that will feed Overnight's listener. We also tried the backfill commands (`bee changed`, `bee conversations get/transcript`).
+- **What we used it for:** Logging a Mac in to a Bee account, and the live event stream that feeds Overnight's always-on listener (`packages/listener`). After a disconnect the listener catches up with `bee changed` and `bee conversations transcript`.
 - **What worked:**
   - One `npm i -g` gave a working `bee` with no build step.
   - Login was the smoothest part of the whole day: the CLI prints a link, the link shows a QR code, the phone owner scans it and approves in the Bee app. 64 seconds, no password, token stored in the macOS Keychain without a prompt.
@@ -20,15 +20,16 @@ Last updated: 2026-10-09, at the end of Milestone 0 (spikes). Everything below c
   - Very short recordings are deleted about six minutes after they're made, and nothing documents it (F-010).
   - A conversation stays "capturing" for 6.5 minutes after the last word (F-011).
   - Reading the CLI source (0.7.3), the stream makes one connection and has no reconnect or resume. We haven't seen a drop yet, so this is untested.
+  - For an always-on listener: a dead connection can't be told from silence (F-030), and lines recovered after a disconnect can't be matched to saved lines by id (F-024).
   - Smaller things: a 478 MB install (F-001), `bee status` exits 0 when logged out (F-003), help text on standard output when a command fails (F-007), `--flag=value` rejected (F-008), a first `bee changed` that returns a whole day (F-014), `--clear-alarm` that doesn't clear (F-023).
 - **Onboarding:** Quick: one install command, one QR scan, one stream command, and live utterances were on screen. The one thing we needed that we couldn't find written down was "turn on notifications for Bee".
 - **Would we build with it again:** Yes. Live transcripts from the wrist in a few seconds, through a one-line stream command, is the thing that makes this project possible. We'd want accurate payload docs and a setting to keep short recordings.
 
 ## Bee library (`@beeai/cli/lib`)
 
-- **What we used it for:** All of our Bee calls go through `createBeeClient()`: login check, stream, to-dos, facts, conversations.
+- **What we used it for:** Every Bee call in the product goes through `createBeeClient()` inside `packages/bee`: login check, stream, to-dos, conversations. `node packages/bee/src/smoke.ts` is a read-only check that it works.
 - **What worked:** A tiny, readable wrapper (one 15 KB file). `sse.streamJson()` gives an async iterator, which suits a long-running listener. `runJson([...])` is a handy escape hatch for commands the library doesn't wrap.
-- **What needs work:** It looks `bee` up on `PATH` instead of using the binary inside its own package, and reports a missing binary as "not authenticated" (F-004). It lacks helpers for transcript and fact search, and everything is typed `unknown` (F-005). Reading its source, closing a stream surfaces as an error thrown from the iterator, which callers have to expect.
+- **What needs work:** It looks `bee` up on `PATH` instead of using the binary inside its own package, and reports a missing binary as "not authenticated" (F-004). It lacks helpers for transcript and fact search, and everything is typed `unknown` (F-005). It can crash the host program when the binary is missing (F-025), can corrupt text on the stream (F-026), and has no error codes, only English sentences (F-032). Reading its source, closing a stream surfaces as an error thrown from the iterator, which callers have to expect.
 - **Onboarding:** We learned the API by reading `dist/lib/*.d.ts`. Clear, but there are no response types, so every shape had to be discovered by running it.
 - **Would we build with it again:** Yes, with our own typed layer on top.
 
@@ -42,6 +43,7 @@ Last updated: 2026-10-09, at the end of Milestone 0 (spikes). Everything below c
 - **What needs work:**
   - Ticking a to-do in the app never produced a `todo-updated` event, so the "yes" has to be found by polling (F-009).
   - Nothing documents that an alarm becomes a notification, or which notification settings the wrist buzz needs (F-013).
+  - A create that times out can't be safely repeated (F-031), and `--clear-alarm` doesn't clear (F-023).
   - There's no purpose-built way to ask the wearer a question. A to-do works, but an "ask" with yes/no buttons on the watch would be a far better fit, and safer than overloading the to-do list.
 - **Onboarding:** Trial and error with a real phone, since the behaviour we needed isn't documented.
 - **Would we build with it again:** Yes for facts. For approvals, yes as a workaround; a real prompt API would replace it immediately.
@@ -68,10 +70,10 @@ This section doubles as our AWS Builder side-prize write-up. So far Kiro Crew ha
 
 ## Kiro CLI (2.29.0)
 
-- **What we used it for:** Two headless jobs through `kiro-cli chat --no-interactive`: (1) the idea detector, a no-tools call that turns a transcript into one JSON verdict, and (2) building a hello-world Vite app in an empty folder.
+- **What we used it for:** Two headless jobs through `kiro-cli chat --no-interactive`: (1) the idea detector in `packages/detector`, a no-tools call that turns a transcript into one JSON verdict, now part of the running listener, and (2) building a hello-world Vite app in an empty folder (spike 6).
 - **What worked:**
   - Headless mode is solid. A short request returns in about 4 seconds with clean text on standard output and tool activity on standard error.
-  - As a detector with a no-tools custom agent: 6 of 6 synthetic transcripts gave valid, correct JSON on the first try, for under 0.1 credits in total.
+  - As a detector with a no-tools custom agent: on our 66 synthetic transcripts it asked about all 24 ideas and none of the 42 non-ideas (earlier runs: precision 0.88 to 0.96, recall 1.00), in about 3 to 5 seconds and 0.016 credits per call. Four calls at a time sharing one settings folder worked without a hitch across hundreds of calls.
   - As a builder: a working Vite + TypeScript app, built and self-checked, in 52 seconds for about 0.4 credits. It followed every instruction, including writing honest build notes about what it had not verified.
   - `/usage` works headless, so a script can read the plan and credits used. Per-model credit multipliers make cost easy to reason about.
   - A missing agent name fails fast with exit code 4.
@@ -81,6 +83,7 @@ This section doubles as our AWS Builder side-prize write-up. So far Kiro Crew ha
   - No `--no-tools` flag: the default agent can read files with no trust flags given (F-018).
   - No timeout flag, so every caller must build their own.
   - Docs describe options the latest release lacks (F-017).
+  - No structured-output mode, so replies need our own checking and repair (F-029); every headless chat is saved to disk with no off switch (F-028); reading a never-changed setting is an error (F-027).
 - **Onboarding:** Install and sign-in took about ten minutes including one wrong-account detour. After that, the first headless call worked first time.
 - **Would we build with it again:** Yes. Fast, cheap, and scriptable. Using the same tool for classification and for building means one account and one bill.
 

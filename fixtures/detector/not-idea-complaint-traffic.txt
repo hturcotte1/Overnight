@@ -1,0 +1,16 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: complaint
+# note: Frustration about traffic, with no tool or product wished for.
+[17:12:40] Oh come on. Go. It's green.
+[17:12:44] They're texting.
+[17:12:46] Everybody's texting. And now we missed it.
+[17:12:50] This light is three minutes. I timed it once.
+[17:12:53] And the construction on Fifth has been one lane since March. March!
+[17:12:58] I've never seen a single person working on it.
+[17:13:01] Just cones. Miles of cones.
+[17:13:04] I am so tired of this drive. Forty minutes to go six miles.
+[17:13:09] You could take the back way.
+[17:13:11] The back way has the train.
+[17:13:13] True.
+[17:13:15] I don't know what the answer is. I just hate it.

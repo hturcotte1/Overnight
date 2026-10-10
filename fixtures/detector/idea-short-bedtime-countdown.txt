@@ -1,0 +1,6 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: A ten-word "it'd be cool if" wish that arrived as two lines, with nothing else said.
+[19:42:18] It'd be cool if a page
+[19:42:20] counted down to bedtime.

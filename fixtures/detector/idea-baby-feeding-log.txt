@@ -1,0 +1,17 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "I wish there was just three giant buttons": a feeding log on one phone showing time since the last feed.
+[03:12:44] Is she up again?
+[03:12:47] She's up. Which side did I do last?
+[03:12:51] I was asleep.
+[03:12:53] I know you were asleep. I'm asking the room.
+[03:12:57] Left? I want to say left. At like one?
+[03:13:01] It was twelve forty. Maybe. I don't know.
+[03:13:05] I wish there was just three giant buttons. Left, right, bottle. I hit one with my thumb and it shows how long ago and which one. That's all my brain can do right now.
+[03:13:17] There's apps.
+[03:13:19] The one I tried wanted me to make a profile and enter her weight. At three in the morning.
+[03:13:25] Fair.
+[03:13:26] Just my phone, just the buttons. And a list of today so I can tell the doctor.
+[03:13:32] Okay. I'll warm the bottle.
+[03:13:35] Thank you. Shh, shh, shh.

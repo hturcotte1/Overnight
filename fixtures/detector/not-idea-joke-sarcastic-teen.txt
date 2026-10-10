@@ -1,0 +1,14 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: joke
+# note: Sarcastic back-and-forth; the "app that yells at me" is a jab, not a plan.
+[16:44:02] Can you take your shoes to your room, please.
+[16:44:05] In a minute.
+[16:44:07] That's what you said yesterday about the same shoes.
+[16:44:11] Oh my gosh. Why don't you just build an app that yells at me, since you love it so much.
+[16:44:17] Maybe I will. It'll go off every time a sock hits the floor.
+[16:44:22] Cool, I'll just mute it.
+[16:44:24] It doesn't have mute. It has louder.
+[16:44:27] That's illegal.
+[16:44:29] Shoes.
+[16:44:30] I'm going, I'm going.

@@ -1,0 +1,16 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: "We should just make a little page" for a chore wheel on one shared tablet; no sync needed.
+[17:22:31] Whose night is it for dishes?
+[17:22:34] Not mine. I did them Tuesday.
+[17:22:37] You did not, I did them Tuesday, you did the trash.
+[17:22:41] Okay okay. Stop. Both of you.
+[17:22:44] This is every night. Every single night.
+[17:22:48] The chart on the fridge fell down again, that's why.
+[17:22:52] We should just make a little page that's a wheel. You put the chores on it, dishes, trash, feed the dog, and each kid spins and that's what they get.
+[17:23:03] On the old tablet?
+[17:23:05] Yeah, leave it on the counter. It remembers who got what this week so nobody gets dishes twice.
+[17:23:11] Can I spin first?
+[17:23:13] There's nothing to spin yet, bud.
+[17:23:16] Somebody set the table please. Forks.

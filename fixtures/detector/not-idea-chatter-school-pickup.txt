@@ -1,0 +1,16 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: chatter
+# note: Sorting out who picks up the kids; plain family logistics.
+[14:48:20] Can you get the kids today? My two thirty got moved.
+[14:48:24] I've got the dentist at three fifteen.
+[14:48:27] Shoot. Okay. Can your sister?
+[14:48:30] She has them Thursday already.
+[14:48:33] What if I grab the little one at three and you get the big one from practice at five?
+[14:48:39] Practice ends at five thirty now.
+[14:48:42] Since when?
+[14:48:43] Since they changed the field. I told you.
+[14:48:46] You did not. Fine. Five thirty. I'll start dinner.
+[14:48:50] There's the chicken in the fridge that needs to be used.
+[14:48:53] Chicken it is. Love you.
+[14:48:55] Love you. Bye.

@@ -1,0 +1,17 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: chatter
+# note: Work gossip over lunch; no idea of any kind.
+[12:15:40] Did you hear about Renee?
+[12:15:42] No, what?
+[12:15:44] She's leaving. Two weeks.
+[12:15:46] No. Where?
+[12:15:48] Some place downtown. Better money, I guess, and she doesn't have to do the Saturday shifts.
+[12:15:54] Who told you?
+[12:15:56] She told me. In the parking lot. So don't say anything till it's out.
+[12:16:01] I won't. Wow. Who's going to run the front?
+[12:16:05] That's what I said. Probably us.
+[12:16:08] For the same pay.
+[12:16:10] For the same pay.
+[12:16:12] Are you going to the thing Friday?
+[12:16:14] If there's cake.

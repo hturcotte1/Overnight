@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: joke
+# note: Office banter with absurd "apps" (delete Mondays, go to a meeting for me); nobody is planning anything.
+[08:05:11] How was your weekend?
+[08:05:13] Too short. I need an app that deletes Mondays.
+[08:05:17] Ha. I need one that goes to this meeting for me.
+[08:05:21] Oh, I'd pay real money. It just nods and says let's take that offline.
+[08:05:27] Let's circle back.
+[08:05:29] Let's circle back. Great point, Dave.
+[08:05:32] And then an app that eats the leftover donuts so I don't.
+[08:05:36] That one's called Dave.
+[08:05:38] Ha! Okay. Don't tell him I laughed.
+[08:05:41] Is there coffee?
+[08:05:43] There's something brown in the pot.

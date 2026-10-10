@@ -1,0 +1,16 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: Hard: starts as a complaint about meetings, then turns into "there should be a thing": a ticking cost meter.
+[10:58:14] Is this the one that could have been an email?
+[10:58:17] They're all the one that could have been an email.
+[10:58:20] I counted fourteen people on that call. Fourteen. For an hour and ten.
+[10:58:26] And two of them talked.
+[10:58:28] It drives me up the wall. Nobody thinks about what that costs. That's, what, fourteen people times whatever we make.
+[10:58:36] A lot.
+[10:58:37] There should be a thing you put up on the screen, you type in how many people and a rough hourly number, and it just runs. Like a taxi meter. Dollars ticking up the whole meeting.
+[10:58:49] Oh that's mean. I like it.
+[10:58:52] Big red number. That's the whole thing. I'd share my screen with it tomorrow.
+[10:58:57] You'd get fired.
+[10:58:59] I'd get promoted. Okay, I've got the eleven o'clock. You coming?
+[10:59:03] Unfortunately.

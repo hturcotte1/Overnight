@@ -1,0 +1,19 @@
+{
+  "name": "@overnight/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "overnight": "./src/main.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@overnight/bee": "*",
+    "@overnight/core": "*",
+    "@overnight/detector": "*",
+    "@overnight/listener": "*",
+    "better-sqlite3": "13.0.3"
+  }
+}

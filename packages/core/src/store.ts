@@ -80,6 +80,8 @@ const MIGRATIONS: string[] = [
     updated_at TEXT NOT NULL
   );
   `,
+  // utterancesSpokenNear() runs for every line heard, across all conversations.
+  `CREATE INDEX utterances_by_spoken_at ON utterances(spoken_at);`,
 ];
 
 export interface ConversationRef {
@@ -314,6 +316,25 @@ export class Store {
       .prepare("SELECT * FROM utterances WHERE conversation_key = ? AND spoken_at BETWEEN ? AND ? ORDER BY spoken_at, id")
       .all(conversationKey, from, to) as Row[];
     return rows.map(toUtterance);
+  }
+
+  /**
+   * Lines of ANY conversation spoken within `windowMs` of `spokenAt`. Backfill uses this because
+   * Bee names a conversation by uuid on the stream and by number elsewhere, so the same line can
+   * briefly sit under two conversation rows.
+   */
+  utterancesSpokenNear(spokenAt: string, windowMs: number): StoredUtterance[] {
+    const at = Date.parse(spokenAt);
+    const from = new Date(at - windowMs).toISOString();
+    const to = new Date(at + windowMs).toISOString();
+    const rows = this.#db.prepare("SELECT * FROM utterances WHERE spoken_at BETWEEN ? AND ? ORDER BY spoken_at, id").all(from, to) as Row[];
+    return rows.map(toUtterance);
+  }
+
+  /** When the newest line of all reached us, or null if nothing has been heard yet. */
+  newestUtteranceReceivedAt(): string | null {
+    const row = this.#db.prepare("SELECT MAX(received_at) AS at FROM utterances").get() as Row | undefined;
+    return (row?.at as string | null) ?? null;
   }
 
   /** When the newest stored line of a conversation was spoken, or null if it has none. */

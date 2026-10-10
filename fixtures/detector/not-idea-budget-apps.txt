@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: existing-product
+# note: Comparing budgeting apps that already exist and what they cost.
+[12:40:21] Are you still using that budget thing? Y nab?
+[12:40:25] YNAB, yeah. Third year.
+[12:40:28] Is it worth the money? It's like a hundred bucks now.
+[12:40:32] For me it is. The whole give every dollar a job thing finally clicked.
+[12:40:37] My brother swears by Monarch. Says the charts are nicer.
+[12:40:42] I tried it for a month. It's fine. It felt more like looking at what happened than planning.
+[12:40:49] And before that you had the spreadsheet.
+[12:40:52] The spreadsheet was free and I never opened it.
+[12:40:55] Ha. Okay. Is there a trial?
+[12:40:58] A month or so, I think. You don't need a card.
+[12:41:02] I'll look tonight. Maybe.

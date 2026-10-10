@@ -1,0 +1,23 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: near-miss
+# note: Developers discussing a bug fix in code they already have; "build the fix" is not a new small tool.
+[10:40:03] So the nightly build is red again.
+[10:40:06] Same test?
+[10:40:08] Same test. The date one. It passes on my machine and fails on the server because the server's in UTC.
+[10:40:15] So it's the time zone thing.
+[10:40:17] It's always the time zone thing. I think we should just build the fix into the parser instead of patching every caller.
+[10:40:24] That touches like thirty files.
+[10:40:26] Twelve. I counted. I can have a pull request up by lunch.
+[10:40:31] Add a test for the daylight saving edge. That's what bit us in March.
+[10:40:36] Yeah. And we need to bump the library version while we're in there.
+[10:40:40] Separate change.
+[10:40:42] Separate change. Fine. Who's reviewing?
+[10:40:45] Me, if you buy lunch.
+[10:40:48] Deal. Did the staging deploy ever go out?
+[10:40:52] It's stuck behind the same red build.
+[10:40:55] Of course it is. So nothing ships till this is fixed.
+[10:40:59] Nothing ships. I told the product folks Wednesday.
+[10:41:03] Wednesday's generous.
+[10:41:05] Wednesday's a guess. Tacos?
+[10:41:07] Tacos.

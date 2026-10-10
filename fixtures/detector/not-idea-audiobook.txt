@@ -1,0 +1,13 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: media
+# note: Audiobook narration in the third person; "someone ought to build" is about a bridge in the story.
+[22:10:05] Chapter nine.
+[22:10:08] The rain had not let up since Tuesday, and by now the road to the mill was more river than road.
+[22:10:15] Ellen pulled her collar up and counted the fence posts as she walked, the way her father had taught her.
+[22:10:22] She had always believed that someone ought to build a proper bridge at the crossing, and she had said so at every town meeting for eleven years.
+[22:10:31] Nobody listened, she thought. Nobody ever did, until the water came.
+[22:10:37] At the bottom of the hill a lantern was moving.
+[22:10:41] Who's there, she called.
+[22:10:44] The lantern stopped.
+[22:10:46] It was the miller's boy, soaked to the skin, holding a letter against his chest as if it might fly away.

@@ -1,0 +1,17 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: Hard: one person objects ("there are a million of those") and the other insists on a no-sign-up three-slider toy.
+[19:33:02] So the place on Alder went up again. Twenty one fifty.
+[19:33:06] For a one bedroom.
+[19:33:08] And my sister keeps saying just buy, just buy, you're throwing money away.
+[19:33:13] Is she wrong?
+[19:33:15] I don't know! That's the thing. I want a little toy calculator. Three sliders. Rent, house price, how many years you stay. And it tells you which one comes out ahead.
+[19:33:26] There are a million of those.
+[19:33:28] No, there are a million forms that want my email and then a guy calls me about a mortgage.
+[19:33:34] So use a spreadsheet.
+[19:33:36] I don't want a spreadsheet, I want to drag a slider and watch the line cross. Honestly somebody should just make the dumb simple one. No sign up, no phone number.
+[19:33:47] It won't be accurate.
+[19:33:49] It doesn't have to be accurate, it has to be close. I'm serious, I'd play with it tonight.
+[19:33:55] Okay. Okay. It's your Saturday.
+[19:33:58] Did you want the last dumpling?

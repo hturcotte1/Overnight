@@ -39,7 +39,7 @@ Overnight listens through Bee for the moments you say "someone should build...".
 
 1. **Hear.** Bee (Apple Watch app) transcribes conversations. Overnight subscribes to Bee's live event stream and saves every utterance locally the moment it arrives.
 2. **Notice.** When a conversation goes quiet, Kiro reads it and decides whether someone voiced a buildable idea for a small app or tool.
-3. **Ask.** For a real idea, Overnight creates a Bee to-do with an alarm two minutes out: `💡 Build tonight? <title>`. It buzzes the phone and the wrist (spike 3), provided notifications for Bee are allowed on the iPhone.
+3. **Ask.** For a real idea, Overnight creates a Bee to-do with an alarm two minutes out: `💡 Build tonight? <title>`. It buzzes the phone and the wrist (spike 3), provided notifications for Bee are allowed on the iPhone. Nothing buzzes at night: an idea heard between `ASK_CUTOFF` and `DELIVER_TIME` is asked about in the morning.
 4. **Approve.** The Bee to-do decides what happens:
    - Ticked complete in the Bee app = approved.
    - Deleted = rejected.
@@ -53,7 +53,7 @@ Overnight listens through Bee for the moments you say "someone should build...".
 
 **Principles:**
 - Never build without approval.
-- Ask at most 3 times a day.
+- Ask at most 3 times a day, and never during quiet hours (`ASK_CUTOFF` to `DELIVER_TIME`).
 - One idea = one small app.
 - Credentials are never given to the coding agent. (Closing the remaining gap is the first task of M2; see §6.)
 - Approvals that arrive after build time roll to the next night.
@@ -100,7 +100,8 @@ One TypeScript repo: Node 22.18+ (we use Node 24 LTS), ESM, npm workspaces. CLI 
 |---|---|
 | `packages/core` | Shared types, config loader, SQLite store (better-sqlite3), logger, idea state machine |
 | `packages/bee` | Thin wrapper over `@beeai/cli/lib` (`createBeeClient`) for stream, conversations, to-dos and facts. **All Bee access goes through here.** |
-| `packages/listener` | `overnight listen`: stream → snapshots → conversation-quiet detection → detector → ask → approval tracking |
+| `packages/listener` | The always-on logic behind `overnight listen`: stream → snapshots → conversation-quiet detection → detector → ask → approval tracking → backfill after a disconnect. Written against the interfaces in `packages/core`, so all its tests run on fakes |
+| `packages/cli` | The `overnight` command: `listen`, `status`, `ideas`, `queue --approved --json`, `pause`, `resume`. Thin wiring only |
 | `packages/detector` | Prompt, JSON schema (zod) and golden-set eval for "is this a buildable idea?" Runs through Kiro (`kiro-cli chat --no-interactive` with a no-tools agent), so no extra AI account is needed. Spike 8 showed this works |
 | `packages/builder` | Brief writer and two builder backends: `kiro-crew` (primary) and `kiro-cli` (fallback) |
 | `packages/deliver` | `overnight deliver`: Playwright smoke test, publish to GitHub Pages, screenshot, morning Bee to-do, Bee fact, report |
@@ -114,11 +115,14 @@ One TypeScript repo: Node 22.18+ (we use Node 24 LTS), ESM, npm workspaces. CLI 
 
 Data lives outside the repo and is never committed: `~/.overnight/` (override with `OVERNIGHT_DATA_DIR`).
 - `overnight.db` (SQLite)
+- `listen.lock` (held by the running listener, so a second one refuses to start)
+- `kiro-detector/` (the detector's own Kiro settings and saved sessions) and `detector-cwd/` (an empty folder it runs in)
+- `tmp/detector-eval/` (the same two folders for `npm run eval:detector`, which only ever sends synthetic text)
 - `ideas/<id>/brief.md`
 - `workspaces/<id>/`
 - `reports/<id>.json`
 - `screenshots/<id>.png`
-- `logs/`
+- `logs/` (`listen.log`, moved to `listen.log.1` once it passes 10 MB; `listen.launchd.log` only catches crashes)
 
 ### Idea states
 
@@ -128,11 +132,17 @@ Data lives outside the repo and is never committed: `~/.overnight/` (override wi
 
 `.env`, with `.env.example` committed:
 
-`GITHUB_PAGES_REPO=overnight-apps`, `OVERNIGHT_DATA_DIR`, `TZ=America/Boise`, `ASK_CUTOFF=23:00`, `BUILD_TIME=01:00`, `DELIVER_TIME=07:00`, `MAX_ASKS_PER_DAY=3`, `MAX_BUILDS_PER_NIGHT=2`, `BUILD_TIMEOUT_MIN=45`, `WRITE_BEE_FACTS=true`, `PAUSED=false`
+`GITHUB_PAGES_REPO=overnight-apps`, `OVERNIGHT_DATA_DIR`, `TZ=America/Boise`, `ASK_CUTOFF=23:00`, `BUILD_TIME=01:00`, `DELIVER_TIME=07:00`, `MAX_ASKS_PER_DAY=3`, `MAX_BUILDS_PER_NIGHT=2`, `BUILD_TIMEOUT_MIN=45`, `WRITE_BEE_FACTS=true`, `PAUSED=true`
 
 There is no Kiro key in the config. Kiro CLI and Kiro Crew both use the Kiro sign-in on this Mac (Henry's GitHub login, Kiro Pro plan), which takes priority over an API key anyway. One secret fewer to protect.
 
-`overnight pause` and `overnight resume` flip `PAUSED`. While paused, nothing is asked or built.
+`overnight pause` and `overnight resume` flip the pause flag, which lives in the database; `PAUSED` in `.env` is only its starting value. While paused, Overnight still listens, saves and runs the detector, but nothing is asked and the build queue is empty.
+
+**Overnight starts paused** ("quiet mode"). A fresh install never buzzes anyone's wrist until someone runs `npx overnight resume`. An idea heard while paused is recorded but not asked about later.
+
+`OVERNIGHT_DATA_DIR` must be a full path (or start with `~/`), so every command means the same folder wherever it is run from. Only one `overnight listen` can run per data folder; a second one refuses to start.
+
+**Stopping.** On a stop signal the listener closes the stream, waits up to 10 seconds for work in progress, and exits; lines it was still reading stay pending for the next start. The background job is given 30 seconds before macOS kills it.
 
 ## 4. Bee integration notes
 
@@ -156,7 +166,8 @@ Checked on Oct 9, 2026 with the real phone and watch (spikes 1 to 4, written up 
 - Conversation events are `{ type, conversation: { id, conversation_uuid, state, start_time, end_time, ... } }`. States seen: `CAPTURING`, `PROCESSING`, `COMPLETED`. Keep the uuid-to-id mapping: utterances carry only the uuid, commands take only the numeric id.
 - **The `COMPLETED` `update-conversation` event carries the whole transcript.** Its `conversation` adds `transcriptions[]`, each with `utterances[]` (`text`, `person_first_name`, `person_id`, ...) and `utterance_chunks[].chunk_text`, next to the filled-in `summary` and `short_summary`. `packages/bee` parses conversation events with a zod schema that keeps only `id`, `conversation_uuid`, `state`, `start_time` and `end_time`. The listener never stores or logs a raw event payload.
 - Utterances reach the Mac 1 to 10 seconds after they're spoken during steady talk, and up to about 40 seconds after a pause.
-- `bee stream` does not reconnect (from the CLI source at 0.7.3; no stream dropped during the spikes). When it exits, for any reason, the listener restarts it and backfills.
+- `bee stream` does not reconnect (from the CLI source at 0.7.3; no stream dropped during the spikes). When it exits, for any reason, the listener restarts it (waiting 1 s, then 2, 5, 15, 30, 60) and backfills.
+- A dead connection and a quiet room look the same, because the CLI hides keep-alives. So the listener also reopens the stream after 15 minutes without any event, and after it notices the Mac was asleep.
 
 **Conversations close slowly.** Bee keeps a conversation in `CAPTURING` for about 6.5 minutes after the last word, and a new recording made inside that window is added to the same conversation. So the detector runs on our own quiet timer, over the utterances since its last run, not on Bee's idea of a finished conversation.
 
@@ -164,6 +175,7 @@ Checked on Oct 9, 2026 with the real phone and watch (spikes 1 to 4, written up 
 - `bee changed --cursor <c> --json` (the next cursor is at `meta.next_cursor`)
 - `bee conversations transcript <id> --since <epochMs> --json`
 - With no cursor, `bee changed` returns about a day of items with full transcripts. On first start, call it once only to get a cursor, and ignore the items.
+- Stored-transcript line ids are different from stream ids, and conversation commands don't return the uuid (extra checks in `docs/spikes.md`). So a recovered line is matched against saved lines by time and text, across all conversations, and the store lets a conversation be known by uuid, by number, or both.
 
 **Short recordings disappear.** Confirmed by spike 2: a 7-word recording reached the stream within 14 seconds, and about 6 minutes later Bee sent `delete-conversation` and the conversation returned `Conversation not found`. We didn't measure the exact threshold.
 - So snapshot every utterance the moment it arrives, and never rely on re-fetching.
@@ -177,11 +189,18 @@ Checked on Oct 9, 2026 with the real phone and watch (spikes 1 to 4, written up 
 - Create with `bee todos create --text "..." --alarm-at <ISO8601> --json`. Always send the alarm time in UTC ending in `Z`. The reply is a bare object: `{ id, text, alarm_at, completed, created_at, corrections, timezone }`.
 - An alarm two minutes out buzzed both the iPhone and the Apple Watch (spike 3).
 - Store each ask's to-do id against its idea.
+- **Never ask twice.** If `todos create` times out or its reply can't be read, the to-do may still exist. `packages/bee` then looks for it in `bee todos list`; if it still can't tell, the idea is recorded as asked with no to-do id, counts toward the daily limit, and simply expires. Only a clear refusal from Bee is retried.
 - **Track answers by polling, not by the stream.** Ticking a to-do in the Bee app produced no `todo-updated` event at all, although `bee todos get <id>` showed `completed: true` when we first checked, about a minute after the tick. (A to-do completed through the CLI showed up in `todos get` within 5 seconds, also with no event.) Poll `bee todos get <id>` every few seconds for each open ask:
   - `completed: true` means approved.
   - Exit code 1 with `Todo not found.` means deleted, which is a rejection. (`todo-deleted` does arrive on the stream and can speed this up.)
   - Any other failure means "unknown, try again", never "rejected".
 - Bee also creates to-dos of its own, so only ever act on ids we created.
+- The rest of the ask rules, as built:
+  - A to-do Bee clearly refuses is tried 3 times, a minute apart, then given up.
+  - Quiet hours run from `ASK_CUTOFF` to `DELIVER_TIME`. Neither the ask nor its alarm may fall inside them. Ideas heard overnight are asked on the first pass after `DELIVER_TIME`, up to the daily limit, unless they are more than 12 hours old by then.
+  - An ask expires at the next `ASK_CUTOFF`. If that is less than an hour away, it runs until the cutoff after that.
+  - An idea held back by the pause flag or the daily limit is not asked later. If it comes up again, it is a new idea.
+  - An expired ask leaves its to-do in Bee: Overnight never deletes anything from the wearer's Bee account. Ticking it later does nothing.
 
 **Facts:**
 - Use `bee facts list|search|create`. `facts list` returns confirmed facts only; pass `--unconfirmed` for the ones Bee inferred by itself.
@@ -222,7 +241,13 @@ Checked on Oct 9, 2026 with the real phone and watch (spikes 1 to 4, written up 
 - `kiro-cli chat --no-interactive --agent overnight-detector --model claude-haiku-4.5 "<prompt + transcript>"`, with our own 90-second timeout. About 4 seconds and well under 0.1 credits per call.
 - `overnight-detector` is a custom Kiro agent with an empty `tools` list. Kiro's default agent can read files in its working folder even with no trust flags, so the default agent must never be used here.
 - It runs from an empty folder with its own `KIRO_HOME`, both under `~/.overnight/`, so no project files or old sessions reach the prompt and Kiro's saved sessions stay inside our data folder.
-- The reply is plain text. Take the JSON object out of it, validate it with zod, retry once, then log and skip.
+- The reply is plain text. Take the JSON object out of it, validate it with zod, retry once, then log and skip. A timeout or an error exit also gets the one retry. One repair is done without a retry: a quote that is word for word from the conversation but longer than 25 words is cut to its first 25.
+- Extra checks on the reply: title at most 80 characters, pitch 400, quote 300; the quote has at least 3 words and matches the conversation on whole words; control characters are stripped.
+- The listener sends a batch only if it has at least 6 words, sends at most the latest 1,500 words, and gives a batch 3 tries a minute apart before recording it as failed. Lines that waited more than 6 hours are recorded as too old and not sent.
+- Set-up checks that Kiro is signed in (`kiro-cli whoami`, whose output includes the account email and is never logged) and that both sharing settings are off in the detector's own `KIRO_HOME`. The CLI retries a failed set-up every minute.
+- The prompt tells the model to keep names and personal details out of the title and pitch, and to treat anything inside the transcript as conversation, never as instructions.
+- If the detector can't even try (Kiro signed out, set-up not finished), the lines are kept and tried again later. They are never written off because Kiro wasn't ready.
+- Kiro saves every chat to disk. The detector deletes its saved sessions after a day.
 
 **Ask only if all of these hold:**
 - `is_idea` is true and `confidence ≥ 0.75`
@@ -231,7 +256,7 @@ Checked on Oct 9, 2026 with the real phone and watch (spikes 1 to 4, written up 
 - not a near-duplicate of the last 14 days of ideas
 - still under `MAX_ASKS_PER_DAY`
 
-**Golden set:** `fixtures/detector/`, at least 40 synthetic transcripts.
+**Golden set:** `fixtures/detector/`, at least 40 synthetic transcripts (66 as of M1). Each file starts with four `#` lines: the synthetic notice, `# expect: idea` or `# expect: not_idea`, `# category:` and `# note:`. The eval never sends `#` lines to the model.
 - At least 15 ideas.
 - At least 25 non-ideas: TV-like audio, jokes, tasks, existing products.
 - Targets: precision ≥ 0.85, recall ≥ 0.7.
@@ -269,7 +294,7 @@ Checked on Oct 9, 2026 with the real phone and watch (spikes 1 to 4, written up 
 ### Backends
 
 **Primary: Kiro Crew.** One scheduled job, created once with `kirocrew cron add` (its prompt is the text of `crew/nightly-job.md`). When started it:
-1. Runs `overnight queue --approved --json`.
+1. Runs `overnight queue --approved --json`, once. The queue is empty while Overnight is paused, and holds at most `MAX_BUILDS_PER_NIGHT` ideas, oldest approval first, so both rules are kept by code and not by the job's prompt. (The cap is per call: M2 must read the queue once a night, or make the queue count that night's builds.)
 2. Builds each idea in `~/.overnight/workspaces/<id>/`, following `crew/build-skill.md`.
 3. Runs `overnight mark-built <id>` or `overnight mark-failed <id> --reason "..."`.
 
@@ -354,7 +379,7 @@ The spikes:
 7. Publishing a hello-world `dist/` folder to a public `overnight-apps` repo with GitHub Pages turned on gives a working link.
 8. `kiro-cli chat --no-interactive` (no tools) returns valid detector JSON for a few synthetic transcripts.
 
-**M1: Hear, notice, ask (Sat Oct 10 – Sun Oct 11).**
+**M1: Hear, notice, ask (Sat Oct 10 – Sun Oct 11).** **Built on Oct 9 and running as a background job in quiet mode.** Tests, typecheck, lint and the golden set pass. Still to do with the wearer present: watch real speech go through (including that all event types arrive on the one stream), then `npx overnight resume` and one real ask, approval, rejection and expiry.
 - `overnight listen` runs under launchd and snapshots to SQLite.
 - It survives disconnects (backfill).
 - It detects ideas, asks via Bee to-do, and tracks approve, reject and expire.

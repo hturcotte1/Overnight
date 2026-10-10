@@ -142,6 +142,11 @@ export interface BeeGateway {
   changedSince(cursor: string | null): Promise<ChangedSince>;
   /** Lines of a stored transcript spoken at or after sinceMs. Returns null if Bee no longer has it. */
   transcriptSince(conversationBeeId: number, sinceMs: number): Promise<BackfillUtterance[] | null>;
+  /**
+   * Create a to-do with an alarm. The error kind says whether it is safe to try again:
+   * "failed" and "logged-out" mean Bee refused and nothing was created; "timeout" and
+   * "bad-response" mean the to-do MAY exist, so the caller must not create another one.
+   */
   createTodo(text: string, alarmAt: Date): Promise<{ id: number }>;
   /** "deleted" only when Bee positively says the to-do does not exist. Any other failure throws. */
   todoStatus(id: number): Promise<TodoStatus>;
@@ -182,7 +187,17 @@ export interface DetectorInput {
 
 export type DetectorResult =
   | { ok: true; verdict: DetectorVerdict; ms: number; attempts: number }
-  | { ok: false; reason: string; ms: number; attempts: number };
+  | {
+      ok: false;
+      reason: string;
+      ms: number;
+      attempts: number;
+      /**
+       * True when the detector could not even try (not set up yet, Kiro signed out, process
+       * stopping). The caller keeps the lines and asks again later without counting a failure.
+       */
+      retryLater?: boolean;
+    };
 
 export interface Detector {
   /** Never throws: a bad or missing model reply comes back as { ok: false }. */

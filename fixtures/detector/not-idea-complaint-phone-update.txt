@@ -1,0 +1,15 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: not_idea
+# category: complaint
+# note: Complaining about app updates and logins; frustration only, no new tool proposed.
+[13:26:08] Did your phone update last night?
+[13:26:11] Yes, and now I can't find anything. They moved the whole photo thing around.
+[13:26:17] Same. Why do they do that? It was fine.
+[13:26:20] It was fine! Nobody asked. And the bank one makes me log in every single time now.
+[13:26:27] With the code.
+[13:26:28] With the code they text you, which shows up after it times out.
+[13:26:33] I hate it. I hate all of it. I spend half my day fighting with apps.
+[13:26:38] My mom called me three times this morning about the photos.
+[13:26:42] What'd you tell her?
+[13:26:44] I told her I don't know either.
+[13:26:46] Ha. Okay. Did you want half this sandwich?

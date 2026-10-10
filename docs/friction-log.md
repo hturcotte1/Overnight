@@ -282,3 +282,112 @@ Severity scale: **low** (cosmetic or a few minutes lost), **medium** (needed a w
 - **Severity:** low for us, since we never need to clear an alarm in normal use. It did leave one completed test to-do with an alarm date two months away.
 - **Workaround:** None found. Delete the to-do in the Bee app.
 - **Suggestion:** Make `--clear-alarm` work, or fail loudly when the server ignores it.
+
+## F-024: Stream ids and stored-transcript ids are different, so missed lines can't be matched by id
+
+- **Tool:** Bee live stream and `bee conversations transcript` (`@beeai/cli` 0.7.3)
+- **Date:** 2026-10-09
+- **Task:** After a dropped connection, fetch the stored transcript and add only the lines the stream missed.
+- **Steps:** Compared the `utterance.id` values received on the stream with the ids in the stored transcript of the same conversation, and with the two transcriptions inside the `COMPLETED` stream event.
+- **Expected:** One id per spoken line, the same everywhere.
+- **Actual:** Stream ids match the *realtime* transcription (32 of 32). `bee conversations transcript` returns only the *final* transcription, whose ids are all different (0 of 32 in common). `bee conversations get` also has no `conversation_uuid`, while stream utterances carry only the uuid, so even "which conversation is this?" can't be answered from one side alone.
+- **Severity:** medium. Catch-up after a disconnect, which the docs recommend because the stream is at-most-once, has to guess at duplicates.
+- **Workaround:** Match by time and text: a stored line within a few seconds of a saved line with nearly the same words is treated as the same line. Keep a table that links uuid and numeric id whenever a stream event shows both.
+- **Suggestion:** Give each utterance one stable id across realtime and final transcriptions (or include the realtime id on the final line), and return `conversation_uuid` from the conversation commands.
+
+## F-025: The Bee library can crash the host program when the `bee` binary can't start
+
+- **Tool:** Bee library (`@beeai/cli/lib` 0.7.3)
+- **Date:** 2026-10-09
+- **Task:** Open the stream from a long-running program that must never crash.
+- **Steps:** Called `sse.streamJson()` with a `command` path that doesn't exist. Reproduced by a test in `packages/bee/test/real-library.test.ts`.
+- **Expected:** The error comes out of the event iterator, where the caller is already handling errors.
+- **Actual:** The library also creates a promise (`process.exited`) that rejects with nothing attached to it. Node reports an unhandled rejection, which by default ends the whole process.
+- **Severity:** medium for an always-on listener.
+- **Workaround:** Attach a `.catch()` to `stream.process.exited` straight after opening the stream.
+- **Suggestion:** Handle that rejection inside the library and surface the failure only through the iterator.
+
+## F-026: Text on the stream can be corrupted, and one error message quotes the output
+
+- **Tool:** Bee library (`@beeai/cli/lib` 0.7.3)
+- **Date:** 2026-10-09
+- **Task:** Read utterances from `sse.streamJson()` and log errors safely.
+- **Steps:** Read `dist/lib/index.js`, then reproduced both with a stand-in program in `packages/bee/test/real-library.test.ts`.
+- **Expected:** Text arrives intact, and error messages don't repeat what the program printed.
+- **Actual:** (1) The stream path decodes each chunk of output separately, so a character that spans two chunks (an accented letter, an emoji) turns into replacement characters. `runJson` doesn't have this problem because it sets the encoding. (2) When a command prints something that isn't JSON, the error message `Failed to parse Bee CLI JSON output: ...` includes a piece of that output. If that reaches a log, a name or a sentence someone said can end up there.
+- **Severity:** low each, but (2) matters for any app that promises not to log speech.
+- **Workaround:** Call `setEncoding("utf8")` on the stream's stdout ourselves, and replace that error with our own message before it can be logged.
+- **Suggestion:** Set the encoding in the stream path, and keep program output out of error messages.
+
+## F-027: `kiro-cli settings <key>` fails for a setting that was never changed
+
+- **Tool:** Kiro CLI 2.29.0
+- **Date:** 2026-10-09
+- **Task:** Check from a script that content sharing and telemetry are off.
+- **Steps:** `kiro-cli settings telemetry.enabled` on a fresh install, and in a fresh `KIRO_HOME`.
+- **Expected:** The current effective value (the default), with exit code 0.
+- **Actual:** `error: No value associated with telemetry.enabled`, exit code 1. Once set it prints `false (global)`. So a script can't tell "on by default" from "off" without knowing the defaults by heart, and the two privacy settings that matter most are the ones in this state on every new install.
+- **Severity:** low to medium. It makes "is this machine sharing content?" harder to answer than it should be.
+- **Workaround:** Treat the error as "not off", set the value to `false`, and read it back.
+- **Suggestion:** Print the effective value and say that it is the default.
+
+## F-028: Every headless Kiro chat is saved to disk, prompt included
+
+- **Tool:** Kiro CLI 2.29.0 (`kiro-cli chat --no-interactive`)
+- **Date:** 2026-10-09
+- **Task:** Use Kiro as a classifier for private text without leaving copies of that text around.
+- **Steps:** Ran the detector evaluation three times (about 230 chats), then looked in the detector's `KIRO_HOME`.
+- **Expected:** One-shot headless calls leave nothing behind, or there is a documented switch for it.
+- **Actual:** 454 files (2.7 MB) under `sessions/cli/`, two per chat, holding the whole prompt and the reply. Nothing removes them. In production that would be a second, growing copy of every transcript we classify.
+- **Severity:** medium for privacy-sensitive use.
+- **Workaround:** Give the detector its own `KIRO_HOME` inside our private data folder, and delete session files older than a day ourselves.
+- **Suggestion:** A `--no-save` flag (or setting) for headless runs.
+
+## F-029: No structured-output mode, so every reply needs parsing, checking and sometimes a retry
+
+- **Tool:** Kiro CLI 2.29.0 (`kiro-cli chat --no-interactive`, model `claude-haiku-4.5`)
+- **Date:** 2026-10-09
+- **Task:** Get one JSON object with fixed fields and length limits from each call.
+- **Steps:** Ran 64 synthetic transcripts through the detector, three times, checking each reply against a schema.
+- **Expected:** A way to hand Kiro a JSON schema, as model APIs offer, so the reply always fits.
+- **Actual:** The reply is free text. It was valid JSON nearly every time, but in one run 11 of 64 first replies broke a rule we had stated (a word-for-word quote of at most 25 words), and asking again fixed only 2 of those. Without our own checks, 8 real ideas would have been thrown away.
+- **Severity:** low to medium. It works, but each app has to build its own validation and repair.
+- **Workaround:** Validate with zod, cut an over-long quote ourselves when it is otherwise word for word, retry once for anything else, then skip.
+- **Suggestion:** A `--response-schema <file>` option for headless mode.
+
+## F-030: A dead stream looks exactly like a quiet room
+
+- **Tool:** Bee CLI (`bee stream`, `@beeai/cli` 0.7.3)
+- **Date:** 2026-10-09
+- **Task:** Know whether an always-on stream is still connected.
+- **Steps:** Read the stream command's source for how it treats the server's keep-alive lines, then watched a real stream sit idle.
+- **Expected:** Some sign of life when nothing is being said: a heartbeat line in `--json` mode, or the process ending when the connection is lost.
+- **Actual:** Keep-alive lines from the server are swallowed by the CLI and never printed, and the CLI has no idle timeout of its own. A stream that has silently died and a stream in a silent house produce the same output: nothing.
+- **Severity:** medium for an always-on listener.
+- **Workaround:** Close and reopen the stream after 15 minutes without any event, and after the Mac wakes from sleep, then fetch what was missed.
+- **Suggestion:** Print keep-alives in `--json` mode (for example `{"type":"ping"}`), or add an `--idle-timeout` option.
+
+## F-031: When `bee todos create` times out, there is no way to know whether the to-do exists
+
+- **Tool:** Bee CLI and API (`@beeai/cli` 0.7.3)
+- **Date:** 2026-10-09
+- **Task:** Create exactly one to-do per prompt, even on a bad connection.
+- **Steps:** Worked through what happens when the create call is cut off by a time limit or its reply can't be read, and reproduced it with a stand-in program.
+- **Expected:** A way to make the call safe to repeat: a client-supplied key, or a create that returns the existing to-do when the same one was just made.
+- **Actual:** Neither exists. The request may have reached Bee before the reply was lost, so retrying can create a second to-do and a second wrist alarm, while not retrying can lose the prompt.
+- **Severity:** medium. For a product whose prompts buzz someone's wrist, duplicates are a real cost.
+- **Workaround:** After an unclear failure, look for a to-do with the same text made in the last two minutes (`bee todos list`). If that can't settle it either, record the prompt as sent, never send another, and let it expire.
+- **Suggestion:** Accept an idempotency key on `todos create`.
+
+## F-032: The Bee library sometimes reports a command's normal output as its error message
+
+- **Tool:** Bee library (`@beeai/cli/lib` 0.7.3)
+- **Date:** 2026-10-09
+- **Task:** Turn failures into safe, classifiable errors.
+- **Steps:** Read `runJson` in `dist/lib/index.js` and exercised it with a stand-in program.
+- **Expected:** An error with a stable code or type, and a message that comes from the error stream only.
+- **Actual:** When a command exits non-zero with nothing on standard error, the library uses standard output as the error message. There are no error codes, so callers must match on English sentences, and a server's JSON error text replaces the HTTP status, so a 4xx and a 5xx can't always be told apart.
+- **Severity:** low to medium. Matching on sentences is brittle, and output can contain private text.
+- **Workaround:** Pass through only the handful of sentences we recognise; replace everything else with our own fixed message.
+- **Suggestion:** Throw errors with a `code` (for example `NOT_LOGGED_IN`, `NOT_FOUND`, `NETWORK`, `HTTP_503`) and never copy standard output into a message.
+

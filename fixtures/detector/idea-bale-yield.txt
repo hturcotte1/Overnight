@@ -1,0 +1,30 @@
+# SYNTHETIC transcript, written by hand for tests. Not a real conversation and not Bee data.
+# expect: idea
+# category: idea
+# note: Hard: stated once, briefly ("I want a little page where I punch in..."), in the middle of unrelated farm talk.
+[13:02:10] Did the parts guy call back?
+[13:02:13] Tomorrow. He's got to order the bearing from out of state.
+[13:02:18] So the baler's down till Thursday.
+[13:02:21] Looks like. We can still rake the north field if it stays dry.
+[13:02:26] It's not going to stay dry.
+[13:02:28] It might.
+[13:02:30] How's your mom doing?
+[13:02:32] Better. She's walking to the mailbox again.
+[13:02:36] Good. Tell her hi.
+[13:02:38] I will. Hey, how many did we get off the forty last cutting?
+[13:02:43] I'd have to find the notebook. A hundred and something.
+[13:02:47] See, I want a little page where I punch in the field, the acres and the bale count, and it shows me bales per acre next to last year's.
+[13:02:56] Notebook's in the truck.
+[13:02:58] The blue truck or the flatbed?
+[13:03:01] Flatbed. Under the seat. Maybe.
+[13:03:05] That thing needs a new battery too.
+[13:03:08] I know it. Put it on the list.
+[13:03:11] You eat yet?
+[13:03:13] There's chili in the crock pot.
+[13:03:16] Is it the hot one?
+[13:03:18] It's the regular one. You'll live.
+[13:03:21] All right. Shut that gate behind you, the calves are out front.
+[13:03:34] Is that the vet's pickup?
+[13:03:37] He's early. He said two.
+[13:03:40] Well go on, I'll get the bowls.
+[13:03:43] Save me some of the cornbread.
