@@ -371,7 +371,7 @@ The build skill (`crew/build-skill.md`) adds the working rules for the agent: st
   - runs the sandbox check (below).
 - **Cancel before remove.** The job is always removed afterwards. A run that may still be going is cancelled first, because `kirocrew cron remove` takes a job off the list but does not end a run in progress, and kirocrew has no cancel command. Overnight asks the gateway's own local web address to cancel it (measured: the run's processes were gone within a second).
 - In `overnight` mode, Overnight's own `kirocrew` commands run inside the same sandbox profile as the gateway, so nothing of Crew's runs outside the fence at night. They start in `~/.overnight/tmp/build/`, because kirocrew stops with an error when it may not look at the folder it starts in, and the repo is closed to it.
-- Real Kiro Crew builds so far: six, each about 2 to 4 minutes and 2.6 to 4.2 Kiro credits (`docs/spikes.md`). The sixth was the rehearsal on Oct 10, with the real Kiro Crew install. None of them ran from the nightly launchd job yet.
+- Real Kiro Crew builds so far: seven, each about 2 to 4 minutes and 2.6 to 4.6 Kiro credits (`docs/spikes.md`). The sixth was the rehearsal on Oct 10, with the real Kiro Crew install. The seventh was the first real night's, started by the nightly launchd job.
 
 **The sandbox around Kiro Crew (Henry's decision, Oct 10).**
 - Measured: Crew's own sandbox on macOS, even at `strict`, lets a build job read the GitHub login from the Keychain, use the Bee login, read the transcript database, use the network and write anywhere in the home folder. It can't be given extra paths to hide, and its command jobs don't get `strict` at all.
@@ -582,7 +582,7 @@ The spikes:
 - It detects ideas, asks via Bee to-do, and tracks approve, reject and expire.
 - The detector golden set meets its targets. Unit tests are green.
 
-**M2: Build and deliver (Mon Oct 12 – Tue Oct 13).** **Built on Oct 10, ahead of plan. Rehearsed for real on the evening of Oct 10; the first real night is the night of Oct 10 to 11.** Tests, typecheck and lint pass (1,478 tests on Oct 10).
+**M2: Build and deliver (Mon Oct 12 – Tue Oct 13).** **Built on Oct 10, ahead of plan. Rehearsed for real on the evening of Oct 10. The first real night, Oct 10 to 11, worked end to end.** Tests, typecheck and lint pass (1,478 tests on Oct 10).
 - Brief writer.
 - Kiro Crew nightly job plus the kiro-cli fallback.
 - Deliver step: smoke test, GitHub Pages, morning to-do, Bee fact.
@@ -598,11 +598,9 @@ The spikes:
 - **Two things only the real set-up could show, both fixed the same evening:**
   - Kiro's sign-in lasts an hour and cannot be renewed from inside the build sandbox, so our own code now renews it outside the sandbox before every build (§6).
   - macOS does not let a background job whose program is `sandbox-exec` read a file under `~/Documents`, so the gateway job is pointed at its own copy of the sandbox profile in the data folder (§6).
-- **Still pending:**
-  - the real morning Bee to-do and fact have never been created (the first real morning does that);
-  - the build and deliver jobs have not yet fired by themselves at their set times;
-  - a Kiro Crew gateway that has been idle for more than an hour before a build (the sign-in it started with has run out by then; the Kiro CLI builder is the fallback if Kiro Crew cannot start an agent);
-  - **the first real end-to-end overnight run.**
+- **The first real night, Oct 10 to 11** (`docs/spikes.md`, "The first real night"). The idea was heard through Bee on the morning of Oct 10 and approved on the wrist. That night the build job started by itself, renewed Kiro's sign-in, passed the sandbox check, and Kiro Crew built the app in 160 s for 4.59 credits, with a gateway that had been idle for three hours. In the morning the deliver job checked it in the sandbox (6.6 s), published it (live after 26 s), created the real Bee to-do with the link and wrote the Bee fact. Both jobs ended with exit code 0. Nobody touched the Mac in between.
+- **One thing was off: both jobs ran exactly an hour late** (2:00 and 7:30 instead of 1:00 and 6:30), so the alarm was set for about 7:32 instead of 7:00. macOS's scheduler was still working in the time zone the Mac had when it last restarted (the zone was changed a day later). A restart fixes it. Making Overnight's own code decide when it is time, instead of trusting macOS's calendar, is Milestone 3.
+- **Still pending:** whether the wrist really buzzed that morning (to hear from the wearer), and a night with the Mac's scheduler in the right time zone.
 - **Found by the independent check on Oct 10 and left for Milestone 3** (none blocks a night; `docs/spikes.md` has the list): a build job can still read the list of running programs and connect to other programs' local sockets and local ports; a Kiro Crew job can read and change Kiro Crew's own settings and another idea's workspace; the rehearsal's "not the real folder" rule can be got round by typing the folder in an unusual spelling; a brand-new Kiro install needs one Kiro command run outside the sandbox before the gateway can start an agent; `git` does not run inside the build sandboxes.
 - **Decided Oct 10:** a Kiro Crew job listing the names in the home folder is accepted (§9, limit 5). Hiding the list of running programs from the build sandboxes waits for Milestone 3, where it can be tried with a real build (§9, limit 6).
 

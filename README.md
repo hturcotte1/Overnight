@@ -12,14 +12,14 @@ Built for Amazon's "Build, Ship, Shape" developer hackathon (Bee track, plus the
 |---|---|---|
 | 0 | Prove each outside piece (Bee, Kiro, GitHub Pages) with a small script against the real tools | Done. Results in [docs/spikes.md](docs/spikes.md) |
 | 1 | Hear, notice, ask: an always-on listener that saves what Bee hears, spots ideas with Kiro, asks through a Bee to-do and tracks the answer | Done. Running on real Bee data; the first real idea was heard, asked about on the wrist and approved on Oct 10 |
-| 2 | Build and deliver: Kiro Crew builds approved ideas overnight; Overnight tests, publishes and sends the link | Built, tested and rehearsed for real on Oct 10. **The first real night is the night of Oct 10 to 11** (see below) |
+| 2 | Build and deliver: Kiro Crew builds approved ideas overnight; Overnight tests, publishes and sends the link | Done. **The first real night, Oct 10 to 11, worked end to end** (see below) |
 | 3 to 5 | Dashboard, real nights, submission | Later |
 
 So today Overnight can hear, notice an idea, ask on the wrist and record the answer, for real. The building half is written and its tests pass. What has and has not been proven about it:
 
 - **Proven for real, on scratch data:** Kiro Crew and Kiro CLI each built an invented app inside Overnight's sandbox. The morning's checks ran on apps a Kiro agent built, and on apps made to misbehave. Stopping a build or a delivery half-way leaves nothing running and nothing stuck.
 - **Rehearsed for real on Oct 10:** an invented idea went the whole way with the real Kiro Crew install inside the sandbox: built in 2 minutes 19 seconds, checked, published by the real publisher and live 21 seconds later, at [practice-dice-roller](https://hturcotte1.github.io/overnight-apps/practice-dice-roller/). Bee was a stand-in. The backup builder (Kiro CLI) and the morning's checks also ran as a background job, the way the night jobs do.
-- **Pending:** the build and deliver jobs have not yet fired by themselves at their set times, and the morning Bee to-do and fact have never been created for real. The first real night does both.
+- **The first real night, Oct 10 to 11:** an idea heard through Bee and approved on the wrist the morning before was built overnight by Kiro Crew in 2 minutes 40 seconds, checked, published, and put on the wearer's Bee to-do list with its link, with nobody touching the Mac: [plant-watering-tracker](https://hturcotte1.github.io/overnight-apps/plant-watering-tracker/). Both night jobs ran an hour late, because macOS's scheduler was still on the time zone the Mac had before its last restart; a restart fixes that.
 
 ## How the listening half works
 

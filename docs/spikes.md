@@ -555,6 +555,37 @@ The practice app is public at `https://hturcotte1.github.io/overnight-apps/pract
 | `git` and `mktemp -t` do not work inside the build sandboxes | No build has needed them. Noted here |
 | When a page was pushed but not seen live, the morning's printed line does not say so | The note is on the idea, in the report and in the log. One more printed line is Milestone 3 |
 
+## The first real night (2026-10-10 to 10-11)
+
+The whole loop for real, with nobody at the Mac: an idea spoken near the watch on the morning of Oct 10, approved on the wrist, built overnight and delivered the next morning.
+
+| Step | When (Boise time) | What happened |
+|---|---|---|
+| Heard and approved | Oct 10, 10:15 to 10:21 am | See "First real end-to-end run of the listening half" above |
+| Build job starts | Oct 11, 2:00:01 am | Started by launchd, an hour late (below) |
+| Kiro's sign-in | 2:00:02 | Renewed outside the sandbox: 43 minutes left |
+| Sandbox check | 2:00:09 | Passed in 7.2 s, from a gateway that had been running, idle, for three hours |
+| Kiro Crew build | 2:00:11 to 2:02:41 | Built in 160 s for 4.59 credits. Kiro Crew's job list was empty afterwards |
+| Deliver job starts | 7:30:01 am | Started by launchd, an hour late |
+| Checks in the sandbox | 7:30:08 | Passed in 6.6 s: 3 files, 6,851 bytes, nothing fetched from outside, no errors, fits a phone |
+| Publish | 7:30:11 to 7:30:37 | Pushed as "Overnight" with the noreply address; live on Pages after 26 s |
+| Bee | 7:30:37 | The real to-do with the link was created, then the Bee fact. Bee still lists the to-do as open hours later |
+
+Both jobs ended with exit code 0. The app is at `https://hturcotte1.github.io/overnight-apps/plant-watering-tracker/`.
+
+**What this settled.**
+- A gateway that has been idle for more than an hour can still start an agent, as long as the sign-in is renewed outside the sandbox first. The open question from the rehearsal is closed.
+- The build and deliver jobs run by themselves from launchd, with the Mac's lid closed and on mains power (it was plugged in at 12:49 am, having been on battery with the lid closed before that).
+- The real publisher, the real Bee to-do and the real Bee fact all work from the deliver job.
+
+**What was off: an hour late.** Both jobs ran exactly one hour after their set times, to the second (2:00:01 and 7:30:01). macOS's own log shows why. After the build it wrote "Rescheduling StartCalendarInterval: com.overnight.build: Monday, October 12, 2026 at 2:00:00 AM Mountain Daylight Time" for a job whose settings say hour 1. The part of macOS that keeps the calendar for background jobs had been running since the Mac last restarted (Oct 6), and the Mac's time zone was changed the day after (Oct 7). It was still counting in the old zone, one hour behind. Because the morning run came after `DELIVER_TIME`, the to-do's alarm was set two minutes out (about 7:32) instead of for 7:00.
+- Fix for now: restart the Mac once, so that part of macOS starts again in the right zone.
+- Fix for good (Milestone 3): have the jobs wake often and let Overnight's own code, which knows its time zone, decide whether it is time. That also covers a Mac that was asleep at 1:00.
+
+**Also learned.** The listener's keep-awake (`caffeinate -s`) only works on mains power. On battery the Mac sleeps after a minute, and with the lid closed it sleeps whatever is asked. That night a second keep-awake was started by hand for battery; building that in is Milestone 3 too.
+
+**Not known yet:** whether the wrist really buzzed at about 7:32. To hear from the wearer.
+
 ## Decisions that came out of the spikes
 
 1. **How the nightly Kiro Crew job is allowed to work** (finding 2). **Decided on Oct 9:** build jobs get `--approval-mode auto`, Crew's documented setting for unattended jobs. (The plan to also raise Crew's sandbox to `strict` was overtaken by decision 2.) (The alternative, leaving every Crew setting alone and having Crew only start our own `kiro-cli` builder, was the weaker Kiro Crew story and no safer.)
