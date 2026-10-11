@@ -1,0 +1,302 @@
+;; Overnight: the macOS sandbox a Kiro CLI build runs in (the fallback build backend).
+;;
+;; Used as (packages/builder/src/kiro-cli.ts builds this command line):
+;;   /usr/bin/sandbox-exec -f kiro-cli-build.sb \
+;;       -D HOME=<home folder> -D WORKSPACE=<the one workspace folder> \
+;;       -D DATA_DIR=<Overnight's data folder> -D REPO=<this repo> \
+;;       -D NODE_DIR=<the Node.js install: the folder that holds bin/node> \
+;;       -D NPM_CACHE=<npm's cache folder, ~/.npm> \
+;;       <kiro-cli> chat --no-interactive ...
+;; Every value must be a full REAL path (no symbolic links in it, no "/" at the end). A missing
+;; value makes sandbox-exec refuse to start anything, which is the safe way to fail.
+;; A profile of ours may only ask for these names: HOME, DATA_DIR, REPO, NODE_DIR, NPM_CACHE,
+;; KIRO_HOME, CREW_HOME, TMPDIR, and here also WORKSPACE.
+;;
+;; What it is: a fence, not a sealed box. The network stays open (the model service, the npm
+;; registry) and the operating system's own files stay readable. Everything a person keeps on
+;; this Mac is closed unless it is on a short list. It is the same fence as crew-gateway.sb, the
+;; profile the Kiro Crew gateway runs in, and narrower: here the one workspace of this build is
+;; the only folder of Overnight's that can be seen or written, nothing of Kiro Crew's can be
+;; reached, and the home folder cannot even be listed.
+;;   - READING and RUNNING are refused everywhere in the home folder, Overnight's data folder,
+;;     this repo, the Node.js install, other disks, the folder shared between accounts and the
+;;     shared temporary folders, and the list of this Mac's accounts cannot be read. Section 3
+;;     is the list of what a build may read and run all the same, each entry with its reason.
+;;   - WRITING is refused in all of those places and where programs are installed, except the
+;;     shorter list in section 5. A build must not be able to change anything that is later run,
+;;     or read as a setting, outside this sandbox.
+;;   - Other programs cannot be listed, looked at or signalled, and their command lines cannot be
+;;     read. Some programs are handed private text that way, and a build can run WHILE they
+;;     run. (Overnight's own detector no longer is: since Oct 10 its prompt goes in on standard
+;;     input. An earlier version of this file said no rule could hide command lines. The four
+;;     rules at the end of section 1 do: tried with a stand-in process, by reading its command
+;;     line directly and with pgrep.)
+;;   - Starting other apps, creating background jobs, the Keychain, the clipboard, the
+;;     preferences service and the ssh agent are refused.
+;;
+;; Still reachable from inside, by design or because it cannot be helped: the network, Kiro
+;; CLI's own sign-in store, settings and saved sessions, the build's own temporary folder, and
+;; macOS's own files outside the home folder (/Applications, /Library, /System, /usr,
+;; /private/etc ...). That is why a brief only ever holds our own words plus a cleaned title and
+;; pitch.
+;;
+;; Rule order matters: when two rules match, the LATER one wins.
+(version 1)
+(allow default)
+
+(define home (param "HOME"))
+(define workspace (param "WORKSPACE"))
+(define data-dir (param "DATA_DIR"))
+(define repo (param "REPO"))
+(define node-dir (param "NODE_DIR"))
+(define npm-cache (param "NPM_CACHE"))
+(define (home-path rel) (string-append home rel))
+(define (data-path rel) (string-append data-dir rel))
+(define (node-path rel) (string-append node-dir rel))
+(define (npm-path rel) (string-append npm-cache rel))
+;; The build jobs' own temporary folder. The build is given it as TMPDIR. (Not the account's
+;; usual temporary folder: that one is shared with every other program of this user and stays
+;; closed.)
+(define build-tmp (data-path "/tmp/build"))
+;; Everything inside a folder, but not the folder itself. A rule made with (subpath ...) also
+;; covers the folder's own name, and a build that may write THAT can move the whole folder away
+;; and put something else in its place. Rules follow names, not files.
+(define (below dir) (regex (string-append "^" (regex-quote dir) "/")))
+;; Lets a folder be reached without the folders above it being opened: each folder on the way
+;; may be looked at (its name and kind), not listed or read. Node and the shell look at every
+;; folder on the way to a file before they will open or run it.
+(define (allow-traverse path)
+  (let loop ((i 1))
+    (if (< i (string-length path))
+        (begin
+          (if (char=? (string-ref path i) #\/)
+              (allow file-read-metadata (literal (substring path 0 i))))
+          (loop (+ i 1))))))
+
+;; 1. Ways out of the sandbox, and ways to reach other programs.
+;;    Starting or scripting other apps (they would run outside it), creating background jobs:
+(deny lsopen)
+(deny appleevent-send)
+(deny job-creation)
+;;    launchctl: macOS itself refuses a sandboxed program that asks it to stop, kill, restart or
+;;    unload a background job, but it does accept "disable" (tried on a throwaway job), which
+;;    would keep the listener from starting again after the next login. A copy of the program
+;;    is killed by macOS when it starts, so refusing the one real path is enough for the tool.
+(deny process-exec* (literal "/bin/launchctl"))
+;;    Signals: only to what this build started itself. Nothing may stop, freeze or kill another
+;;    program of this user (the listener, the program watching this build). The one-line form
+;;    (deny signal (target others)) loads on this macOS but does not stop anything.
+(deny signal)
+(allow signal (target same-sandbox))
+;;    Other programs cannot be looked at either. All four rules are needed: the first two stop
+;;    asking macOS about another process, the third stops reading its command line directly
+;;    (the exact name "kern.procargs2" alone does not: the rule has to be the prefix), and the
+;;    last stops `pgrep` and `top`, which get command lines from a system service instead.
+;;    What this build started itself (same sandbox) can still be looked at and signalled.
+(deny process-info*)
+(allow process-info* (target same-sandbox))
+(deny sysctl-read (sysctl-name-prefix "kern.procargs"))
+(deny mach-lookup (global-name "com.apple.sysmond"))
+
+;; 2. Reading and running: nothing in the home folder, Overnight's data folder, this repo, the
+;;    Node.js install, other disks, the folder shared between accounts or the shared temporary
+;;    folders. (A file that may not be read can still be RUN unless that is refused too.)
+(deny file-read* process-exec*
+  (subpath home)
+  (subpath data-dir)
+  (subpath (home-path "/.overnight"))
+  (subpath repo)
+  (subpath node-dir)
+  (subpath "/Volumes")
+  (subpath "/Users/Shared")
+  (subpath "/private/tmp")
+  (subpath "/private/var/tmp")
+  (subpath "/private/var/folders"))
+;;    The list of this Mac's accounts:
+(deny file-read* (literal "/Users"))
+
+;; 3. ... except what a build needs. A real Kiro CLI build (Oct 10: npm install, the build and the
+;;    browser smoke test) ran with exactly this list.
+(allow file-read* process-exec*
+  ;; Kiro CLI's own: its settings (the "do not share my content" switches, which the builder asks
+  ;; it for from inside this sandbox before every build), its saved sessions, and the
+  ;; instructions it loads into every session (agents, steering, skills, prompts).
+  ;; Nothing of Kiro Crew's: not its folder, not its program.
+  (literal (home-path "/.kiro"))
+  (subpath (home-path "/.kiro/settings"))
+  (subpath (home-path "/.kiro/sessions"))
+  (subpath (home-path "/.kiro/agents"))
+  (subpath (home-path "/.kiro/steering"))
+  (subpath (home-path "/.kiro/skills"))
+  (subpath (home-path "/.kiro/prompts"))
+  ;; Kiro CLI's sign-in store and its own data.
+  (subpath (home-path "/Library/Application Support/kiro-cli"))
+  ;; Of the Node.js install only node, npm and npx: tools installed "globally" live in the same
+  ;; folder (the Bee program does on this Mac, with its command in Node's own bin folder).
+  (literal (node-path "/bin/node"))
+  (literal (node-path "/bin/npm"))
+  (literal (node-path "/bin/npx"))
+  (subpath (node-path "/lib/node_modules/npm"))
+  (subpath (node-path "/lib/node_modules/corepack"))
+  (subpath (node-path "/include"))
+  ;; Of npm's cache only the package store and npm's own "last checked" note. Not npm's logs,
+  ;; which name other projects on this Mac (they can be written, see below and section 5, never
+  ;; listed or read).
+  (subpath (npm-path "/_cacache"))
+  (literal (npm-path "/_update-notifier-last-checked"))
+  ;; The browser the app's own smoke test runs in.
+  (subpath (home-path "/Library/Caches/ms-playwright")))
+;;    npm's logs: npm looks for its log file by name before it makes it, and gives up on a
+;;    refusal. So a name in that folder may be looked at (is it there, how big), which is all:
+;;    the folder cannot be listed and no log can be opened.
+(allow file-read-metadata (subpath (npm-path "/_logs")))
+;;    The folders on the way to those: looked at, never listed.
+(allow-traverse (home-path "/.kiro/settings"))
+(allow-traverse (home-path "/Library/Application Support/kiro-cli"))
+(allow-traverse (node-path "/bin/node"))
+(allow-traverse (node-path "/lib/node_modules/npm"))
+(allow-traverse (node-path "/include"))
+(allow-traverse (npm-path "/_cacache"))
+(allow-traverse (home-path "/Library/Caches/ms-playwright"))
+
+;; 4. Writing: nowhere in the home folder, Overnight's data folder, this repo, the places
+;;    programs are installed in, other disks, or the shared temporary folders ...
+(deny file-write*
+  (subpath home)
+  (subpath data-dir)
+  (subpath (home-path "/.overnight"))
+  (subpath repo)
+  (subpath node-dir)
+  (subpath "/Applications")
+  (subpath "/Library")
+  (subpath "/opt")
+  (subpath "/usr/local")
+  (subpath "/Users/Shared")
+  (subpath "/Volumes")
+  (subpath "/private/tmp")
+  (subpath "/private/var/tmp")
+  (subpath "/private/var/folders"))
+
+;; 5. ... except what a build needs.
+(allow file-write*
+  ;; Kiro CLI's own: saved sessions, and its sign-in store. Nothing else in ~/.kiro: not its
+  ;; settings (the "do not share my content" switches), not the instructions it loads into every
+  ;; later session (steering, skills, prompts, agents), and nothing of Kiro Crew's.
+  (below (home-path "/.kiro/sessions"))
+  (below (home-path "/Library/Application Support/kiro-cli"))
+  ;; npm's download cache and its logs (not ~/.npm/_npx: packages kept there are run later
+  ;; without being checked)
+  (subpath (npm-path "/_cacache"))
+  (subpath (npm-path "/_logs"))
+  (literal (npm-path "/_update-notifier-last-checked")))
+
+;; 6. Logins: no reading, no running, no writing, whatever sections 3 and 5 say now or are
+;;    changed to say later.
+(deny file-read* file-write* process-exec*
+  (subpath (home-path "/.ssh"))
+  (subpath (home-path "/.aws"))
+  (subpath (home-path "/.config/gh"))
+  (subpath (home-path "/Library/Keychains"))
+  (literal (string-append repo "/.env"))
+  ;; the same folders and files Kiro Crew's own "strict" level hides
+  (subpath (home-path "/.kiro/crew/.vault"))
+  (literal (home-path "/.kiro/crew/.env"))
+  (subpath (home-path "/.kiro/crew-auth-staging"))
+  (subpath (home-path "/.gnupg"))
+  (subpath (home-path "/.gpg"))
+  (subpath (home-path "/.config/gcloud"))
+  (subpath (home-path "/.azure"))
+  (subpath (home-path "/.docker"))
+  (subpath (home-path "/.kube"))
+  (literal (home-path "/.npmrc"))
+  (literal (home-path "/.pypirc"))
+  (literal (home-path "/.netrc"))
+  (literal (home-path "/.git-credentials"))
+  ;; the GitHub program, the one program that could publish, and what it keeps
+  (literal (home-path "/.local/bin/gh"))
+  (subpath (home-path "/.local/state")))
+
+;; 7. Never writable, whatever section 5 says now or is changed to say later: where programs are
+;;    run from, and where settings are read from, OUTSIDE this sandbox.
+(deny file-write*
+  ;; node, kirocrew, kiro-cli and gh
+  (subpath (home-path "/.local"))
+  (subpath node-dir)
+  (subpath "/Applications")
+  ;; Kiro Crew: its program files, its own folder, the agent files it shares with Kiro CLI
+  (subpath (home-path "/.kiro/crew"))
+  (subpath (home-path "/.kiro/crew-venv"))
+  (literal (home-path "/.kiro/crew-venv-current"))
+  (subpath (home-path "/.kiro/crew-python"))
+  (subpath (home-path "/.kiro/agents"))
+  ;; Kiro's settings, and the files Kiro CLI gives to shells to load
+  (subpath (home-path "/.kiro/settings"))
+  (subpath (home-path "/Library/Application Support/kiro-cli/shell"))
+  ;; this repo: the `overnight` tool itself
+  (subpath repo)
+  ;; background jobs
+  (subpath (home-path "/Library/LaunchAgents"))
+  ;; what shells and git read when they start
+  (literal (home-path "/.zshenv"))
+  (literal (home-path "/.zshrc"))
+  (literal (home-path "/.zprofile"))
+  (literal (home-path "/.zlogin"))
+  (literal (home-path "/.zlogout"))
+  (literal (home-path "/.bash_profile"))
+  (literal (home-path "/.bashrc"))
+  (literal (home-path "/.bash_login"))
+  (literal (home-path "/.profile"))
+  (literal (home-path "/.gitconfig"))
+  (subpath (home-path "/.config")))
+
+;; 8. Overnight's own data: what Bee heard and everything made from it (the database, the logs,
+;;    the detector's Kiro sessions, briefs, reports, screenshots, the clone that is pushed to
+;;    GitHub, the lock files), and the other ideas' workspaces. All of it is closed, for reading,
+;;    running and writing, whatever the sections above say now or are changed to say later. The
+;;    usual data folder is closed as well as the one in use: a build run against a test data
+;;    folder must still not see the real transcripts.
+(deny file-read* file-write* process-exec*
+  (subpath (home-path "/.overnight"))
+  (subpath data-dir))
+;;    ... except the one workspace of this build, and the build jobs' own temporary folder.
+;;    Reading includes the folder itself; writing does not, so a build cannot move its own
+;;    workspace away (see "below" above).
+(allow file-read* process-exec*
+  (subpath workspace)
+  (subpath build-tmp))
+(allow file-write*
+  (below workspace)
+  (below build-tmp))
+;;    The folders on the way to them (the data folder, its workspaces and tmp folders, and
+;;    whatever is above): looked at, never listed.
+(allow-traverse workspace)
+(allow-traverse build-tmp)
+
+;; 9. Claude Code's own files: the records of the sessions this project was written in, and
+;;    their scratch folders, which have held test output with what Bee heard in it. Never
+;;    readable, runnable or writable, whatever any rule above says, and even if WORKSPACE were
+;;    ever set to a folder that contains them.
+(deny file-read* file-write* process-exec*
+  (regex #"^/private/tmp/claude-[0-9]+(/|$)")
+  (subpath (home-path "/.claude"))
+  (literal (home-path "/.claude.json"))
+  (literal (home-path "/.claude.json.backup"))
+  (subpath (home-path "/Library/Application Support/Claude"))
+  (subpath (home-path "/Library/Caches/claude-cli-nodejs")))
+
+;; 10. System services a build has no business with.
+(deny mach-lookup
+  ;; the Keychain (GitHub's and Bee's logins live there). Kiro CLI does not need it: in the
+  ;; experiment it signed in and ran a whole build with this rule in place.
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.securityd")
+  ;; the clipboard
+  (global-name "com.apple.pasteboard.1")
+  ;; the preferences service: it writes files in ~/Library/Preferences on a program's behalf,
+  ;; whatever the file rules above say
+  (global-name "com.apple.cfprefsd.agent")
+  (global-name "com.apple.cfprefsd.daemon"))
+;;    The ssh agent: macOS gives every program its socket, and keys loaded in it could be used
+;;    without ever reading ~/.ssh.
+(deny network-outbound
+  (remote unix-socket (path-regex #"^/private/var/run/com\.apple\.launchd\.[^/]+/Listeners$")))

@@ -281,6 +281,106 @@ describe("createTodo, when the create fails but Bee may have made the to-do", ()
   });
 });
 
+describe("createFact", () => {
+  const FACT = "Overnight built “Chore wheel” on Oct 10: https://example.invalid/chore-wheel/";
+  const FACT_ARGS = ["facts", "create", "--text", FACT];
+  // The shape the real program printed in spike 4, with made-up values.
+  const bare = { id: 501, text: FACT, tags: ["general"], created_at: 1760032800000, confirmed: true, user_id: 31337, timezone: "America/Boise" };
+
+  it("passes the text as one separate argument", async () => {
+    const { bee, calls } = gatewayWith(() => bare);
+    await bee.createFact(FACT);
+    expect(calls).toEqual([FACT_ARGS]);
+  });
+
+  it("accepts the bare reply and the wrapped one, and returns only the id", async () => {
+    expect(await gatewayWith(() => bare).bee.createFact(FACT)).toEqual({ id: 501 });
+    expect(await gatewayWith(() => ({ fact: { ...bare, id: 502 } })).bee.createFact(FACT)).toEqual({ id: 502 });
+    expect(await gatewayWith(() => ({ id: 503 })).bee.createFact(FACT)).toEqual({ id: 503 });
+  });
+
+  it("throws bad-response, naming the field, when the reply has no usable id", async () => {
+    for (const reply of [{}, { fact: {} }, { id: "five hundred" }, { id: 5.5 }, null, "ok", [bare]]) {
+      const error = await thrownBy(gatewayWith(() => reply).bee.createFact(FACT));
+      expect(error.kind).toBe("bad-response");
+      expect(error.message).toMatch(/^bee facts create returned a reply we could not read \((id|\(whole reply\))\)\.$/);
+    }
+  });
+
+  it("never logs the fact's text, or anything else from the reply", async () => {
+    const { bee, log } = gatewayWith(() => bare);
+    await bee.createFact(FACT);
+    expect(log.lines.join("\n")).not.toMatch(/Chore wheel|example\.invalid|31337/);
+    expect(logged(log).find((line) => line.message === "Bee fact created")).toMatchObject({ level: "info", factId: 501 });
+  });
+
+  it("refuses empty text before calling Bee", async () => {
+    const { bee, calls } = gatewayWith(() => bare);
+    for (const text of ["", "   ", "\n\t"]) {
+      const error = await thrownBy(bee.createFact(text));
+      expect(error.kind).toBe("failed");
+      expect(error.message).toBe("createFact needs some text.");
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses text with a NUL character before calling Bee, without repeating the text", async () => {
+    const { bee, calls, log } = gatewayWith(() => bare);
+    const error = await thrownBy(bee.createFact("made-up fact\u0000tail"));
+    expect(error.kind).toBe("failed");
+    expect(error.message).toBe("createFact cannot send text with a NUL character in it.");
+    expect(calls).toEqual([]);
+    expect(log.lines.join("\n")).not.toContain("made-up fact");
+  });
+
+  it('says "failed" or "logged-out" only when nothing can have been created', async () => {
+    const refused: Array<[string, Reply, BeeError["kind"]]> = [
+      ["no login", fails('Not logged in. Run "bee login" first.'), "logged-out"],
+      ["Bee's server turning the request down", fails("Request failed with status 400\nbee facts create --text <text> [--json]"), "failed"],
+      ["no connection at all", fails(NEVER_CONNECTED), "failed"],
+      ["a bee program that cannot be started", cannotStart, "failed"],
+    ];
+    for (const [what, reply, kind] of refused) {
+      const { bee, calls } = gatewayWith(reply);
+      expect((await thrownBy(bee.createFact(FACT))).kind, what).toBe(kind);
+      expect(calls, what).toEqual([FACT_ARGS]);
+    }
+  });
+
+  it('says "timeout" or "bad-response" when the fact may exist, and does not go looking for it', async () => {
+    const maybeCreated: Array<[string, Reply, BeeError["kind"]]> = [
+      ["the time limit", hangsUntilAborted, "timeout"],
+      ["a connection cut off part-way", fails(CUT_OFF), "bad-response"],
+      ["a server error", fails("Request failed with status 503"), "bad-response"],
+      ["an error text we have never seen", fails("Something made-up went wrong"), "bad-response"],
+      ["output that is not JSON", fails("Failed to parse Bee CLI JSON output: Unexpected token 'N'"), "bad-response"],
+      ["a reply with no id", () => ({ text: FACT }), "bad-response"],
+    ];
+    for (const [what, reply, kind] of maybeCreated) {
+      const { bee, calls } = gatewayWith(reply, 20);
+      expect((await thrownBy(bee.createFact(FACT))).kind, what).toBe(kind);
+      // One command and no second one: a to-do is looked up after an unclear failure, a fact is not.
+      expect(calls, what).toEqual([FACT_ARGS]);
+    }
+  });
+
+  it("names the command, not the text, in its errors", async () => {
+    const timedOut = await thrownBy(gatewayWith(hangsUntilAborted, 20).bee.createFact(FACT));
+    expect(timedOut.message).toBe("bee facts create timed out after 0.02 s");
+    const unknown = await thrownBy(gatewayWith(fails(`Could not store: ${FACT}`)).bee.createFact(FACT));
+    expect(unknown.message).toBe("bee facts create failed with an unrecognised error");
+  });
+
+  it("still returns the fact when the logger throws", async () => {
+    const { client } = fakeClient(() => bare);
+    const broken = () => {
+      throw new Error("made-up: disk full");
+    };
+    const logger = { debug: broken, info: broken, warn: broken, error: broken, child: broken };
+    expect(await createBeeGateway({ client, logger }).createFact(FACT)).toEqual({ id: 501 });
+  });
+});
+
 describe("todoStatus", () => {
   it('runs "bee todos get <id>"', async () => {
     const { bee, calls } = gatewayWith(() => ({ id: 11, completed: false }));

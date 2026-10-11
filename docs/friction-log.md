@@ -391,3 +391,243 @@ Severity scale: **low** (cosmetic or a few minutes lost), **medium** (needed a w
 - **Workaround:** Pass through only the handful of sentences we recognise; replace everything else with our own fixed message.
 - **Suggestion:** Throw errors with a `code` (for example `NOT_LOGGED_IN`, `NOT_FOUND`, `NETWORK`, `HTTP_503`) and never copy standard output into a message.
 
+## F-033: Kiro Crew's `strict` sandbox leaves the Keychain, other apps' logins and the user's files reachable
+
+- **Tool:** Kiro Crew 0.8.0 on macOS 26
+- **Date:** 2026-10-10
+- **Task:** Keep an unattended build agent away from the owner's GitHub login, another app's login (Bee) and a private database.
+- **Steps:** `kirocrew config set agent.sandbox strict`, restart the gateway, run an agent job (`--approval-mode auto`) that prints only byte counts: `security find-generic-password -s gh:github.com -w | wc -c`; the Bee CLI's `me --json | wc -c`; `wc -c` of a private SQLite file in the home folder; `touch` in the home folder and in `/tmp`; a `curl` to the npm registry.
+- **Expected:** `strict` is described as the level for hosts holding credentials the agent must never read, so we expected the Keychain and ordinary home-folder files to be out of reach, or at least a way to add our own paths.
+- **Actual:** Keychain entry readable (75 bytes), Bee login usable (101 bytes), database readable (86,016 bytes), both writes allowed, network open. The only change from the default level was that `~/.config/gh` became unreadable, which breaks the `gh` program but not the token behind it. On macOS the sandbox is "allow everything, except reading a fixed list of folders", and the list can't be extended from config. All four probes were logged as `auto_approved` by Crew's command rules.
+- **Severity:** high for unattended use on a personal machine.
+- **Workaround:** Run the whole Crew gateway inside our own `sandbox-exec` profile (F-034) and feed the agent nothing but our own short brief.
+- **Suggestion:** A setting for extra hidden paths, a rule that cuts Keychain access, and a write boundary for agent jobs. Say plainly in the docs what each level does and does not hide on macOS.
+
+## F-034: Kiro Crew can't run inside another sandbox without switching its own off entirely
+
+- **Tool:** Kiro Crew 0.8.0
+- **Date:** 2026-10-10
+- **Task:** Wrap the Crew gateway in our own, tighter macOS sandbox so everything it starts inherits our rules.
+- **Steps:** `sandbox-exec -f <our profile> kirocrew gateway`, then add and trigger a job.
+- **Expected:** A way to say "an outer sandbox is in charge" while keeping Crew's own file protections, since macOS can't stack sandboxes.
+- **Actual:** Every job fails at once: "already inside a macOS Seatbelt sandbox that KiroCrew did not create, and Seatbelt cannot nest". The only way through is `agent.sandbox_allow_unsandboxed_exec = true`, which turns all of Crew's own sandboxing off, takes effect only after a gateway restart (nothing says so), and makes Crew warn at every start that no sandbox is available, which isn't true. The error for command jobs talks about a missing POSIX shell instead of the sandbox. With Crew's sandbox off, jobs can read Crew's own private files. `kirocrew doctor` reports the sandbox as fine throughout.
+- **Severity:** high as a design limit; medium for the misleading messages.
+- **Workaround:** Accept the trade: our profile hides more of what matters to us, and a probe job before each night's builds proves it.
+- **Suggestion:** An "outer sandbox" mode that trusts the surrounding sandbox for process confinement but keeps Crew's own file-level protections, plus accurate messages and a doctor row that says what running jobs are really confined by.
+
+## F-035: `agent.sandbox` doesn't apply to command jobs, and `doctor` doesn't show the level
+
+- **Tool:** Kiro Crew 0.8.0
+- **Date:** 2026-10-10
+- **Task:** Check from a zero-credit command job that the `strict` level is in force.
+- **Steps:** With `agent.sandbox strict`, a `--command` job that prints Crew's own `KIROCREW_SANDBOX_LEVEL` variable and `gh auth token | wc -c`. Then `kirocrew doctor`.
+- **Expected:** Level `strict`, token unreachable, and a doctor row naming the level.
+- **Actual:** `KIROCREW_SANDBOX_LEVEL=cc` and a readable token (41 bytes): command jobs always run at a fixed level whatever the setting says. Doctor shows only `backend: sandbox-exec`. It also shows `approval: auto`, although a job without the per-job flag is denied everything, which reads as the opposite of what happens.
+- **Severity:** medium. It is easy to believe a setting is protecting jobs it never touches.
+- **Workaround:** Test a sandbox level only from agent jobs; read the level with `kirocrew config get agent.sandbox`.
+- **Suggestion:** Apply the setting to command and script jobs, or document that they are exempt, and show the active level in doctor.
+
+## F-036: A Kiro Crew agent build costs about nine times the same build through Kiro CLI
+
+- **Tool:** Kiro Crew 0.8.0 with Kiro CLI 2.29.0
+- **Date:** 2026-10-10
+- **Task:** Build one small static web app from a one-page brief.
+- **Steps:** Once with `kiro-cli chat --no-interactive` (spike 6), twice as a Crew agent job with `--model auto`.
+- **Expected:** Similar cost for similar work.
+- **Actual:** 0.4 credits through Kiro CLI; 3.6 and 4.15 credits through Crew, with about 94,500 tokens of context in use at the end of a job. `--minimal-context` saved little and hid the skill list from the agent. The usage record has a blank model name, so we can't tell which model `auto` picked. Crew's own usage log and `kiro-cli /usage` disagreed by about half a credit.
+- **Severity:** medium for budgeting; fine at two builds a night on a Pro plan.
+- **Workaround:** Budget 4 credits a build; keep the Kiro CLI builder as the cheap fallback.
+- **Suggestion:** Record the model on every usage row, and offer a lean job mode that still loads named skills.
+
+## F-037: Kiro Crew jobs have no working-folder option and no reliable result
+
+- **Tool:** Kiro Crew 0.8.0 (`kirocrew cron`)
+- **Date:** 2026-10-10
+- **Task:** Run an agent job in a folder we choose and learn from Crew whether it worked.
+- **Steps:** `kirocrew cron add` an agent job, trigger it, then read `pwd` from inside it and Crew's history afterwards.
+- **Expected:** A `--cwd` style flag, and a status that reflects the outcome.
+- **Actual:** The job runs in a new folder Crew invents under `~/workplace/kirocrew-workspace/` (a top-level folder it adds to the home folder and never cleans up). History status is `success` whenever the session ends, whatever happened; the summary is cut to 200 characters; a command job's output isn't recorded at all. The agent also wrote a "finished at" time into its own status file that was 14 seconds after the file was saved.
+- **Severity:** medium for automation.
+- **Workaround:** Name the real folder by full path in the job message and make the skill start every command with `cd "<workspace>" &&`. Have the skill write a marker file, trust only its modification time, and rebuild the result ourselves.
+- **Suggestion:** A working-folder flag, a way for a job to report a structured result, and cleanup of per-run folders.
+
+## F-038: Playwright turns Chromium's own sandbox off by default, and full Chromium misbehaves inside a macOS sandbox
+
+- **Tool:** Playwright 1.64.0 (Chromium 156) with macOS `sandbox-exec`
+- **Date:** 2026-10-10
+- **Task:** Run a smoke test of AI-written web app code as safely as possible.
+- **Steps:** Launch Chromium through Playwright with no options and look at the launch line; then run the test inside our own `sandbox-exec` profile with `chromiumSandbox: true`, with the default, and with the full Chromium channel.
+- **Expected:** Chromium's sandbox on by default, and a clean failure when something can't start.
+- **Actual:** Playwright adds `--no-sandbox` unless told otherwise, so a test run outside any sandbox executes page JavaScript in an unsandboxed browser. Inside `sandbox-exec`, Chromium's own sandbox can't start ("sandbox initialization failed: Operation not permitted"). The headless shell with the default launch works. The full Chromium channel aborted under the tight profile, and seconds later macOS reopened it as a visible "Google Chrome for Testing" window on the desktop that ran for 90 seconds.
+- **Severity:** medium; high for an unattended early-morning job if the full browser is used.
+- **Workaround:** Always run the browser inside our own profile, use only the headless shell, never set a channel.
+- **Suggestion (Playwright):** Say prominently in the docs that the default launch is unsandboxed.
+
+
+## F-039: `kirocrew cron remove` does not end a job that is running, and there is no command that does
+
+- **Tool:** Kiro Crew 0.8.0 (`kirocrew cron`)
+- **Date:** 2026-10-10
+- **Task:** Stop a build job that is in progress (its time limit passed, or Overnight itself was told to stop).
+- **Steps:** Added a command job that only sleeps, started it with `kirocrew cron trigger <id>`, then ran `kirocrew cron remove <id>` while it was running. Then looked for a command that ends a run.
+- **Expected:** Removing a job ends its run, or `remove` refuses while the job runs, or there is a `cron cancel`.
+- **Actual:** `Removed job: <id>`, and the job slept on. Its running marker stayed in Crew's folder. We found no `kirocrew` command that ends a run. The gateway does have a local web address for it (`POST /api/crons/<id>/cancel`, with the gateway's own local secret in a header): asked that way, the run's processes were gone in under a second and its history row says `cancelled`. It only works while the job is still on the list, so the order matters.
+- **Severity:** medium to high for unattended use. Without the web call, an agent keeps working, and spending credits, with nobody watching and nothing left on the list to show it.
+- **Workaround:** Cancel through the gateway's local address first, then `cron remove`. Never the other way round.
+- **Suggestion:** Add `kirocrew cron cancel <id>`, and make `cron remove` either end the run or refuse while one is in progress.
+
+## F-040: `kirocrew status` exits 0 whether the gateway is running or not
+
+- **Tool:** Kiro Crew 0.8.0
+- **Date:** 2026-10-10
+- **Task:** Have an install script wait until the gateway answers, and have a health check tell "running" from "not running".
+- **Steps:** `kirocrew status; echo $?` with no gateway, then with one running. Also `kirocrew cron trigger <id>` with no gateway.
+- **Expected:** A non-zero exit code when nothing is running, or a `--json` form.
+- **Actual:** Exit code 0 both times. Only the words differ: `Kiro Crew gateway is not running.` against a line with "gateway is running" or its figures. `cron trigger` with no gateway also printed `Error: cannot reach gateway…` and exited 0 (the same habit as the HTTP 409 in F-020).
+- **Severity:** low to medium. Every script has to match English sentences that may change in the next release.
+- **Workaround:** Match the words, or skip the CLI and ask the gateway directly: `GET http://127.0.0.1:5476/api/health` answers 200 in a few milliseconds.
+- **Suggestion:** Exit non-zero when the gateway is not running or a command failed, and offer `--json`.
+
+## F-041: `kirocrew config get` is a read that writes, and prints values a script has to clean up
+
+- **Tool:** Kiro Crew 0.8.0
+- **Date:** 2026-10-10
+- **Task:** Read one setting from a script that promises to change nothing.
+- **Steps:** `kirocrew config get agent.sandbox_allow_unsandboxed_exec` and `kirocrew config get agent.sandbox`, then looked at what had changed under Crew's own folder.
+- **Expected:** A plain value on standard output and no side effects.
+- **Actual:** The value is printed the way Python writes it (`True`, `False`), with a deprecation warning on standard error. Each call also adds lines to Crew's own security log (`security_events.jsonl`), so a "read-only" check is not quite read-only.
+- **Severity:** low.
+- **Workaround:** Lower-case the output and strip spaces and quotes; throw away standard error. Where it matters, read `config.json` directly (carefully: a job inside the gateway can write that file).
+- **Suggestion:** A `--json` form, lower-case booleans, and no log entry for a read.
+
+## F-042: Kiro Crew will not start an agent unless it can open every folder above its own, and it quietly drops `PATH` folders it cannot open
+
+- **Tool:** Kiro Crew 0.8.0, run inside our own macOS sandbox (see F-034)
+- **Date:** 2026-10-10
+- **Task:** Close the home folder to build jobs for reading, not only for writing, and open only the folders a build needs.
+- **Steps:** Started the gateway inside a profile that lets it read Kiro Crew's own folder and the folder it runs agents in, but not list the home folder or `/Users`. Triggered a one-line agent job. Then opened the folders above those two, but not the folders above the ones on the job's `PATH` (where `node` and `kiro-cli` live), and tried again.
+- **Expected:** The job runs. Kiro Crew has full use of its own folders, and nothing it needs lives in the folders above them.
+- **Actual:** First try: the job failed after 58 milliseconds with "cannot verify that macOS agent workspace … a filesystem check failed on '..'". Kiro Crew opens every folder above its own home and above the agent's run folder before it starts an agent. Second try: the job started, but its `PATH` was only `/usr/bin:/bin:/usr/sbin:/sbin`, so `node` was not found. Kiro Crew had dropped every `PATH` folder it could not open, or that has a closed folder above it, without saying so.
+- **Severity:** medium. It forces a gap into any outer sandbox: macOS can't allow opening a folder without allowing its names to be listed, so a job can list the names directly inside the home folder and `/Users`.
+- **Workaround:** Allow opening each folder above (and each `PATH` folder), and nothing inside them. The names can be listed; what they stand for stays closed.
+- **Suggestion:** Check the folders above by looking at them (their kind and owner) instead of opening them for reading, and log every `PATH` entry that is dropped.
+
+## F-043: `kirocrew` stops with a Python error when it may not look at the folder it was started in
+
+- **Tool:** Kiro Crew 0.8.0, run inside our own macOS sandbox
+- **Date:** 2026-10-10
+- **Task:** Run `kirocrew cron add`, `trigger` and `remove` from a background job, inside the same sandbox as the gateway.
+- **Steps:** The background job starts in the project's folder, which the sandbox closes. Ran `kirocrew cron add ...` from there. Separately, started the gateway with its folders moved to a throwaway place (`KIROCREW_HOME`, `KIRO_HOME`) while `~/.kiro/crew-auth-staging` was closed.
+- **Expected:** `kirocrew cron` talks to the gateway and needs nothing from its working folder. With its folders moved, Kiro Crew looks only there.
+- **Actual:** Every command stopped with a Python error before doing anything, so every build was refused. And Kiro Crew checks `~/.kiro/crew-auth-staging` under the real home folder whatever `KIRO_HOME` says, and crashes at start-up when it may not look at it.
+- **Severity:** low to medium. Easy to work round, but the error says nothing about the cause.
+- **Workaround:** Start `kirocrew` in a folder it is allowed to read, and leave `~/.kiro/crew-auth-staging` open in the sandbox.
+- **Suggestion:** Don't depend on the working folder, keep every folder under the configured home, and say which path was refused.
+
+## F-044: Kiro Crew rewrites agent files in the folder Kiro CLI loads agents from, through temporary files with other names
+
+- **Tool:** Kiro Crew 0.8.0 with Kiro CLI 2.29.0
+- **Date:** 2026-10-10
+- **Task:** Let Kiro Crew keep its own agent files up to date, without letting a build job add an agent of its own. (Kiro CLI loads every `.json` file in `~/.kiro/agents` as an agent.)
+- **Steps:** Allowed writing in `~/.kiro/agents` only for names that begin with `kirocrew` or `.kirocrew`, then started the gateway.
+- **Expected:** Crew writes only files with its own names.
+- **Actual:** The gateway logged "Agent config install failed". It writes each agent file through a temporary file named `tmp` plus eight characters plus `.tmp` in the same folder, then renames it. The folder is shared with the user's own Kiro CLI agents, and it is rewritten at every gateway start.
+- **Severity:** low, once the pattern is known.
+- **Workaround:** Allow both name patterns and nothing else. After two real builds the folder held nothing else and no write was refused.
+- **Suggestion:** Keep Crew's agent files in Crew's own folder, or document the names it writes.
+
+## F-045: A prompt given to `kiro-cli chat` as an argument shows up twice in the process list, and the CLI's help doesn't mention the safer way
+
+- **Tool:** Kiro CLI 2.29.0 (`kiro-cli chat --no-interactive`)
+- **Date:** 2026-10-10
+- **Task:** Send private text (a transcript) to Kiro without any other program on the Mac being able to read it.
+- **Steps:** Read `kiro-cli chat --help`. Ran `spikes/09-kiro-stdin-prompt.ts`: an invented prompt once as an argument and once piped in on standard input, while reading the arguments and environment of every process on the Mac 20 times a second.
+- **Expected:** The help text mentions standard input, and something warns that an argument can be read by other programs. (On macOS any program of the same user can read another's arguments.)
+- **Actual:** `kiro-cli chat --help` lists only `[INPUT]  The first question to ask`. Kiro's headless docs page does say piped input is read when there is no argument, but neither place says why that matters. Passed as an argument, the prompt was readable in the arguments of two processes, because `kiro-cli` starts `kiro-cli-chat` with the same arguments. Piped in, the whole prompt was read as one message (several lines; 13.8 KB in one try; accents, Japanese and emoji in another), and it appeared in no process's arguments or environment. With nothing piped in, Kiro exits 1 in 0.2 seconds without calling the model.
+- **Severity:** medium for privacy until you know; low after. We had shipped the argument form in our always-on listener.
+- **Workaround:** Always pipe the prompt in. Our runner now refuses to start Kiro with any argument longer than 200 characters.
+- **Suggestion:** Mention standard input in `kiro-cli chat --help`, and warn in the headless docs that a prompt given as an argument is visible to other programs.
+
+## F-046: Kiro CLI reads its settings from the home folder even when `KIRO_HOME` points somewhere else
+
+- **Tool:** Kiro CLI 2.29.0
+- **Date:** 2026-10-10
+- **Task:** Give a sandboxed build its own Kiro folder, and close the user's own `~/.kiro` to it.
+- **Steps:** Ran Kiro CLI inside our sandbox with `KIRO_HOME` set to a throwaway folder, and watched which files it needed.
+- **Expected:** With `KIRO_HOME` set, Kiro CLI reads its settings there and nowhere else.
+- **Actual:** It still reads `~/.kiro/settings/cli.json` under the real home folder. (Its sign-in is in a third place, `~/Library/Application Support/kiro-cli`, as spike 8 found.)
+- **Severity:** low. It matters because the two content-sharing switches live in that settings file.
+- **Workaround:** Leave `~/.kiro/settings` readable (never writable) in the sandbox, and keep content sharing switched off in the default settings folder as well as in any `KIRO_HOME` of our own.
+- **Suggestion:** Document which files follow `KIRO_HOME` and which don't.
+
+## F-047: Playwright runs every file whose name matches `testMatch`, in any subfolder
+
+- **Tool:** Playwright 1.64.0
+- **Date:** 2026-10-10
+- **Task:** Run exactly one test file of our own, in a folder that also holds test files an AI agent wrote.
+- **Steps:** A settings file with `testDir: "."` and `testMatch: "contract.spec.ts"`, with the app's own tests copied into a subfolder next to our test.
+- **Expected:** Only `./contract.spec.ts` runs: the string names one file.
+- **Actual:** Playwright puts `**/` in front of the string, so a file of the same name in any subfolder is picked up too. An app that shipped its own `tests/contract.spec.ts` would have had it run inside our test step, where it could print the result line our code reads.
+- **Severity:** medium for anyone who runs trusted and untrusted tests side by side.
+- **Workaround:** Run our own test from a folder that holds our files and nothing else. The app's tests go in a second folder, with a second settings file.
+- **Suggestion:** Say in the `testMatch` docs that a plain string matches in every subfolder, and offer a way to name exactly one file.
+
+## F-048: Playwright's browser is still running after the test runner's process group is killed
+
+- **Tool:** Playwright 1.64.0 (Chromium headless shell)
+- **Date:** 2026-10-10
+- **Task:** Make sure nothing is left running when a browser test ends or runs out of time.
+- **Steps:** Our runner starts every command as the leader of its own process group and kills that group when the command ends or runs out of time. Ran `playwright test` that way and looked at what was left.
+- **Expected:** The browser goes with the group.
+- **Actual:** Playwright starts its browser outside the runner's process group, so the group kill misses it.
+- **Severity:** medium for an unattended job, where a leftover browser would run on with no time limit.
+- **Workaround:** Watch from outside while the test runs (which processes descend from it, a tag in their environment, which folder they live in), and kill whatever is left when it ends.
+- **Suggestion:** An option to keep the browser in the runner's process group, or a note about it in the CI docs.
+
+## F-049: Playwright keeps compiled copies of tests in the shared temporary folder and uses them again
+
+- **Tool:** Playwright 1.64.0
+- **Date:** 2026-10-10
+- **Task:** Run our own test after code we don't trust has run with the same temporary folder.
+- **Steps:** With `TMPDIR` set to an empty folder, ran `playwright test -c contract.config.ts --list`, then looked in that folder and read how Playwright loads its cache.
+- **Expected:** Nothing left behind that a later run trusts, or a cache kept next to the project.
+- **Actual:** The folder now held `playwright-transform-cache-<user number>/`, with compiled copies of our test and of our settings file. A later run loads those instead of compiling again. By reading the code, not by trying it: a program that ran earlier with the same temporary folder could leave a compiled "test" there for our run to pick up.
+- **Severity:** low for ordinary use; medium wherever untrusted code and a trusted test share a temporary folder.
+- **Workaround:** Give every command a fresh temporary folder of its own, and set `PWTEST_CACHE_DIR` to a folder inside it.
+- **Suggestion:** Mention the cache, and `PWTEST_CACHE_DIR`, wherever the docs talk about running tests on shared machines.
+
+## F-050: Kiro Crew describes a 3:00 schedule as "At 4:00 AM"
+
+- **Tool:** Kiro Crew 0.8.0 (`kirocrew cron`)
+- **Date:** 2026-10-10
+- **Task:** Give a build job a schedule that is never due on a normal night (3:00 a.m. on January 1st), so that it only ever starts when Overnight triggers it.
+- **Steps:** `kirocrew cron add <name> "<message>" --cron "0 3 1 1 *" --timezone America/Boise`, in October, while this Mac is on daylight-saving time. Then read how Kiro Crew describes the job's schedule.
+- **Expected:** "At 3:00 AM", in the time zone given. (On January 1st Boise is on standard time, MST.)
+- **Actual:** Kiro Crew described the schedule as "At 4:00 AM MST": an hour off. We did not look into why; our guess is that the hour is worked out with today's daylight-saving offset and labelled with January's. We did not check which of the two times the job would really run at.
+- **Severity:** low for us, because our jobs are started by `cron trigger` and never by their schedule. For anyone relying on a daily time across a clock change, it is worth checking.
+- **Workaround:** None needed. We chose a schedule that is months away either way.
+- **Suggestion:** Describe the schedule exactly as it will run in the job's time zone, and say in the docs what happens to a daily job when the clocks change.
+
+## F-051: Kiro's sign-in lasts an hour and can't be renewed from inside a sandbox that closes the Keychain
+
+- **Tool:** Kiro CLI 2.29.0, and Kiro Crew 0.8.0 (which starts Kiro CLI for its agents)
+- **Date:** 2026-10-10
+- **Task:** Run Kiro builds unattended inside a macOS sandbox that refuses the Keychain (the GitHub login is in there too, and a build must not reach it).
+- **Steps:** Sign in once with `kiro-cli login`. Leave Kiro unused for more than an hour. Start the Kiro Crew gateway (or `kiro-cli whoami`) inside the sandbox.
+- **Expected:** Still signed in. We signed in with a browser once and expected that to last.
+- **Actual:** Kiro's sign-in is good for about an hour (`kiro-cli whoami -vvv` prints `valid_for=3567s` right after a renewal). After that Kiro renews it by itself, using a secret in the Keychain. Inside the sandbox that fails: `whoami -vvv` logs "refreshing social access token" and then "encountered orchestrator error; halting", and the gateway logs "AcpRuntime dead ... You are not logged in, please log in with kiro-cli login" and "Failed to create background session". Nothing was wrong with the sign-in: the same command outside the sandbox renewed it at once, and after that the sandboxed programs were signed in again too. A poll every four minutes inside the sandbox missed all of this for two hours, because something outside kept renewing it.
+- **Severity:** high for unattended use. The build at 1:00 a.m. is the first Kiro use in hours.
+- **Workaround:** Before every build our own code, outside the sandbox, runs `kiro-cli whoami -vvv` (`packages/builder/src/kiro-signin.ts`). That renews a sign-in that has run out. Kiro has no command to renew one early, so if less than ten minutes are left we wait for it to run out and ask again. The Kiro CLI builder is the fallback if a Kiro Crew agent still can't start.
+- **Suggestion:** A `kiro-cli` command that renews the sign-in now, and one that prints how long it still lasts without `-vvv`. Say in the headless docs that the sign-in is hourly and what renewing it needs. Let the gateway retry its background session after a sign-in failure, and say "the sign-in could not be renewed" rather than "you are not logged in".
+
+## F-052: A brand-new Kiro home can't start an agent inside a sandbox that makes Kiro's settings folder read-only
+
+- **Tool:** Kiro CLI 2.29.0 (found through Kiro Crew 0.8.0)
+- **Date:** 2026-10-10
+- **Task:** Start the Kiro Crew gateway inside our sandbox with a fresh, empty Kiro home (a throwaway one, for testing).
+- **Steps:** Point `KIRO_HOME` at an empty folder with an empty `settings` folder in it. Start the gateway inside a sandbox that lets a job read `settings` but not write it. Start an agent job.
+- **Expected:** The agent starts. Reading settings should not need to write.
+- **Actual:** Every agent start fails at once: "io error acquiring file lock at <home>/settings/cli.json.lock: Operation not permitted", then "Failed to create background session". Kiro CLI creates `cli.json` and `cli.json.lock` the first time it runs, even just to read a setting. On this Mac both files have been there since Oct 9, so the real install is not affected.
+- **Severity:** low for us, medium for anyone sandboxing a fresh install.
+- **Workaround:** Run one Kiro command outside the sandbox first (`kiro-cli settings telemetry.enabled`), which creates both files.
+- **Suggestion:** Open the lock file read-only when only reading, or keep it somewhere meant for run-time files rather than beside the settings.

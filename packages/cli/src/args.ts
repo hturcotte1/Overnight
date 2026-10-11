@@ -1,11 +1,12 @@
-// Command-line parsing by hand: one command word, then on/off switches like --json.
-// No switch takes a value yet, so there is nothing more to it.
+// Command-line parsing by hand: one command word, then on/off switches like --json, and (for
+// build-now and rehearse only) a few more words, such as an idea's id. No switch takes a value,
+// so there is nothing more to it.
 
 export interface ParsedArgs {
   command: string | null;
   /** Switch names without the dashes: "--json" is "json". "-h" counts as "help". */
   flags: Set<string>;
-  /** Anything after the command that is not a switch. No command takes any yet. */
+  /** Anything after the command that is not a switch. build-now takes the idea's id; rehearse takes "new" or "run" and their words. */
   extras: string[];
 }
 

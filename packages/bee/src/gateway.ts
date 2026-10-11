@@ -18,7 +18,7 @@ import { defaultBeeBinary } from "./binary.ts";
 import { safeFirstLine, toBeeError } from "./errors.ts";
 import type { ErrorHints } from "./errors.ts";
 import { neverThrowing } from "./logging.ts";
-import { findOpenTodo, parseChanged, parseCreatedTodo, parseTodoCompleted, parseTranscript } from "./replies.ts";
+import { findOpenTodo, parseChanged, parseCreatedFact, parseCreatedTodo, parseTodoCompleted, parseTranscript } from "./replies.ts";
 import { sanitiseStreamPayload } from "./sanitise.ts";
 
 /** The part of Bee's library we use. The real client fits it; tests pass a fake. */
@@ -356,10 +356,28 @@ export function createBeeGateway(options: BeeGatewayOptions = {}): DisposableBee
     return parseTodoCompleted(reply) ? "completed" : "open";
   }
 
+  /**
+   * Add one fact to the wearer's Bee account ("Overnight built ..."). One command, one time limit.
+   *
+   * The error kinds mean what they mean for createTodo: "failed" and "logged-out" are proof that
+   * nothing was created; "timeout" and "bad-response" mean the fact MAY exist. Unlike a to-do,
+   * nothing is looked up afterwards: a fact buzzes nobody, so a missing one is harmless, and the
+   * caller simply does not write it again.
+   */
+  async function createFact(text: string): Promise<{ id: number }> {
+    if (text.trim() === "") throw new BeeError("failed", "createFact needs some text.");
+    // Node will not start a program with a NUL character in an argument, and says so by quoting
+    // the argument. Refuse it here, in our own words.
+    if (text.includes("\u0000")) throw new BeeError("failed", "createFact cannot send text with a NUL character in it.");
+    const created = parseCreatedFact(await run("facts create", ["facts", "create", "--text", text]));
+    log.info("Bee fact created", { factId: created.id });
+    return created;
+  }
+
   function dispose(): void {
     stopAll.abort();
     stopSwitches.delete(stopAll);
   }
 
-  return { loginState, stream, changedSince, transcriptSince, createTodo, todoStatus, dispose };
+  return { loginState, stream, changedSince, transcriptSince, createTodo, todoStatus, createFact, dispose };
 }

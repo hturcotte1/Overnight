@@ -39,6 +39,22 @@ export interface Idea {
   answeredAt: string | null;
   /** Why the idea is where it is (for example "over the daily ask limit"). No transcript text. */
   note: string | null;
+  /** Folder name of the published app, made from the title. Set when a build starts. */
+  slug: string | null;
+  /** Which builder made it: "kiro-crew" or "kiro-cli". */
+  buildBackend: string | null;
+  buildStartedAt: string | null;
+  builtAt: string | null;
+  publishedUrl: string | null;
+  publishedAt: string | null;
+  /** When the morning to-do with the link was created. (A "couldn't finish" to-do is recorded in failureNotifiedAt.) */
+  deliveredAt: string | null;
+  morningTodoId: number | null;
+  factId: number | null;
+  /** Why a build or publish failed, in plain words. No transcript text. */
+  failureReason: string | null;
+  /** When the wearer was told about a failure, so they are told only once. */
+  failureNotifiedAt: string | null;
 }
 
 export interface IdeaEvent {
@@ -150,6 +166,8 @@ export interface BeeGateway {
   createTodo(text: string, alarmAt: Date): Promise<{ id: number }>;
   /** "deleted" only when Bee positively says the to-do does not exist. Any other failure throws. */
   todoStatus(id: number): Promise<TodoStatus>;
+  /** Add one fact to the wearer's Bee account. Same error-kind rule as createTodo. */
+  createFact(text: string): Promise<{ id: number }>;
 }
 
 export class BeeError extends Error {

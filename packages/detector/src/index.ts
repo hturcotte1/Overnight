@@ -6,5 +6,5 @@ export { isNearDuplicate, titleTokens } from "./dedupe.ts";
 export { CHAR_LIMITS, countWords, findJsonObjects, MIN_QUOTE_WORDS, parseVerdict, quoteAppearsIn, shortenQuote, verdictSchema, WORD_LIMITS } from "./schema.ts";
 export type { ParsedVerdict } from "./schema.ts";
 export { buildPrompt, MAX_RECENT_TITLES, MAX_TRANSCRIPT_WORDS } from "./prompt.ts";
-export { createKiroRunner, findKiroBinary, stripAnsi } from "./kiro.ts";
-export type { KiroRunner, KiroRunResult } from "./kiro.ts";
+export { createKiroRunner, findKiroBinary, MAX_ARGUMENT_CHARS, stripAnsi } from "./kiro.ts";
+export type { KiroRunner, KiroRunOptions, KiroRunResult } from "./kiro.ts";

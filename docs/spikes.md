@@ -2,7 +2,9 @@
 
 One small script per outside piece, run for real before we build on it. This file records what each one proved. No Bee data appears here: only field names, timings and yes/no answers.
 
-Last updated: 2026-10-09
+Later sections record what building Milestones 1 and 2 added, each checked against the real tools.
+
+Last updated: 2026-10-10
 
 ## Status
 
@@ -16,6 +18,7 @@ Last updated: 2026-10-09
 | 6 | Does `kiro-cli chat --no-interactive` build a hello-world Vite app? | `spikes/06-kiro-build.ts` | **Passed** (2026-10-09): built in 52 seconds |
 | 7 | Does publishing a `dist/` folder to `overnight-apps` give a working GitHub Pages link? | `spikes/07-pages-publish.ts` | **Passed** (2026-10-09) |
 | 8 | Does `kiro-cli chat --no-interactive` (no tools) return valid detector JSON? | `spikes/08-kiro-detector.ts` | **Passed** (2026-10-09): 6 of 6 valid and correct |
+| 9 | Does `kiro-cli chat --no-interactive` read its prompt from standard input, so the prompt need not be on the command line? | `spikes/09-kiro-stdin-prompt.ts` | **Passed** (2026-10-10): the whole prompt is read from standard input, and it appears in no process's arguments |
 
 ## This Mac's setup
 
@@ -32,7 +35,7 @@ Everything except Kiro CLI is installed per user, with no Homebrew. Kiro CLI's i
 
 `~/.zshenv` adds `~/.local/bin` and `~/.local/node/bin` to `PATH`. Background jobs (launchd) don't read that file, so they must use full paths.
 
-Kiro: `kiro-cli` is signed in with GitHub on the **Kiro Pro** plan (1,000 credits a month). All of today's Kiro tests together, including a second run of each script, used about 1.1 credits. Kiro Crew settings changed from their defaults: `stt.enabled false` (voice typing, unused), `timezone America/Boise`, `auto_update false`. Sandbox and approval settings are untouched. Kiro CLI settings changed: `codeWhisperer.shareCodeWhispererContentWithAWS false` and `telemetry.enabled false`, in the default settings folder and in the detector's own `KIRO_HOME` (Henry's decision, Oct 9).
+Kiro: `kiro-cli` is signed in with GitHub on the **Kiro Pro** plan (1,000 credits a month). All of today's Kiro tests together, including a second run of each script, used about 1.1 credits. Kiro Crew settings changed from their defaults: `stt.enabled false` (voice typing, unused), `timezone America/Boise`, `auto_update false`. On Oct 9 the sandbox and approval settings were untouched. Since Milestone 2 experiment A (Oct 10), `agent.sandbox` on the real install is `strict` (it was `auto`). `agent.sandbox_allow_unsandboxed_exec` has not been switched on there yet; every test that needed it used a throwaway Kiro Crew home. Switching it on is the first step of the real set-up, which is pending. Kiro CLI settings changed: `codeWhisperer.shareCodeWhispererContentWithAWS false` and `telemetry.enabled false`, in the default settings folder and in the detector's own `KIRO_HOME` (Henry's decision, Oct 9).
 
 GitHub: `gh` is logged in as `hturcotte1` (token in the macOS keychain, scopes `repo`, `read:org`, `gist`). This folder's `origin` is `https://github.com/hturcotte1/Overnight.git`.
 
@@ -249,6 +252,8 @@ Notes for the build:
 kiro-cli chat --no-interactive --agent overnight-detector --model claude-haiku-4.5 "<prompt + transcript>"
 ```
 
+(That is how the spike ran. Since Oct 10 the detector sends the prompt on standard input instead, with no prompt on the command line: see spike 9 below.)
+
 | Measure | Result |
 |---|---|
 | Valid JSON matching the detector schema | 6 of 6, first try |
@@ -338,9 +343,228 @@ What this settles:
 - Not yet tried: ticking from the watch instead of the phone.
 - Not yet tried with real speech: rejecting by deleting the to-do, and letting an ask expire. Both paths are covered by tests, and deletion was seen for real in spike 3.
 
+## Milestone 2 experiments (2026-10-10)
+
+Three experiments before building the build-and-deliver half. Probes printed only byte counts and yes/no.
+
+### A. Kiro Crew building unattended, at its `strict` sandbox level
+
+- **It builds.** An agent job with `--approval-mode auto`, started with `kirocrew cron trigger`, built a small app from a one-page brief and a skill file in 2 minutes 22 seconds with nobody approving anything. Our own `npm ci`, `npm run build` and the app's Playwright test passed afterwards. Cost: 3.6 Kiro credits (plain `kiro-cli` built a similar app for 0.4).
+- **`strict` does not protect what matters here.** From inside an agent job at `strict`:
+
+  | Probe | Result |
+  |---|---|
+  | GitHub login in the Keychain (`security find-generic-password`) | **readable** (75 bytes) |
+  | Bee, as the logged-in user | **works** (101 bytes) |
+  | The transcript database | **readable** (86,016 bytes) |
+  | Network | open |
+  | Writing in the home folder and `/tmp` | allowed |
+  | `gh auth token` | 0 bytes: `strict` hides `~/.config/gh`, which breaks the `gh` program but not the Keychain entry behind it |
+
+- Crew's zero-credit command jobs don't get `strict` at all (they always run at a fixed level), `kirocrew doctor` doesn't show which level is active, and the hidden-folder list can't be extended.
+- Crew's "success" still only means the session ended. The marker file the skill writes, checked by its modification time, plus our own rebuild, decide whether a build worked.
+- An agent job runs in a folder Crew invents (`~/workplace/kirocrew-workspace/...`); the job message and the skill must name the real workspace by full path.
+
+### B. The whole Kiro Crew gateway inside our own sandbox
+
+- macOS sandboxes can't be stacked. Started inside ours, Crew refuses to run any job ("already inside a macOS Seatbelt sandbox that KiroCrew did not create") until `agent.sandbox_allow_unsandboxed_exec` is `true` and the gateway is restarted. That turns Crew's own sandbox off.
+- With that set (in a throwaway Crew home; the real install was not touched), inside our profile, from both a command job and an agent job: **Keychain entry 0 bytes, Bee refused, transcript database unreadable**, `gh` logged out, logs and detector folders hidden. Kiro still signed in with the Keychain service cut off, and an agent job built the same app in 2 minutes 42 seconds (about 4.2 credits).
+- The limits: it is a fence around named files and the Keychain, not a sealed box. The network is open, a job can write elsewhere in the home folder, and with Crew's sandbox off a job can read Crew's own private files. The `overnight` command is blind inside it (the database is hidden), so our own code must hand the job its brief and record the result.
+
+### C. Running agent-written code inside our own sandbox at verify time
+
+- `npm ci`, `npm run build`, a local static server and a Playwright smoke test all run inside a tight `sandbox-exec` profile, in about 2.8 seconds, the same as without it.
+- The tight profile: no reading in the home folder except the folders the run needs, no writing except the run folder, no macOS system services at all (which removes the Keychain, the clipboard and app launching in one rule), no network except two local ports. 62 probes found nothing private reachable.
+- The looser "allow everything, then deny a list" style is escapable: `open -a Calculator` started an app outside the sandbox. Denying app launching closes that.
+- `sandbox-exec` can't filter the network by host name, so `npm ci` runs offline against the npm cache, with a small local proxy that reaches only the npm registry as the fallback.
+- Chromium's own sandbox can't start inside ours; Playwright's default launch already turns it off. Only the headless shell works under the tight profile. Full Chromium crashed and, once, macOS reopened it as a visible window: never use it in deliver.
+- Outside the sandbox, the publish step must refuse symbolic links in `dist/` (a planted link would otherwise copy an outside file into the published site).
+
+## Milestone 2 fix rounds (2026-10-10)
+
+Milestone 2 was built, reviewed, fixed, reviewed again as a whole, and fixed once more, all on Oct 10. This section records what those rounds learned about the tools and about the macOS sandbox, and what was run for real. Everything here used scratch data folders and, where a Kiro Crew gateway was needed, a throwaway Kiro Crew home on another port. Probes printed only counts and yes/no.
+
+**What has still never happened** (and is not claimed anywhere below): a night job running under launchd, the Kiro Crew gateway starting from its installed job, a real push to GitHub Pages from the deliver step, a real morning Bee to-do or fact, the rehearsal, and the first real night. All pending.
+
+### Spike 9: Kiro CLI reads its prompt from standard input. Passed (2026-10-10)
+
+**Question:** the detector used to hand Kiro its prompt, with what was just said in it, as a command-line argument. Any program of the same user can read another program's arguments. Can the prompt go in another way?
+
+**Answer:** yes. With `--no-interactive` and no prompt argument, Kiro reads everything piped to it as one prompt.
+
+`spikes/09-kiro-stdin-prompt.ts` sends an invented prompt with a random code word in it. While Kiro runs, it reads the arguments and environment of every process on the Mac every 50 milliseconds and looks for the code word.
+
+| Try | Result |
+|---|---|
+| Prompt piped in, 313 bytes on 6 lines, no prompt argument (run twice) | Exit 0 in about 2.5 s, right answer. Code word in no process's arguments and no environment (about 30 looks each) |
+| Long prompt piped in, 13,819 bytes, about 150 lines | Exit 0 in 2.5 s, right answer. Kiro's own record says the prompt was 13,819 long, so nothing was cut |
+| Accents, Japanese and emoji piped in | Exit 0, the accented word came back exactly. Kiro recorded 423, which is the size in bytes (410 characters) |
+| The old way, prompt as an argument (the control) | Code word seen in the arguments of **two** processes, `kiro-cli` and `kiro-cli-chat` |
+| Nothing piped in, no argument | Exit 1 in 0.2 s, no call to the model, no saved chat |
+
+- `kiro-cli chat --help` (2.29.0) does not mention standard input. Kiro's headless docs page does.
+- No tool ran in any of the five chats that reached the model. They cost 0.035 Kiro credits in all.
+- Kiro's saved chat file (`<KIRO_HOME>/sessions/cli/*.json`) records the prompt's length in bytes, how many tools ran, and the credits each turn cost. That is a cheap way to measure cost and to confirm "no tools ran".
+- During a no-tools chat Kiro starts a `kiro-cli-chat acp` helper and short-lived `security` (Keychain) helpers. None carried prompt text.
+
+**What changed because of it:** the detector now sends its prompt on standard input. Its chats start with exactly `chat --no-interactive --agent overnight-detector --model <model>`, and the runner refuses any argument longer than 200 characters.
+
+Checked afterwards, with the final code and a scratch data folder:
+
+| Check | Result |
+|---|---|
+| One detection on a synthetic transcript, with the process list read 74 times meanwhile | An idea, first try, 4.3 s. The text in no process's arguments or environment (92 search strings). Kiro recorded a prompt of 6,336 bytes, equal to what was sent; 0 tools; 0.016 credits |
+| The golden set (66 synthetic transcripts) | 24 of 24 ideas asked, 0 of 42 non-ideas asked, precision 1.00, recall 1.00. One transcript needed a second try. Median 3.3 s each (3.1 s the old way). 67 calls, 0 tools, 0.93 credits |
+
+Not tried: a signed-out Kiro with a piped prompt, and the new path from inside a launchd job. The listener that is running was started before the change, so it uses the old way until it is restarted (pending).
+
+### What the macOS sandbox does and does not do
+
+Found while writing and attacking our three `sandbox-exec` profiles on macOS 26. Each line was tried for real unless it says otherwise.
+
+**Signals and other programs**
+
+| Fact | What we do about it |
+|---|---|
+| `(deny signal (target others))` loads without complaint and stops nothing. | Use `(deny signal)` followed by `(allow signal (target same-sandbox))`. |
+| "Same sandbox" means one start of `sandbox-exec`. A second start with the same profile and folders can't signal, see or read a program in the first. | A program left over from one step can't touch the next step's programs. |
+| The exact name does nothing: `(deny sysctl-read (sysctl-name "kern.procargs2"))` let a program read any other program's command line by its process number. `"kern.procargs2.*"` does nothing either. The prefix forms work (`sysctl-name-prefix "kern.procargs2."`, or the prefix `"kern.procargs"`), which suggests the process number follows the name. Refusing only `procargs2` leaves the older `kern.procargs` readable. | Use the prefix `"kern.procargs"`, in all three profiles. Every rule of this kind gets a real test with a decoy process. |
+| The refusal only bites for programs outside the sandbox. A program can still read the command lines of itself, its parent and its children. Measured, not explained. | Good: build tools need that. |
+| The list of running programs is a separate hole. `(deny process-info*)` stops one way of listing them, but `sysctl kern.proc.all` still returned every program on the Mac (over 900, with number and name). The prefix `"kern.proc."` closes it, and npm, tsc, Vite, Playwright and headless Chromium all still work. | In `deliver.sb`. Not yet in the two builder profiles, where the list is still readable (over 900 entries, counted again on Oct 10 with the final profiles; command lines stayed refused). Untested there: Kiro Crew may need the list to manage its jobs. |
+| `pgrep` gets command lines from a system service, `com.apple.sysmond`. Allowing only that service made `pgrep -fl` print an outside program's command line in spite of the other rules. | Refuse that service in the builder profiles. `deliver.sb` allows no system service at all. |
+| Programs that run with extra rights (`ps`, `crontab`) can't start inside any sandbox: exit code 71. From Node it shows as "not permitted". | `crontab` is not a way out, and the build skill tells the agent that `ps` does not work. |
+
+**Ways out we had not thought of**
+
+| Fact | What we do about it |
+|---|---|
+| `launchctl`: from inside a sandbox macOS itself refuses to stop, kill, restart or remove a background job. It does accept `disable` (tried on a throwaway job), which would keep the listener from starting after the next login. | The builder profiles refuse to run `/bin/launchctl`. A copy of it is killed by macOS at start. Hand-written messages to the job system can't be blocked by a profile; in `deliver.sb` `launchctl` runs but is answered "Operation not permitted". |
+| `defaults write` goes round the file rules. It asks the preferences service to write the file for it. | Cut that service in the builder profiles. |
+| A file that may not be read can still be run, unless running is refused too. The `gh` and Bee programs started from inside an early profile. | Refuse running as well as reading. |
+| A program can replace the very folder it is allowed to write: move it aside and put a link to somewhere else in its place. Our own code, outside the sandbox, would then follow the link. | In the deliver step the folder above is read-only while a step runs, and is renamed away afterwards. In the builder profiles a job may write what is inside a folder, not the folder's own name. |
+| A plain "allow everything, then refuse a list" profile is escapable: `open -a Calculator` started an app outside the sandbox (experiment C). | Refuse app launching. |
+| Node 24 stops at once when it may not read the Mac's name (`kern.hostname`), which takes npm and Playwright with it. | The name stays readable. The deliver step searches the built app for it before publishing. |
+
+**Read rules and temporary folders (the last round)**
+
+- Reading can be refused by default in the home folder and a real build still works. Both builders built a real app that way.
+- Every folder on the way to an allowed folder must be allowed to be "looked at" (its name and kind), though not listed. Node, Python and the shell all look at each folder on the way before they open or run a file.
+- A link in a `PATH` folder must itself be readable, or the shell does not find the program.
+- `touch` and npm look at a file before they make it, so a folder that is write-only also needs "look at".
+- A script can't run unless it can be read, but a compiled program can. So tests of "this cannot be run" need a real program.
+- macOS can't allow opening a folder without allowing its names to be listed. That is why a Kiro Crew job can list the names in the home folder (F-042).
+- Rules follow names, not files. A rule for a folder "and everything in it" also covers the folder's own name, so a job that may write it can move the whole folder away.
+- The sandbox compares real paths. A rule written with a symbolic link in it matches nothing, and `sandbox-exec` can't start a program through one. Every path we hand it has its links followed first.
+- Path rules matched `Tmp…` against `tmp…` on this disk: capitals don't count.
+- A missing `-D` value makes `sandbox-exec` refuse to start anything, which is the safe way to fail.
+- A copy of one of Apple's own programs (`/bin/echo`, for one) is killed by macOS when it starts, even outside a sandbox.
+- Builds work with every shared temporary folder closed (`/private/tmp`, `/private/var/tmp`, `/private/var/folders`) and one temporary folder of their own. Playwright's headless browser ran with `~/Library/Preferences` closed too.
+- A shell started in a folder it may not look at still runs, and prints "shell-init: error retrieving current directory". `kirocrew` does not survive that (F-043).
+- Because the builder profiles close all of `/private/tmp`, a helper script kept there can't be started from inside them. Test stand-ins have to live in the build's own workspace.
+- `ps -axww -o pid=,pgid=,command=` shows every process's full arguments to any user. `ps -axEww` adds the environment, but only for the user's own programs.
+
+### Kiro Crew: what the fix rounds found
+
+The surprises are in the friction log (F-039 to F-044, and F-050). The plain facts we now build on:
+
+- A run is ended by asking the gateway's local web address (`POST /api/crons/<id>/cancel`), then the job is removed. Measured: 19 milliseconds to cancel a command job, clean in under 0.7 seconds; on an agent job 0.7 seconds, with both programs it had started gone.
+- `GET /api/health` on the gateway's port answers whether it is running.
+- Kiro Crew gives each agent a temporary folder of its own (`<crew home>/scratch/runtime-<id>`). Command jobs inherit the gateway's temporary folder and `PATH`.
+- Command jobs start in whatever folder the gateway started in.
+- Kiro Crew makes its own folder private (`chmod 700`) at every start, and logs an error if it may not.
+- The folders a job may write must exist before the gateway starts: the sandbox lets a job fill them, not create them.
+- A one-line agent job costs 0.4 to 0.5 Kiro credits. A build costs 2.6 to 4.2.
+
+### What was run for real
+
+**Builds.** Each from an invented brief, through our own builder code, with a throwaway Kiro Crew home on port 5478 and a scratch data folder. The home folder, Kiro's sign-in, node, npm and the Playwright browser were the real ones.
+
+| Build | Sandbox | Result | Time | Kiro credits |
+|---|---|---|---|---|
+| Kiro Crew agent (first fix round) | The tightened gateway profile | Built | 140 s | about 3.1 |
+| Kiro Crew agent | The gateway profile one step before final (it still opened all of `~/.local/bin`) | Built | 119 s | 2.56 |
+| Kiro Crew agent | **The final gateway profile** | Built. `npm install`, the build and the Playwright test (2 of 2) passed inside it; the job was removed; no write was refused | 224 s | 2.87 |
+| Kiro CLI | **The final Kiro CLI profile**, with the real `~/.kiro` | Built. `npm install`, the build and the Playwright test passed inside it | 99 s | not itemised |
+
+With the two builds from the experiments above (142 s for 3.6 credits, 162 s for about 4.2), that makes five Kiro Crew agent builds: 2 to 4 minutes and 2.6 to 4.2 credits each.
+
+Credits for the last round: Kiro's own `/usage` line went from 20.81 to 29.10. That 8.29 is for the whole account and can include other work going on at the same time. Kiro Crew's own records show 6.33 for the builder's jobs (the two builds, and two one-line agent jobs at 0.51 and 0.40).
+
+**The sandbox check.** Against the throwaway gateway inside the final profile it passed in 6.9 seconds, every count 0. Against a gateway inside a deliberately loosened copy it failed, and named the three folders and the command lines that had been opened; the other eight counts stayed 0. Each of the check's lines also fails, in the tests, on a copy of the profile loosened in exactly that way.
+
+**The morning's checks**, inside the final `deliver.sb`, on an app a Kiro agent built:
+
+| Run | Result |
+|---|---|
+| A good app, npm cache warm | Passed in 5.1 to 5.5 s (install 0.5, build 1.5, our test 2.4, the app's test 0.7) |
+| A build that tries to read another program's command line, the list of programs, `pgrep`, `ps`, and to signal it | All refused. Its own child is still readable and stoppable |
+| The same app under a copy with the old rule | The other program's command line was found: it would have reached the published site |
+| A build that leaves a program running | Refused, nothing left running |
+| A build that tries to swap its own folder for a link | All four attempts blocked |
+| An app that ships a forged copy of our test, on a page that calls out | Refused, on the real counts |
+| A build that never ends, 4 s limit | Stopped at 4.6 s, nothing left running |
+| A stop signal 2.5 s into a run | Answered about 220 ms later, nothing left running |
+| Network from inside | Our proxy's port connects. Another local port, an outside address and listening elsewhere are all refused |
+
+An install with an empty npm cache, through the registry-only proxy, worked in the first fix round (15 connections let through, 0 refused, 10.9 s). It was not run again under the final profile, because that round was not allowed to download anything.
+
+**A whole morning** with the real verifier and a real database, and stand-ins for the publisher and for Bee: a stopped run left both ideas `built` and told nobody; the next run delivered both; an idea whose page was "not seen live" was recorded as published with its note; a real failure was told; a stopped build was not told until its second start had also ended badly, and then exactly once.
+
+**The command line**, each command as its own process with only what a background job gets (`PATH` and `HOME`):
+- `status` and `preflight` on a scratch data folder. Preflight ticked Bee, Kiro, the GitHub login, the apps repo and the browser, and put a cross (with the fix, naming the job) on the gateway, the Kiro Crew setting, the skill and the jobs, as expected with nothing installed.
+- `rehearse`: no folder given, the real folder, and a folder inside it are all refused. `rehearse run --no-publish` ran twice, to "delivered", with stand-ins for the two builders and the real verifier.
+- A build while paused recorded a 3-hour-old cut-off build as failed, and `status` showed it waiting for its second try.
+- The installer, with a made-up home folder and stand-ins for `launchctl` and `kirocrew`: all four jobs' files come out valid, and the gateway's command loads in the real sandbox.
+- Before the last round, an end-to-end harness passed 101 of 102 checks. The one failure (a cut-off build left "building" while paused) was fixed in the last round.
+
+**Tests.** 1,467 pass (76 files), with typecheck and lint clean, on Oct 10 after the last round.
+
+## The rehearsal and switching on (2026-10-10, evening)
+
+The first time every part ran for real together: the real Kiro Crew install (its real home, its usual port) inside our sandbox, the real verifier, the real publisher. Only Bee was a stand-in, and the data folder was a scratch one (`~/.overnight-rehearsal`), so nothing could reach the wearer or the real database.
+
+| Run | How it was started | Result |
+|---|---|---|
+| "Practice Dice Roller", Kiro Crew, published | `overnight rehearse run` from a shell, gateway started by hand inside the profile with the installer's own words | Built in 139 s for 3.09 credits. Checked in the deliver sandbox in 5.2 s (3 files, 5,602 bytes). Pushed as "Overnight" with the noreply address. Live on Pages after 21 s. Delivered. Kiro Crew's job list was empty afterwards |
+| "Practice Coin Flip", Kiro CLI, not published | the same, with `BUILD_BACKEND=kiro-cli` and `--no-publish` | Built inside `kiro-cli-build.sb`, checked, delivered (stand-in publisher) |
+| "Practice Tip Splitter", Kiro CLI, not published | **as a one-off launchd job**, with the same program, folder and environment the night jobs get | Built in 123 s, checked in 5.3 s, delivered, exit code 0 |
+| `overnight preflight` on the real data folder | from a shell, and **as a one-off launchd job** | Every line ticked except "build and deliver jobs installed", the sandbox check included |
+
+The practice app is public at `https://hturcotte1.github.io/overnight-apps/practice-dice-roller/`.
+
+**Two things only the real set-up could show.**
+
+1. **Kiro's sign-in lasts an hour, and a sandboxed build can't renew it** (F-051). The first gateway started inside the sandbox logged "You are not logged in": the last renewal was over an hour old, and renewing needs the Keychain, which the sandbox closes on purpose. A renewal made outside the sandbox is seen inside it straight away. So the night flow now asks Kiro "who am I" outside the sandbox before every try on a builder (`packages/builder/src/kiro-signin.ts`). If the sign-in has under ten minutes left, it waits for it to run out and asks again, because Kiro has no way to renew early. Measured: the step takes 0.7 s and read "52 minutes left" and later "47 minutes left" correctly.
+2. **A launchd job whose program is `sandbox-exec` can't read a file under `~/Documents`.** The first install of the gateway job died every 30 seconds with "sandbox-exec: .../crew-gateway.sb: Operation not permitted". This is macOS's privacy protection of the Documents folder, and the dry runs could not show it. The same file is read without trouble when `node` is the job's program and starts `sandbox-exec` itself, which is how the build and deliver jobs use the profiles (shown by the two launchd runs above). The installer now gives the gateway job its own copy of the profile, `<data>/sandbox/crew-gateway.sb`, made again by every `install crew`.
+
+**Not shown yet:** a gateway that has sat idle for more than an hour and is then asked to start an agent. The sign-in it started with has run out by then. Our renewal makes a fresh one available, but whether the long-running gateway picks it up is not known. If it does not, the Kiro CLI builder takes over for that build.
+
+**What the independent check found** (about three and a half hours of tests on Oct 10; it was cut off before it could report, and its results were recovered from its working notes). It re-ran the earlier review's reproductions against the final profiles and attacked them from inside a throwaway gateway. Everything the earlier review listed as open is closed or accepted. What it found beyond that, none of it blocking a night:
+
+| Finding | Status |
+|---|---|
+| The sign-in may not renew inside the sandbox | Confirmed and fixed the same evening (above) |
+| `install crew` did not make three of the folders the gateway needs | Fixed: it now makes all seven |
+| The Kiro CLI builder emptied the temporary folder a running gateway also uses | Fixed: it has its own corner, `tmp/build/kiro-cli/` |
+| A build job can read the list of running programs (over 900 entries: names and numbers, no command lines) and the list of running apps | Left for Milestone 3: the rule that closes it is untested with a Kiro Crew agent |
+| A build job can connect to another program's local socket and to any local port (only the ssh agent's socket is refused) | Left for Milestone 3. The deliver sandbox refuses both |
+| A Kiro Crew job can read and change Kiro Crew's own settings and local secret, and read, write and rename another idea's workspace | Comes with running the whole gateway inside one fence. The nightly check reads Kiro Crew's two settings before every build; moving a workspace away once it is built is Milestone 3 |
+| A job can make a folder named `kirocrew...` in Kiro's agents folder and put any file in it | Left for Milestone 3 |
+| `rehearse` can be pointed at the real data folder through an unusual spelling of its path (`/System/Volumes/Data/...` or `/.vol/...`) | Left for Milestone 3: compare folders by identity, not by text. Until then, type the scratch folder plainly |
+| A brand-new Kiro home cannot start an agent inside the sandbox (F-052) | Not this Mac. An installer check is Milestone 3 |
+| `git` and `mktemp -t` do not work inside the build sandboxes | No build has needed them. Noted here |
+| When a page was pushed but not seen live, the morning's printed line does not say so | The note is on the idea, in the report and in the log. One more printed line is Milestone 3 |
+
 ## Decisions that came out of the spikes
 
-1. **How the nightly Kiro Crew job is allowed to work** (finding 2). **Decided on Oct 9:** that one job gets `--approval-mode auto`, Crew's documented setting for unattended jobs, and Crew's sandbox is raised to its `strict` level at the same time. No other Crew setting changes. (The alternative, leaving every Crew setting alone and having Crew only start our own `kiro-cli` builder, was the weaker Kiro Crew story and no safer.)
-2. **Keeping logins away from the builder** (finding 3). Needs its own small spike in M2: Crew's `strict` sandbox level, Kiro permission rules, and what a build can still reach.
+1. **How the nightly Kiro Crew job is allowed to work** (finding 2). **Decided on Oct 9:** build jobs get `--approval-mode auto`, Crew's documented setting for unattended jobs. (The plan to also raise Crew's sandbox to `strict` was overtaken by decision 2.) (The alternative, leaving every Crew setting alone and having Crew only start our own `kiro-cli` builder, was the weaker Kiro Crew story and no safer.)
+2. **Keeping logins away from the builder** (finding 3). **Decided on Oct 10**, after experiments A and B above: the whole Kiro Crew gateway runs inside Overnight's own sandbox, Crew's own sandbox setting is switched off because the two can't be stacked, and a probe before each night's builds must show the GitHub login, the Bee login and the transcripts are unreachable or nothing is built. The build agent is only ever given `brief.md`, with no quote and no facts.
 3. **Keeping the Mac awake at 1:00 a.m.** It's a MacBook that sleeps after a minute of idle. **Agreed on Oct 9:** Henry keeps it plugged in with the lid open on build nights, and the background jobs hold it awake while they run.
 4. **Kiro content sharing. Decided on Oct 9: switched off.** By default Kiro may use prompts from individual accounts to improve its service, and the detector will send transcript text. Both settings (`codeWhisperer.shareCodeWhispererContentWithAWS` and `telemetry.enabled`) are now `false` on this Mac, in the default settings folder and in the detector's own `KIRO_HOME`. Any new `KIRO_HOME` we create needs the same two settings before real text goes through it.
+
+Four more came out of the Milestone 2 fix rounds, all decided on Oct 10 while planning the last round:
+
+5. **A stopped build gets one more try.** A build that was stopped or cut off (not one that failed) is built once more by the next nightly run. The wearer is told "couldn't finish" only when that second start also ends badly. The rule is in one place, `packages/core/src/build-retry.ts`.
+6. **Pushed but not seen live still counts as published.** If the push to GitHub went through but the page was not seen serving the new app within the 10-minute wait, the idea is recorded as published and announced as usual, with a note saying it was not confirmed. (The page is not looked at again later; that is a known gap.)
+7. **The build sandboxes refuse reading by default.** Not only writing: nothing in the home folder can be read or run except a short list, and build jobs get a temporary folder of their own. One exception is built in for Kiro Crew, because it will not start an agent otherwise: a job can list the names directly inside the home folder (F-042). Whether to keep that, or to make Kiro CLI the first builder instead, is still open.
+8. **Rehearsals are a real command.** `overnight rehearse` tries the night and the morning on an invented idea. It can never reach Bee, and it refuses the real data folder.

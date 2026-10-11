@@ -82,6 +82,21 @@ const MIGRATIONS: string[] = [
   `,
   // utterancesSpokenNear() runs for every line heard, across all conversations.
   `CREATE INDEX utterances_by_spoken_at ON utterances(spoken_at);`,
+  // Milestone 2: what happens to an idea after it is approved.
+  `
+  ALTER TABLE ideas ADD COLUMN slug TEXT;
+  ALTER TABLE ideas ADD COLUMN build_backend TEXT;
+  ALTER TABLE ideas ADD COLUMN build_started_at TEXT;
+  ALTER TABLE ideas ADD COLUMN built_at TEXT;
+  ALTER TABLE ideas ADD COLUMN published_url TEXT;
+  ALTER TABLE ideas ADD COLUMN published_at TEXT;
+  ALTER TABLE ideas ADD COLUMN delivered_at TEXT;
+  ALTER TABLE ideas ADD COLUMN morning_todo_id INTEGER;
+  ALTER TABLE ideas ADD COLUMN fact_id INTEGER;
+  ALTER TABLE ideas ADD COLUMN failure_reason TEXT;
+  ALTER TABLE ideas ADD COLUMN failure_notified_at TEXT;
+  CREATE UNIQUE INDEX ideas_by_slug ON ideas(slug) WHERE slug IS NOT NULL;
+  `,
 ];
 
 export interface ConversationRef {
@@ -134,7 +149,38 @@ export interface IdeaPatch {
   askedAt?: string | null;
   askExpiresAt?: string | null;
   answeredAt?: string | null;
+  slug?: string | null;
+  buildBackend?: string | null;
+  buildStartedAt?: string | null;
+  builtAt?: string | null;
+  publishedUrl?: string | null;
+  publishedAt?: string | null;
+  deliveredAt?: string | null;
+  morningTodoId?: number | null;
+  factId?: number | null;
+  failureReason?: string | null;
+  failureNotifiedAt?: string | null;
 }
+
+/** Which column each patch field is stored in. */
+const PATCH_COLUMNS: Record<keyof IdeaPatch, string> = {
+  note: "note",
+  todoId: "todo_id",
+  askedAt: "asked_at",
+  askExpiresAt: "ask_expires_at",
+  answeredAt: "answered_at",
+  slug: "slug",
+  buildBackend: "build_backend",
+  buildStartedAt: "build_started_at",
+  builtAt: "built_at",
+  publishedUrl: "published_url",
+  publishedAt: "published_at",
+  deliveredAt: "delivered_at",
+  morningTodoId: "morning_todo_id",
+  factId: "fact_id",
+  failureReason: "failure_reason",
+  failureNotifiedAt: "failure_notified_at",
+};
 
 export interface AwaitingDetection {
   conversationKey: string;
@@ -187,6 +233,17 @@ function toIdea(row: Row): Idea {
     askExpiresAt: (row.ask_expires_at as string | null) ?? null,
     answeredAt: (row.answered_at as string | null) ?? null,
     note: (row.note as string | null) ?? null,
+    slug: (row.slug as string | null) ?? null,
+    buildBackend: (row.build_backend as string | null) ?? null,
+    buildStartedAt: (row.build_started_at as string | null) ?? null,
+    builtAt: (row.built_at as string | null) ?? null,
+    publishedUrl: (row.published_url as string | null) ?? null,
+    publishedAt: (row.published_at as string | null) ?? null,
+    deliveredAt: (row.delivered_at as string | null) ?? null,
+    morningTodoId: (row.morning_todo_id as number | null) ?? null,
+    factId: (row.fact_id as number | null) ?? null,
+    failureReason: (row.failure_reason as string | null) ?? null,
+    failureNotifiedAt: (row.failure_notified_at as string | null) ?? null,
   };
 }
 
@@ -458,24 +515,56 @@ export class Store {
       const current = this.getIdea(id);
       if (!current) throw new Error(`No idea with id ${id}.`);
       assertTransition(current.state, to);
-      const next = {
-        note: patch.note === undefined ? current.note : patch.note,
-        todoId: patch.todoId === undefined ? current.todoId : patch.todoId,
-        askedAt: patch.askedAt === undefined ? current.askedAt : patch.askedAt,
-        askExpiresAt: patch.askExpiresAt === undefined ? current.askExpiresAt : patch.askExpiresAt,
-        answeredAt: patch.answeredAt === undefined ? current.answeredAt : patch.answeredAt,
-      };
-      this.#db
-        .prepare("UPDATE ideas SET state = ?, note = ?, todo_id = ?, asked_at = ?, ask_expires_at = ?, answered_at = ?, updated_at = ? WHERE id = ?")
-        .run(to, next.note, next.todoId, next.askedAt, next.askExpiresAt, next.answeredAt, now, id);
+      this.#applyPatch(id, patch, now, to);
       this.#db.prepare("INSERT INTO idea_events (idea_id, at, from_state, to_state, note) VALUES (?, ?, ?, ?, ?)").run(id, now, current.state, to, patch.note ?? null);
       return this.getIdea(id) as Idea;
     })();
   }
 
+  /** Write the given fields of an idea (and optionally its state). Fields left out keep their value. */
+  #applyPatch(id: string, patch: IdeaPatch, now: string, state?: IdeaState): void {
+    const sets: string[] = ["updated_at = ?"];
+    const params: unknown[] = [now];
+    if (state !== undefined) {
+      sets.push("state = ?");
+      params.push(state);
+    }
+    for (const [field, column] of Object.entries(PATCH_COLUMNS) as Array<[keyof IdeaPatch, string]>) {
+      const value = patch[field];
+      if (value === undefined) continue;
+      sets.push(`${column} = ?`);
+      params.push(value);
+    }
+    this.#db.prepare(`UPDATE ideas SET ${sets.join(", ")} WHERE id = ?`).run(...params, id);
+  }
+
   /** Change an idea's note without changing its state (for example "over today's ask limit"). */
   setIdeaNote(id: string, note: string | null, now: string): void {
     this.#db.prepare("UPDATE ideas SET note = ?, updated_at = ? WHERE id = ?").run(note, now, id);
+  }
+
+  /** Record facts about an idea (a published link, a failure reason) without changing its state. */
+  updateIdea(id: string, patch: IdeaPatch, now: string): Idea {
+    if (!this.getIdea(id)) throw new Error(`No idea with id ${id}.`);
+    this.#applyPatch(id, patch, now);
+    return this.getIdea(id) as Idea;
+  }
+
+  findIdeaBySlug(slug: string): Idea | null {
+    const row = this.#db.prepare("SELECT * FROM ideas WHERE slug = ?").get(slug) as Row | undefined;
+    return row ? toIdea(row) : null;
+  }
+
+  /** How many builds were started between two instants (start inclusive, end exclusive). */
+  countBuildsStartedBetween(start: string, end: string): number {
+    const row = this.#db.prepare("SELECT COUNT(*) AS n FROM idea_events WHERE to_state = 'building' AND at >= ? AND at < ?").get(start, end) as Row;
+    return Number(row.n);
+  }
+
+  /** How many times this idea's build has been started (each move into "building"). */
+  countBuildStarts(id: string): number {
+    const row = this.#db.prepare("SELECT COUNT(*) AS n FROM idea_events WHERE idea_id = ? AND to_state = 'building'").get(id) as Row;
+    return Number(row.n);
   }
 
   ideaEvents(id: string): IdeaEvent[] {

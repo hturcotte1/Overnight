@@ -19,6 +19,8 @@ describe("config", () => {
       maxBuildsPerNight: 2,
       buildTimeoutMin: 45,
       writeBeeFacts: true,
+      buildBackend: "kiro-crew",
+      buildSandbox: "overnight",
       pausedByDefault: true,
     });
   });
@@ -41,6 +43,7 @@ describe("config", () => {
     expect(() => parseConfig({ MAX_ASKS_PER_DAY: "many" })).toThrow("MAX_ASKS_PER_DAY");
     expect(() => parseConfig({ TZ: "Mars/Olympus" })).toThrow("TZ");
     expect(() => parseConfig({ PAUSED: "yes" })).toThrow("PAUSED");
+    expect(() => parseConfig({ BUILD_SANDBOX: "none" })).toThrow("BUILD_SANDBOX");
   });
 
   it("refuses a data folder that is not a full path", () => {

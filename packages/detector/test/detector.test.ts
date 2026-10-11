@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLogger, dataPaths } from "@overnight/core";
 import type { DataPaths, DetectorInput } from "@overnight/core";
 import { createKiroDetector, PRIVACY_SETTINGS, SIGNED_OUT_MESSAGE } from "../src/index.ts";
-import type { KiroRunner, KiroRunResult } from "../src/index.ts";
+import type { KiroRunOptions, KiroRunner, KiroRunResult } from "../src/index.ts";
 
 const INPUT: DetectorInput = {
   utterances: [
@@ -35,7 +35,7 @@ const BAD_REPLY = `The board game talk is an idea. ${JSON.stringify({ ...VERDICT
 const SPOKEN_WORDS = ["board game", "picks the next person", "went last"];
 
 type Reply = string | Partial<KiroRunResult> | Error;
-type Call = { args: string[]; options: { cwd: string; kiroHome: string; timeoutMs: number } };
+type Call = { args: string[]; options: KiroRunOptions };
 
 const done = (stdout: string): KiroRunResult => ({ stdout, stderr: "", exitCode: 0, timedOut: false });
 
@@ -69,12 +69,15 @@ function fakeKiro(options: { settings?: Record<string, string>; ignoreSets?: boo
     return typeof next === "string" ? done(next) : { ...done(""), ...next };
   };
   const chats = () => calls.filter((call) => call.args[0] === "chat");
+  /** What each chat was given on standard input: the prompt. */
+  const prompts = () => chats().map((call) => call.options.stdin ?? "");
   const whoamiCalls = () => calls.filter((call) => call.args[0] === "whoami");
   const settingsCalls = () => calls.filter((call) => call.args[0] === "settings").map((call) => call.args.slice(1).join(" "));
   return {
     run,
     calls,
     chats,
+    prompts,
     whoamiCalls,
     settingsCalls,
     signOut: () => void (state.whoami = SIGNED_OUT),
@@ -83,6 +86,8 @@ function fakeKiro(options: { settings?: Record<string, string>; ignoreSets?: boo
 }
 
 const ALL_OFF = Object.fromEntries(PRIVACY_SETTINGS.map((key) => [key, "false"]));
+/** Everything a chat is started with. The prompt is not among it. */
+const CHAT_ARGS = ["chat", "--no-interactive", "--agent", "overnight-detector", "--model", "claude-haiku-4.5"];
 
 let dir: string;
 let paths: DataPaths;
@@ -333,11 +338,33 @@ describe("detect", () => {
     expect(result.ms).toBeGreaterThanOrEqual(0);
 
     const [chat] = kiro.chats();
-    expect(chat!.args.slice(0, 6)).toEqual(["chat", "--no-interactive", "--agent", "overnight-detector", "--model", "claude-haiku-4.5"]);
-    expect(chat!.args).toHaveLength(7);
-    expect(chat!.args[6]).toContain("[19:00:09] Someone should build a little page that just picks the next person.");
-    expect(chat!.args[6]).toContain("- Plant watering tracker");
-    expect(chat!.options).toEqual({ cwd: paths.detectorCwd, kiroHome: paths.detectorKiroHome, timeoutMs: 90_000 });
+    expect(chat!.args).toEqual(CHAT_ARGS);
+    // The prompt goes in on standard input.
+    expect(chat!.options).toEqual({ cwd: paths.detectorCwd, kiroHome: paths.detectorKiroHome, timeoutMs: 90_000, stdin: expect.any(String) });
+    expect(chat!.options.stdin).toContain("[19:00:09] Someone should build a little page that just picks the next person.");
+    expect(chat!.options.stdin).toContain("- Plant watering tracker");
+  });
+
+  it("never puts the conversation, or any other part of the prompt, into kiro-cli's arguments", async () => {
+    // Any program on the Mac can read another program's arguments, so nothing that was said may be
+    // in them: not on the first try, not on the retry, and not when a chat fails.
+    const { detector, kiro } = await readyDetector([BAD_REPLY, GOOD_REPLY, { exitCode: 1 }, { timedOut: true, exitCode: null }]);
+    expect(await detector.detect(INPUT)).toMatchObject({ ok: true, attempts: 2 });
+    expect(await detector.detect(INPUT)).toMatchObject({ ok: false, attempts: 2 });
+
+    expect(kiro.chats()).toHaveLength(4);
+    for (const chat of kiro.chats()) {
+      expect(chat.args).toEqual(CHAT_ARGS);
+      // The whole prompt is on standard input instead.
+      for (const utterance of INPUT.utterances) expect(chat.options.stdin).toContain(utterance.text);
+    }
+    // Every word that was said, every recent title, and the prompt's own wording: in no argument of any call.
+    const said = [...INPUT.utterances.map((utterance) => utterance.text), ...INPUT.recentTitles].flatMap((text) => text.toLowerCase().match(/[a-z]{4,}/g) ?? []);
+    expect(said.length).toBeGreaterThan(20);
+    const allArguments = kiro.calls.flatMap((call) => call.args).join("\n").toLowerCase();
+    for (const word of [...said, "transcript", "wearable", "previous reply", "json", "19:00"]) expect(allArguments).not.toContain(word);
+    // Only chats are given anything to read.
+    for (const call of kiro.calls.filter((other) => other.args[0] !== "chat")) expect(call.options).not.toHaveProperty("stdin");
   });
 
   it("uses the model and timeout it was given", async () => {
@@ -356,7 +383,7 @@ describe("detect", () => {
     const { detector, kiro } = await readyDetector([BAD_REPLY, GOOD_REPLY]);
 
     expect(await detector.detect(INPUT)).toMatchObject({ ok: true, verdict: VERDICT, attempts: 2 });
-    const [first, second] = kiro.chats().map((call) => call.args[6]!);
+    const [first, second] = kiro.prompts();
     expect(first).not.toContain("Your previous reply could not be used");
     expect(second!.startsWith(first!)).toBe(true);
     expect(second).toContain("Your previous reply could not be used: title is longer than 6 words (it has 12).");
@@ -380,7 +407,7 @@ describe("detect", () => {
     const { detector, kiro } = await readyDetector([JSON.stringify({ ...VERDICT, quote: invented }), GOOD_REPLY]);
 
     expect(await detector.detect(INPUT)).toMatchObject({ ok: true, verdict: VERDICT, attempts: 2 });
-    expect(kiro.chats()[1]!.args[6]).toContain(
+    expect(kiro.prompts()[1]).toContain(
       "Your previous reply could not be used: quote is longer than 25 words (it has 30); quote is not copied word for word from the conversation.",
     );
   });
@@ -401,7 +428,8 @@ describe("detect", () => {
 
     expect(await detector.detect(INPUT)).toMatchObject({ ok: false, attempts: 2, reason: "kiro-cli did not answer within 90 s (after 2 attempts)" });
     // The second try is the plain prompt again: there was no reply to correct.
-    expect(kiro.chats()[1]!.args[6]).toBe(kiro.chats()[0]!.args[6]);
+    expect(kiro.prompts()[1]).toBe(kiro.prompts()[0]);
+    expect(kiro.prompts()[0]).toContain("picks the next person");
   });
 
   it("recovers when only the first try times out", async () => {

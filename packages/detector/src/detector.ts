@@ -4,6 +4,8 @@
 // - Kiro always runs as our own "overnight-detector" agent, whose tools list is empty. Kiro's
 //   default agent can read files, so there is no option to run without the agent.
 // - It runs from its own folder with its own KIRO_HOME, both under the data folder.
+// - The prompt, which holds the transcript, reaches Kiro on standard input. It is never a
+//   command-line argument: any program on the Mac can read another program's arguments.
 // - Nothing is sent until ensureSetup() has seen both of Kiro's content-sharing settings off.
 // - Kiro's saved copies of each chat are deleted after a day.
 // - Failure reasons and log lines are our own words: never the transcript, never the model's
@@ -110,6 +112,9 @@ export function createKiroDetector(options: KiroDetectorOptions): KiroDetector {
   const run = options.run ?? createKiroRunner(options.kiroBinary === undefined ? {} : { kiroBinary: options.kiroBinary });
   const now = options.now ?? Date.now;
   const where = { cwd: paths.detectorCwd, kiroHome: paths.detectorKiroHome };
+  // Everything a chat is started with. No prompt here: with none given as an argument, Kiro reads
+  // it from standard input (spike 9).
+  const chatArgs = ["chat", "--no-interactive", "--agent", AGENT_NAME, "--model", model];
   const installedAgentFile = path.join(paths.detectorKiroHome, "agents", `${AGENT_NAME}.json`);
 
   /** True once a full set-up has succeeded, until a later one fails. */
@@ -273,7 +278,7 @@ export function createKiroDetector(options: KiroDetectorOptions): KiroDetector {
         attempts += 1;
         // The second try tells the model what was wrong with the first, in our own words.
         const text = replyProblem === null ? prompt : withRetryNote(prompt, replyProblem);
-        const reply = await run(["chat", "--no-interactive", "--agent", AGENT_NAME, "--model", model, text], { ...where, timeoutMs });
+        const reply = await run([...chatArgs], { ...where, timeoutMs, stdin: text });
         if (reply.error) {
           // kiro-cli could not start, or was stopped with this process. A second try would go the same way.
           result = reply.unavailable === undefined ? giveUp(reply.error) : notNow(reply.error);

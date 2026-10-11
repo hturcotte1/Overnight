@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Overnight's morning delivery, as a macOS background job (a "LaunchAgent"). Once a day, 30
+  minutes before DELIVER_TIME, it runs `overnight deliver`: each build is tested inside
+  Overnight's own sandbox, the ones that pass are published, and the link is put on the wrist
+  with an alarm at DELIVER_TIME.
+  This is a template: scripts/install-agents.sh replaces the names written in capitals between
+  double underscores with real values, and puts the result in
+  ~/Library/LaunchAgents/com.overnight.deliver.plist. Do not install this file by hand.
+
+  Background jobs do not read shell profiles. Their PATH is /usr/bin:/bin:/usr/sbin:/sbin, so
+  node is called by its full path, and its folder and ~/.local/bin are added to PATH here:
+  publishing needs `gh` (in ~/.local/bin) and `git` (in /usr/bin).
+
+  macOS's own folders stay FIRST on that PATH. This job runs `git` and `gh` by name, outside
+  every sandbox and with the GitHub login in reach, so `git` must be the system's own, never a
+  file of the same name that turned up in a folder under the home folder.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.overnight.deliver</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__REPO__/packages/cli/src/main.ts</string>
+    <string>deliver</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:__NODE_DIR__:__HOME__/.local/bin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+  </dict>
+
+  <!--
+    Once a day, 30 minutes before DELIVER_TIME, on this Mac's own clock. The installer works the
+    time out from Overnight's settings and refuses to install if the Mac's time zone and the TZ
+    setting disagree, because this hour would then be the wrong one.
+
+    If the Mac is asleep at that time, macOS runs the job once when the Mac next wakes. That is
+    Apple's documented behaviour for calendar jobs (launchd.plist(5): intervals missed while
+    asleep are run, once, on wake); we have not tested it ourselves. If the Mac is switched off or
+    nobody is logged in at that time, that morning's run is skipped.
+  -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>__HOUR__</integer>
+    <key>Minute</key>
+    <integer>__MINUTE__</integer>
+  </dict>
+
+  <!-- Only at that time: not at login, not when installed, and not again when it ends. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!--
+    When macOS stops the job (uninstall, restart, logout) it asks first, and ends it by force only
+    if it is still there after this many seconds. `overnight deliver` answers the request: it has
+    the deliver step stop every program it started (an install, a build script, the test browser),
+    which takes about 10 seconds, and gives up waiting for that after 20.
+  -->
+  <key>ExitTimeOut</key>
+  <integer>60</integer>
+
+  <!--
+    The deliver step writes its own log, logs/deliver.log. This second file holds the one summary
+    line it prints each morning, and anything printed outside that log: a crash, or a bad setting
+    that stopped it before it could start.
+  -->
+  <key>StandardOutPath</key>
+  <string>__DATA_DIR__/logs/deliver.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__DATA_DIR__/logs/deliver.launchd.log</string>
+</dict>
+</plist>

@@ -2,12 +2,14 @@
 // The real runner is tested with Node itself, or a small shell script, standing in for kiro-cli.
 // Kiro is never started.
 import { execFile } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
-import { createKiroRunner, stripAnsi } from "../src/index.ts";
+import { dataPaths } from "@overnight/core";
+import type { DetectorInput } from "@overnight/core";
+import { buildPrompt, createKiroDetector, createKiroRunner, MAX_ARGUMENT_CHARS, stripAnsi } from "../src/index.ts";
 
 const dir = mkdtempSync(path.join(tmpdir(), "overnight-kiro-test-"));
 const where = { cwd: dir, kiroHome: path.join(dir, "kiro-home"), timeoutMs: 8_000 };
@@ -73,6 +75,9 @@ describe("the real runner", () => {
   it("reports a missing program instead of throwing, and marks it as worth trying again later", async () => {
     const missing = createKiroRunner({ kiroBinary: path.join(dir, "no-such-kiro-cli") });
     expect(await missing(["chat"], where)).toEqual({ stdout: "", stderr: "", exitCode: null, timedOut: false, error: "could not start kiro-cli (ENOENT)", unavailable: "missing" });
+    // The same with text waiting to be handed over: nothing is thrown, and the text is in no error.
+    const withText = await missing(["chat"], { ...where, stdin: "someone should build a page for bin day. ".repeat(50_000) });
+    expect(withText).toEqual({ stdout: "", stderr: "", exitCode: null, timedOut: false, error: "could not start kiro-cli (ENOENT)", unavailable: "missing" });
   });
 
   it("does not call the program missing when it is the working folder that is gone, or the program cannot be run", async () => {
@@ -83,6 +88,96 @@ describe("the real runner", () => {
     writeFileSync(notAProgram, "just text", { mode: 0o600 });
     const refused = await createKiroRunner({ kiroBinary: notAProgram })(["chat"], where);
     expect(refused).toEqual({ stdout: "", stderr: "", exitCode: null, timedOut: false, error: "could not start kiro-cli (EACCES)" });
+    const refusedWithText = await createKiroRunner({ kiroBinary: notAProgram })(["chat"], { ...where, stdin: "someone should build a page for bin day" });
+    expect(refusedWithText).toEqual(refused);
+  });
+
+  it("hands text over on standard input, whole, and it never shows in the program's arguments", async () => {
+    // An invented conversation of many lines, with letters outside plain ASCII in it.
+    const text = ["[19:00:09] Someone should build a little page for bin day.", "[19:00:15] Crème brûlée first, señor. 日本語 🙂", ...Array.from({ length: 40 }, (_, i) => `[19:01:${String(i).padStart(2, "0")}] invented line ${i}`)].join("\n");
+    // The stand-in reads all of its standard input, then asks the system what its own arguments
+    // are, the way any other program on the Mac could (ps prints them for every process).
+    const standIn = path.join(dir, "reads-stdin.cjs");
+    writeFileSync(
+      standIn,
+      [
+        "let input = '';",
+        "process.stdin.setEncoding('utf8');",
+        "process.stdin.on('data', (chunk) => (input += chunk));",
+        "process.stdin.on('end', () => {",
+        "  const seenByPs = require('node:child_process').execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(process.pid)], { encoding: 'utf8' });",
+        "  console.log(JSON.stringify({ input, argv: process.argv.slice(2), seenByPs }));",
+        "});",
+      ].join("\n"),
+    );
+    const result = await run([standIn, "chat", "--marker-argument"], { ...where, stdin: text });
+
+    expect(result).toMatchObject({ exitCode: 0, timedOut: false });
+    const seen = JSON.parse(result.stdout) as { input: string; argv: string[]; seenByPs: string };
+    expect(seen.input).toBe(text);
+    expect(seen.argv).toEqual(["chat", "--marker-argument"]);
+    // ps can see the arguments (the marker is there), and what was said is not among them.
+    expect(seen.seenByPs).toContain("--marker-argument");
+    for (const words of ["bin day", "Someone should", "invented line", "19:00", "brûlée"]) expect(seen.seenByPs).not.toContain(words);
+  });
+
+  it("gives the program an empty standard input when there is no text for it", async () => {
+    const script = "let bytes = 0; process.stdin.on('data', (chunk) => (bytes += chunk.length)); process.stdin.on('end', () => console.log(JSON.stringify({ bytes, ended: true })));";
+    const result = await run(["-e", script], where);
+    expect(result).toMatchObject({ exitCode: 0, timedOut: false });
+    expect(JSON.parse(result.stdout)).toEqual({ bytes: 0, ended: true });
+  });
+
+  it("delivers a text far bigger than a pipe holds at once", async () => {
+    const text = "an invented sentence that nobody said. ".repeat(60_000);
+    const script = "let bytes = 0; process.stdin.on('data', (chunk) => (bytes += chunk.length)); process.stdin.on('end', () => console.log(bytes));";
+    const result = await run(["-e", script], { ...where, stdin: text });
+    expect(result).toMatchObject({ exitCode: 0, timedOut: false });
+    expect(Number(result.stdout.trim())).toBe(Buffer.byteLength(text));
+  });
+
+  it("comes back with the exit code, and no error, when the program ends without reading its input", async () => {
+    // Far more than a pipe holds, so the write is still waiting when the program goes away. That
+    // ends in EPIPE, which must not surface: not as a result error and not as a crash.
+    const text = "an invented sentence that nobody said. ".repeat(60_000);
+    const unhandled: unknown[] = [];
+    const note = (error: unknown): void => void unhandled.push(error);
+    process.on("uncaughtException", note);
+    try {
+      const result = await run(["-e", "process.exitCode = 3;"], { ...where, stdin: text });
+      expect(result).toEqual({ stdout: "", stderr: "", exitCode: 3, timedOut: false });
+      // Give a late pipe error the time to show up.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("uncaughtException", note);
+    }
+  });
+
+  it("still kills on time when the program never reads its input", async () => {
+    const text = "an invented sentence that nobody said. ".repeat(60_000);
+    const started = Date.now();
+    const result = await run(["-e", "setTimeout(() => {}, 60000);"], { ...where, stdin: text, timeoutMs: 1_000 });
+    expect(result).toEqual({ stdout: "", stderr: "", exitCode: null, timedOut: true });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("refuses to start with an argument long enough to hold a conversation", async () => {
+    const said = "Someone should build a little page for bin day. ".repeat(10);
+    expect(said.length).toBeGreaterThan(MAX_ARGUMENT_CHARS);
+    const marker = path.join(dir, "started");
+    const result = await run(["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')`, said], where);
+
+    expect(result).toEqual({
+      stdout: "",
+      stderr: "",
+      exitCode: null,
+      timedOut: false,
+      error: "kiro-cli was not started: an argument was longer than 200 characters, and text for Kiro must go in on standard input",
+    });
+    expect(existsSync(marker)).toBe(false);
+    // Arguments as long as the limit are still fine.
+    expect(await run(["-e", "console.log(process.argv[1].length)", "x".repeat(MAX_ARGUMENT_CHARS)], where)).toMatchObject({ exitCode: 0, stdout: "200\n" });
   });
 
   it("keeps the arguments out of the error when Node refuses to start the program", async () => {
@@ -90,6 +185,67 @@ describe("the real runner", () => {
     const result = await run(["chat", `someone should build a page for bin day${String.fromCharCode(0)}`], where);
     expect(result).toMatchObject({ exitCode: null, timedOut: false, error: "could not start kiro-cli (ERR_INVALID_ARG_VALUE)" });
     expect(JSON.stringify(result)).not.toContain("bin day");
+  });
+});
+
+// The detector and the real runner together, with a shell script standing in for kiro-cli. This
+// is the one place where a whole detect() is shown to start a process without the prompt in its
+// arguments.
+describe("a detection through the real runner", () => {
+  const STAND_IN = [
+    "#!/bin/sh",
+    "# A stand-in for kiro-cli, for tests. It is not Kiro and sends nothing anywhere.",
+    'case "$1" in',
+    '  settings) echo "false (global)" ;;',
+    '  whoami) echo "Logged in with a test stand-in" ;;',
+    "  *)",
+    // A chat: keep what it was started with, what ps shows for it, and what came in on standard input.
+    '    printf \'%s\\n\' "$@" > "$KIRO_HOME/chat-args.txt"',
+    '    ps -ww -o command= -p "$$" > "$KIRO_HOME/chat-ps.txt"',
+    '    cat > "$KIRO_HOME/chat-stdin.txt"',
+    '    cat "$KIRO_HOME/reply.json" ;;',
+    "esac",
+    "",
+  ].join("\n");
+
+  it("sends the prompt on standard input, and ps sees only the six fixed arguments", async () => {
+    const dataDir = mkdtempSync(path.join(dir, "detect-"));
+    const standIn = path.join(dataDir, "stand-in-kiro.sh");
+    writeFileSync(standIn, STAND_IN);
+    chmodSync(standIn, 0o755);
+    const paths = dataPaths(dataDir);
+    const input: DetectorInput = {
+      utterances: [
+        { text: "We always forget whose turn it is to pick the board game.", spokenAt: "2026-03-01T19:00:02.000Z" },
+        { text: "Someone should build a little page that just picks the next person.", spokenAt: "2026-03-01T19:00:09.000Z" },
+      ],
+      recentTitles: ["Plant watering tracker"],
+    };
+    const verdict = {
+      reason: "People in a room; one of them sincerely asks for a small tool.",
+      likely_media: false,
+      is_idea: true,
+      confidence: 0.9,
+      title: "Game night picker",
+      pitch: "Picks whose turn it is to choose the board game.",
+      quote: "Someone should build a little page that just picks the next person.",
+      said_by_wearer_guess: true,
+      buildable_as_static_web_app: true,
+    };
+
+    const detector = createKiroDetector({ paths, kiroBinary: standIn, timeoutMs: 8_000 });
+    await detector.ensureSetup();
+    writeFileSync(path.join(paths.detectorKiroHome, "reply.json"), JSON.stringify(verdict));
+    const result = await detector.detect(input);
+
+    expect(result).toMatchObject({ ok: true, attempts: 1, verdict: { title: "Game night picker", is_idea: true } });
+    const saved = (name: string): string => readFileSync(path.join(paths.detectorKiroHome, name), "utf8");
+    expect(saved("chat-args.txt").trim().split("\n")).toEqual(["chat", "--no-interactive", "--agent", "overnight-detector", "--model", "claude-haiku-4.5"]);
+    expect(saved("chat-stdin.txt")).toBe(buildPrompt(input));
+    // What any other program could have read while the chat ran.
+    const seenByPs = saved("chat-ps.txt");
+    expect(seenByPs).toContain("--no-interactive --agent overnight-detector");
+    for (const words of ["board game", "picks the next person", "Plant watering", "TRANSCRIPT", "19:00"]) expect(seenByPs).not.toContain(words);
   });
 });
 

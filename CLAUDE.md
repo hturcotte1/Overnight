@@ -43,9 +43,11 @@ Overnight hears app ideas through Bee (Apple Watch). It asks on the wrist whethe
   - anything under `~/.overnight`
 - Fixtures are synthetic, and their first line says so.
 - Never print, log or hand tokens (Bee, Kiro, GitHub) to the coding agent, and never put them in briefs. Publishing happens only in the deliver step.
+- Code an agent wrote (a build, its tests, its `package.json` scripts) only ever runs inside a sandbox: Crew's gateway sandbox (or the Kiro CLI build sandbox, when the fallback builder runs) at build time, `packages/deliver/sandbox/deliver.sb` at verify time.
 - All Bee access goes through `packages/bee`, and it must really call Bee at runtime. That's a hackathon requirement.
 - Generated apps follow the app contract in SPEC.md §6: static, no backend, no keys. Published apps are public, so briefs never contain personal details.
-- Kiro Crew: the nightly build job, and only that job, runs with `--approval-mode auto` (Henry's decision, Oct 9, after spike 5 showed that default approvals deny every build step). Crew's sandbox runs at its `strict` level. Change no other Crew sandbox or approval setting.
+- Kiro Crew runs inside Overnight's own macOS sandbox (`BUILD_SANDBOX=overnight`; Henry's decision, Oct 10, after tests showed Crew's own sandbox, even at `strict`, leaves the GitHub login, the Bee login and the transcripts reachable). macOS can't stack two sandboxes, so Crew's own is switched off with `agent.sandbox_allow_unsandboxed_exec = true`. Build jobs, and only build jobs, run with `--approval-mode auto` (decided Oct 9). Before each night's builds a probe must show all three are unreachable, or nothing is built with Crew. Change no other Crew setting.
+- The build agent is only ever given `brief.md`: our own template plus the idea's title and pitch. Never the quote, other transcript text, names or Bee facts.
 - No code, data, accounts or hardware from NQB8/Zelcast. Everything in this repo is Henry's.
 - Keep the MIT `LICENSE` file at the repo root.
 
@@ -54,7 +56,7 @@ Overnight hears app ideas through Bee (Apple Watch). It asks on the wrist whethe
 - TypeScript (strict), Node 22.18+ (we use Node 24 LTS), ESM, npm workspaces
 - SQLite via better-sqlite3; zod for every model output and every config value
 - Tests: vitest. Browser smoke tests: Playwright.
-- Detector runs through Kiro headless (`kiro-cli chat --no-interactive` with the no-tools `overnight-detector` agent)
+- Detector runs through Kiro headless (`kiro-cli chat --no-interactive` with the no-tools `overnight-detector` agent). Its prompt goes in on standard input, never as a command-line argument, which other programs could read.
 - Publishing: GitHub Pages via the GitHub CLI (`gh`) login
 - Times stored in UTC, shown in America/Boise
 
@@ -67,14 +69,21 @@ Built and working (Milestones 0 and 1):
 - `npx overnight listen`: the always-on listener (one per data folder)
 - `npx overnight status [--json] [--check]` · `npx overnight ideas [--json] [--all]`
 - `npx overnight pause|resume`: Overnight starts paused (quiet mode); `resume` turns asking on
-- `npx overnight queue --approved --json`: what the nightly builder reads
-- `scripts/install-agents.sh install|uninstall|restart|status`: the launchd background job for `listen`
+- `npx overnight queue --approved --json`: the approved ideas waiting for a build (the nightly build reads the database itself)
 - `node packages/bee/src/smoke.ts`: read-only check that Bee is reachable and logged in
-- `node spikes/<name>.ts`: the Milestone 0 spikes (see `docs/spikes.md`)
+- `node spikes/<name>.ts`: the spikes (see `docs/spikes.md`)
+
+Built in Milestone 2. Tests pass; the rehearsal and the first real night are still pending (SPEC.md §10):
+
+- `npx overnight build`: tonight's builds. The `build` job runs it at `BUILD_TIME`.
+- `npx overnight deliver`: the morning: test each build in the sandbox, publish, tell the wearer. The `deliver` job runs it 30 minutes before `DELIVER_TIME`.
+- `npx overnight build-now <ideaId>`: build and deliver one approved idea right away. It uses the real Bee: in the daytime the wrist buzzes two minutes later.
+- `npx overnight preflight`: twelve checks of what tonight needs, each with its fix. Exit code 0 only if all pass. Changes nothing.
+- `OVERNIGHT_DATA_DIR=<scratch folder> npx overnight rehearse new "<title>" "<pitch>"`, then `... rehearse run <ideaId> [--no-publish]`: try the night and the morning on an invented idea. Bee is always a stand-in, and the real data folder is refused. This is the way to test the pipeline; never point a test at `~/.overnight`.
+- `scripts/install-agents.sh install|uninstall|restart|status [listen|crew|build|deliver]`: the four launchd background jobs (`crew` is the Kiro Crew gateway). **Always name the job.** With none named, `install` and `restart` act on all four, which restarts the live listener.
 
 Planned, not built yet:
 
-- `npx overnight build-now <id>` · `npx overnight deliver`
 - `npm run dashboard` → http://localhost:4321
 
 ## Code style

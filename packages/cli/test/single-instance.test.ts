@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { JOB_LABEL, jobSettingsFile, readListenerState } from "../src/background.ts";
-import { listenLockFile, listenLockHeld, takeListenLock } from "../src/single-instance.ts";
+import { JOB_LABEL, jobSettingsFile, NIGHT_JOB_LABELS, NIGHT_JOBS, readListenerState, readNightJobsState } from "../src/background.ts";
+import { buildLockFile, deliverLockFile, listenLockFile, listenLockHeld, lockHeld, takeListenLock, takeLock } from "../src/single-instance.ts";
 
 const HOLDER = fileURLToPath(new URL("./lock-holder.ts", import.meta.url));
 
@@ -120,6 +120,59 @@ describe("the listen lock", () => {
   }, 30_000);
 });
 
+describe("the build lock and the deliver lock", () => {
+  it("live in the data folder, each in a file of its own", () => {
+    expect(buildLockFile({ root: scratch })).toBe(path.join(scratch, "build.lock"));
+    expect(deliverLockFile({ root: scratch })).toBe(path.join(scratch, "deliver.lock"));
+  });
+
+  it("are the same kind of lock as the listener's", () => {
+    expect(takeListenLock).toBe(takeLock);
+    const buildFile = buildLockFile({ root: scratch });
+    const release = takeLock(buildFile, 0);
+    expect(release).not.toBeNull();
+    expect(takeLock(buildFile, 0)).toBeNull();
+    expect(statSync(buildFile).mode & 0o777).toBe(0o600);
+    release?.();
+    const again = takeLock(buildFile, 0);
+    expect(again).not.toBeNull();
+    again?.();
+  });
+
+  it("can be looked at the same way: preflight asks whether a build is running before it probes the sandbox", () => {
+    expect(listenLockHeld).toBe(lockHeld);
+    const buildFile = buildLockFile({ root: scratch });
+    rmSync(buildFile, { force: true });
+    // No lock file at all: no build has ever run here, and looking does not make the file.
+    expect(lockHeld(buildFile)).toBe(false);
+    expect(existsSync(buildFile)).toBe(false);
+    const release = takeLock(buildFile, 0);
+    expect(lockHeld(buildFile)).toBe(true);
+    // The look does not take the lock away from the build that holds it.
+    expect(takeLock(buildFile, 0)).toBeNull();
+    release?.();
+    expect(lockHeld(buildFile)).toBe(false);
+    // And it leaves the lock free for the next build.
+    const next = takeLock(buildFile, 0);
+    expect(next).not.toBeNull();
+    next?.();
+  });
+
+  it("do not get in each other's way, or in the listener's", () => {
+    const listening = takeLock(file, 0);
+    const building = takeLock(buildLockFile({ root: scratch }), 0);
+    const delivering = takeLock(deliverLockFile({ root: scratch }), 0);
+    expect([listening, building, delivering].every((release) => release !== null)).toBe(true);
+    // A build that is running does not look like a listener that is running.
+    building?.();
+    expect(listenLockHeld(file)).toBe(true);
+    listening?.();
+    expect(listenLockHeld(file)).toBe(false);
+    delivering?.();
+    expect(readdirSync(scratch).sort()).toEqual(["build.lock", "deliver.lock", "listen.lock"]);
+  });
+});
+
 describe("what status can tell about the listener", () => {
   it("reports whether one is running on this data folder and whether the job's settings file is in place", () => {
     const home = path.join(scratch, "home of someone");
@@ -140,5 +193,19 @@ describe("what status can tell about the listener", () => {
   it("looks for the settings file where the installer puts it", () => {
     expect(jobSettingsFile("/Users/someone")).toBe("/Users/someone/Library/LaunchAgents/com.overnight.listen.plist");
     expect(JOB_LABEL).toBe("com.overnight.listen");
+  });
+
+  it("reports which of the night jobs have a settings file in place", () => {
+    const home = path.join(scratch, "home of someone");
+    expect(NIGHT_JOBS).toEqual(["build", "deliver", "crew"]);
+    expect(readNightJobsState(home)).toEqual({ build: false, deliver: false, crew: false });
+
+    mkdirSync(path.join(home, "Library", "LaunchAgents"), { recursive: true });
+    writeFileSync(jobSettingsFile(home, NIGHT_JOB_LABELS.deliver), "");
+    expect(readNightJobsState(home)).toEqual({ build: false, deliver: true, crew: false });
+    // The listener's file is not one of them.
+    writeFileSync(jobSettingsFile(home), "");
+    expect(readNightJobsState(home)).toEqual({ build: false, deliver: true, crew: false });
+    expect(jobSettingsFile("/Users/someone", NIGHT_JOB_LABELS.crew)).toBe("/Users/someone/Library/LaunchAgents/com.overnight.crew.plist");
   });
 });

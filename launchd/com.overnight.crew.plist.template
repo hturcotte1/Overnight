@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The Kiro Crew gateway, kept running as a macOS background job (a "LaunchAgent"). Overnight's
+  "kiro-crew" builder hands its build jobs to this gateway, so it has to be up at BUILD_TIME.
+  This is a template: scripts/install-agents.sh replaces the names written in capitals between
+  double underscores with real values, and puts the result in
+  ~/Library/LaunchAgents/com.overnight.crew.plist. Do not install this file by hand.
+
+  This job takes the place of `kirocrew service install`. Run only one of the two: both start the
+  same gateway on the same port.
+
+  How the gateway is started depends on the BUILD_SANDBOX setting at install time, which is why
+  the installer writes the whole command (__CREW_ARGUMENTS__):
+    overnight   /usr/bin/sandbox-exec -f <repo>/packages/builder/sandbox/crew-gateway.sb
+                    -D <NAME>=<real path> ... <kirocrew> gateway (no-open, no-tunnel)
+                The standard. The gateway, and every job it starts, runs inside Overnight's own
+                macOS sandbox. The installer reads the -D names from the profile itself and
+                writes every path with its links followed: the sandbox compares real paths.
+    crew        <kirocrew> gateway (no-open, no-tunnel)
+                Kiro Crew's own sandbox does the fencing, at its strict level. It leaves the
+                GitHub login, the Bee login and the transcripts within a build job's reach.
+  Change BUILD_SANDBOX in .env, then run `scripts/install-agents.sh install crew` again. Run it
+  again as well after Kiro Crew or Node.js has been updated: the real paths may have moved.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.overnight.crew</string>
+
+  <key>ProgramArguments</key>
+  <array>
+__CREW_ARGUMENTS__
+  </array>
+
+  <!--
+    A folder that is always there and is inside the fence in both modes. The gateway writes
+    nothing here; Kiro Crew's "command" jobs start in whatever folder the gateway started in.
+  -->
+  <key>WorkingDirectory</key>
+  <string>__DATA_DIR__/workspaces</string>
+
+  <!--
+    Build jobs inherit this PATH, so node, npm and kiro-cli are found by name inside a job.
+    macOS's own folders stay FIRST, as in the build and deliver jobs: a program started by name
+    (`git`, say) must be the system's own. Nothing in them shadows node, npm, kiro-cli or kirocrew.
+
+    TMPDIR is the build jobs' own temporary folder, inside Overnight's data folder. The installer
+    creates it. The sandbox profile lets a job read and write there and refuses the temporary
+    folders every other program on this Mac shares, so nothing another program left behind is in
+    a job's reach, and nothing a job leaves behind is picked up by a program outside the sandbox.
+
+    NO_COLOR keeps the gateway's output readable in a log file.
+  -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin:__NODE_DIR__:__HOME__/.local/bin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>TMPDIR</key>
+    <string>__DATA_DIR__/tmp/build</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <key>NO_COLOR</key>
+    <string>1</string>
+  </dict>
+
+  <!-- Start at login, and start again if it ever stops, but not more than once every 30 seconds. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <!--
+    When macOS stops the job (uninstall, restart, logout) it asks first, and ends it by force only
+    if it is still there after this many seconds.
+  -->
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+
+  <!--
+    The gateway keeps its own log in Kiro Crew's folder (`kirocrew logs`). This file holds what it
+    prints: its start-up lines and warnings, and whatever it said before a crash. macOS opens the
+    file before the job starts, so it is written even when the sandbox hides the folder it is in.
+  -->
+  <key>StandardOutPath</key>
+  <string>__DATA_DIR__/logs/crew.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__DATA_DIR__/logs/crew.launchd.log</string>
+</dict>
+</plist>

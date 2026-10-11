@@ -3,8 +3,15 @@
 // Kiro has no timeout flag and can hang, so the timeout lives here and kills Kiro's whole process
 // group. Kiro gets a stripped-down environment: nothing from our own environment reaches it.
 //
-// Privacy rule: the `error` text made here names an error code only. Node's own spawn messages
-// can repeat the arguments, and the last argument is the prompt with the transcript in it.
+// Privacy rules:
+// - Text for Kiro to read (the prompt, with the transcript in it) goes in on standard input, never
+//   as an argument. Any program on the Mac can read another program's arguments (`ps` prints
+//   them), so an argument would show what was just said for as long as Kiro runs. Spike 9
+//   (spikes/09-kiro-stdin-prompt.ts) showed that `kiro-cli chat --no-interactive` reads its whole
+//   prompt from standard input when it is given no prompt argument. As a backstop, the runner
+//   refuses to start with an argument long enough to hold a conversation.
+// - The `error` text made here names an error code only. Node's own spawn messages can repeat the
+//   arguments.
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -24,8 +31,29 @@ export interface KiroRunResult {
   unavailable?: "missing" | "stopping";
 }
 
-/** Run kiro-cli once with these arguments. Never rejects: every failure comes back in the result. */
-export type KiroRunner = (args: string[], options: { cwd: string; kiroHome: string; timeoutMs: number }) => Promise<KiroRunResult>;
+export interface KiroRunOptions {
+  cwd: string;
+  kiroHome: string;
+  timeoutMs: number;
+  /**
+   * Text for kiro-cli to read on its standard input, which is then closed. This is the only way a
+   * prompt may be handed over. Left out, kiro-cli gets an empty standard input.
+   */
+  stdin?: string;
+}
+
+/**
+ * Run kiro-cli once with these arguments. Never rejects: every failure comes back in the result.
+ * The arguments are short option words and names only: see `stdin` for anything longer.
+ */
+export type KiroRunner = (args: string[], options: KiroRunOptions) => Promise<KiroRunResult>;
+
+/**
+ * The longest argument the runner will start kiro-cli with. Real ones are option words, a setting
+ * name or a model name, all well under this; the shortest prompt the detector builds is many
+ * times longer. So text that belongs on standard input cannot go out as an argument by mistake.
+ */
+export const MAX_ARGUMENT_CHARS = 200;
 
 /** A real reply is under a kilobyte. This only stops a runaway process from eating memory. */
 const MAX_OUTPUT_CHARS = 1_000_000;
@@ -127,6 +155,9 @@ export function createKiroRunner(options: { kiroBinary?: string } = {}): KiroRun
       const failed = (error: string, unavailable?: KiroRunResult["unavailable"]): void =>
         resolve({ stdout: "", stderr: "", exitCode: null, timedOut: false, error, ...(unavailable === undefined ? {} : { unavailable }) });
       if (stopping) return failed("kiro-cli was not started: this process is stopping", "stopping");
+      if (args.some((arg) => arg.length > MAX_ARGUMENT_CHARS)) {
+        return failed(`kiro-cli was not started: an argument was longer than ${MAX_ARGUMENT_CHARS} characters, and text for Kiro must go in on standard input`);
+      }
       const binary = options.kiroBinary ?? findKiroBinary();
       if (!binary) return failed(`kiro-cli was not found (looked in ${kiroBinaryCandidates().join(" and ")})`, "missing");
       // ENOENT can also mean the working folder is gone, so look before calling the program missing.
@@ -145,14 +176,27 @@ export function createKiroRunner(options: { kiroBinary?: string } = {}): KiroRun
       };
 
       installCleanup();
+      const input = runOptions.stdin;
+      const how = { cwd: runOptions.cwd, env, detached: true };
       let child;
       try {
-        child = spawn(binary, args, { cwd: runOptions.cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+        // Two calls, so that TypeScript knows the output pipes are always there.
+        child = input === undefined ? spawn(binary, args, { ...how, stdio: ["ignore", "pipe", "pipe"] }) : spawn(binary, args, { ...how, stdio: ["pipe", "pipe", "pipe"] });
       } catch (error) {
         return failed(...couldNotStart(error));
       }
       const pid = child.pid;
       if (pid !== undefined) liveGroups.add(pid);
+
+      const stdin = child.stdin;
+      if (stdin !== null && input !== undefined) {
+        // If kiro-cli goes away without reading it all (it could not start, it failed early, we
+        // killed it), the write fails with EPIPE. That is not news: the exit code or the timeout
+        // already tells the story. Without a listener it would crash the whole process.
+        stdin.on("error", () => {});
+        // Written in one go and closed, so kiro-cli sees the end of its input and starts work.
+        stdin.end(input, "utf8");
+      }
 
       let stdout = "";
       let stderr = "";
@@ -194,6 +238,7 @@ export function createKiroRunner(options: { kiroBinary?: string } = {}): KiroRun
         child.kill("SIGKILL");
         // If something outside the group still holds the pipes open, do not wait for it.
         graceTimer = setTimeout(() => {
+          stdin?.destroy();
           child.stdout.destroy();
           child.stderr.destroy();
           finish(null);

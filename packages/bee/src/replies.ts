@@ -27,6 +27,19 @@ function unwrapTodo(reply: unknown): unknown {
 
 const createdTodo = z.object({ id: wholeNumber });
 const todoState = z.object({ completed: z.boolean() });
+const createdFact = z.object({ id: wholeNumber });
+
+// `bee facts create` answered with a bare fact on 2026-10-09 (spike 4): { id, text, tags,
+// created_at, confirmed, user_id, timezone }. A wrapped { fact: {...} } is accepted too, the way
+// to-do replies have come both ways. Only the id is kept: `user_id` is the account holder's.
+function unwrapFact(reply: unknown): unknown {
+  if (typeof reply !== "object" || reply === null || !("fact" in reply)) return reply;
+  return typeof reply.fact === "object" && reply.fact !== null ? reply.fact : reply;
+}
+
+export function parseCreatedFact(reply: unknown): { id: number } {
+  return { id: parseReply("facts create", createdFact, unwrapFact(reply)).id };
+}
 
 export function parseCreatedTodo(reply: unknown): { id: number } {
   return { id: parseReply("todos create", createdTodo, unwrapTodo(reply)).id };

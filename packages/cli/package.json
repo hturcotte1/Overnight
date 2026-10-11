@@ -11,7 +11,9 @@
   },
   "dependencies": {
     "@overnight/bee": "*",
+    "@overnight/builder": "*",
     "@overnight/core": "*",
+    "@overnight/deliver": "*",
     "@overnight/detector": "*",
     "@overnight/listener": "*",
     "better-sqlite3": "13.0.3"

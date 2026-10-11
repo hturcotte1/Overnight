@@ -25,6 +25,7 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@playwright/test": "1.64.0",
     "@types/better-sqlite3": "9.6.0",
     "@types/node": "24.19.2",
     "eslint": "10.12.0",

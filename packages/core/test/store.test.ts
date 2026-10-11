@@ -171,9 +171,12 @@ describe("database upgrades", () => {
       first.insertUtterance({ beeUtteranceId: 1, conversationKey: key, text: "kept", spokenAt: at(1), receivedAt: at(2), source: "stream" });
       first.close();
 
-      // Pretend the file was written before the spoken_at index existed.
+      // Put the file back the way the first version of the app wrote it.
       const raw = new Database(file);
-      raw.exec("DROP INDEX utterances_by_spoken_at");
+      raw.exec("DROP INDEX utterances_by_spoken_at; DROP INDEX ideas_by_slug;");
+      for (const column of ["slug", "build_backend", "build_started_at", "built_at", "published_url", "published_at", "delivered_at", "morning_todo_id", "fact_id", "failure_reason", "failure_notified_at"]) {
+        raw.exec(`ALTER TABLE ideas DROP COLUMN ${column}`);
+      }
       raw.pragma("user_version = 1");
       raw.close();
 
@@ -181,12 +184,71 @@ describe("database upgrades", () => {
       expect(upgraded.utterancesSpokenNear(at(1), 1000).map((u) => u.text)).toEqual(["kept"]);
       upgraded.close();
       const check = new Database(file, { readonly: true });
-      expect(check.pragma("user_version", { simple: true })).toBe(2);
+      expect(check.pragma("user_version", { simple: true })).toBe(3);
       const plan = check.prepare("EXPLAIN QUERY PLAN SELECT * FROM utterances WHERE spoken_at BETWEEN ? AND ? ORDER BY spoken_at, id").all("a", "b") as Array<{ detail: string }>;
       expect(plan.map((row) => row.detail).join(" ")).toContain("utterances_by_spoken_at");
       check.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("building and publishing", () => {
+  const sample = (conversationKey: string) => ({ title: "Tip splitter", pitch: "Split a bill.", quote: "we should make a tip splitter", confidence: 0.9, conversationKey, detectorRunId: null });
+
+  it("records each step from approved to delivered", () => {
+    const { key } = store.resolveConversation({ uuid: "u-1" }, T0);
+    const idea = store.createIdea(sample(key), T0);
+    expect(idea).toMatchObject({ slug: null, buildBackend: null, publishedUrl: null, failureReason: null });
+    store.transitionIdea(idea.id, "asked", { todoId: 7 }, at(1));
+    store.transitionIdea(idea.id, "approved", { answeredAt: at(2) }, at(2));
+    store.transitionIdea(idea.id, "building", { slug: "tip-splitter", buildBackend: "kiro-crew", buildStartedAt: at(3) }, at(3));
+    store.transitionIdea(idea.id, "built", { builtAt: at(200) }, at(200));
+    store.transitionIdea(idea.id, "published", { publishedUrl: "https://example.test/tip-splitter/", publishedAt: at(300) }, at(300));
+    const delivered = store.transitionIdea(idea.id, "delivered", { deliveredAt: at(400), morningTodoId: 99 }, at(400));
+    expect(delivered).toMatchObject({
+      state: "delivered",
+      slug: "tip-splitter",
+      buildBackend: "kiro-crew",
+      builtAt: at(200),
+      publishedUrl: "https://example.test/tip-splitter/",
+      morningTodoId: 99,
+      todoId: 7,
+    });
+    expect(store.findIdeaBySlug("tip-splitter")?.id).toBe(idea.id);
+    expect(store.countBuildsStartedBetween(T0, at(100))).toBe(1);
+    expect(store.countBuildsStartedBetween(at(4), at(100))).toBe(0);
+  });
+
+  it("counts how many times one idea's build was started", () => {
+    const { key } = store.resolveConversation({ uuid: "u-1" }, T0);
+    const idea = store.createIdea(sample(key), T0);
+    const other = store.createIdea({ ...sample(key), title: "Other" }, T0);
+    expect(store.countBuildStarts(idea.id)).toBe(0);
+    for (const one of [idea, other]) {
+      store.transitionIdea(one.id, "asked", {}, at(1));
+      store.transitionIdea(one.id, "approved", {}, at(2));
+      store.transitionIdea(one.id, "building", {}, at(3));
+    }
+    store.transitionIdea(idea.id, "build_failed", { failureReason: "the build was stopped" }, at(4));
+    expect(store.countBuildStarts(idea.id)).toBe(1);
+    store.transitionIdea(idea.id, "building", {}, at(5));
+    expect(store.countBuildStarts(idea.id)).toBe(2);
+    expect(store.countBuildStarts(other.id)).toBe(1);
+  });
+
+  it("updates facts about an idea without changing its state, and keeps slugs unique", () => {
+    const { key } = store.resolveConversation({ uuid: "u-1" }, T0);
+    const one = store.createIdea(sample(key), T0);
+    const two = store.createIdea({ ...sample(key), title: "Another" }, at(1));
+    const updated = store.updateIdea(one.id, { slug: "tip-splitter", failureReason: "the build timed out", factId: 5 }, at(2));
+    expect(updated).toMatchObject({ state: "heard", slug: "tip-splitter", failureReason: "the build timed out", factId: 5 });
+    expect(store.ideaEvents(one.id)).toHaveLength(1);
+    expect(() => store.updateIdea(two.id, { slug: "tip-splitter" }, at(3))).toThrow();
+    expect(() => store.updateIdea("idea_missing", { slug: "x" }, at(3))).toThrow("No idea");
+    // Clearing a field is different from leaving it out.
+    expect(store.updateIdea(one.id, { failureReason: null }, at(4)).failureReason).toBeNull();
+    expect(store.getIdea(one.id)?.slug).toBe("tip-splitter");
   });
 });

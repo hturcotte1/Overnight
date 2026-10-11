@@ -151,6 +151,13 @@ export class FakeBee implements BeeGateway {
     return { id };
   }
 
+  /** Facts are written by the deliver step, not the listener. Here only to satisfy the contract. */
+  facts: string[] = [];
+  async createFact(text: string): Promise<{ id: number }> {
+    this.facts.push(text);
+    return { id: 9000 + this.facts.length };
+  }
+
   async todoStatus(id: number): Promise<TodoStatus> {
     this.statusCalls.push(id);
     const status = this.todos.get(id) ?? "open";

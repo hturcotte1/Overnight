@@ -1,0 +1,218 @@
+;; Overnight deliver sandbox.
+;; Everything an AI agent wrote runs inside this: npm ci, npm run build, the static server and
+;; the browser smoke tests. Built from the M2 deliver experiment's final profile (docs/spikes.md).
+;;
+;; Use (packages/deliver/src/sandbox.ts builds this command line):
+;;   sandbox-exec \
+;;     -D HOME=/Users/<user> \
+;;     -D DATA_DIR=<Overnight's data folder; hidden except for the folders below> \
+;;     -D WORKSPACE=<the folder this step works on: the clean copy of the app, or an empty folder for a browser step; read and write> \
+;;     -D RUN_DIR=<throwaway folder for temp files and results, made fresh for this one command; read and write> \
+;;     -D SITE_DIR=<our checked copy of dist that gets served and published; read only> \
+;;     -D HARNESS_DIR=<our static server and tests (for the app's own smoke test: plus that test); read only> \
+;;     -D NODE_DIR=<real folder holding bin/node; only node, npm and npx in it can be read or run> \
+;;     -D TOOLS_DIR=<the node_modules folder holding Playwright; only Playwright is readable> \
+;;     -D PW_BROWSERS=<Playwright browser cache; read only> \
+;;     -D NPM_CACHE=<npm cache; only its package store (_cacache) is readable, unless it is inside RUN_DIR> \
+;;     -D PORT=<static server port, or 1 for none> \
+;;     -D PROXY_PORT=<registry-only proxy port, or 1 for none> \
+;;     -f deliver.sb <command...>
+;;
+;; Every path must be a real path: no symlinks anywhere in it, no trailing slash.
+;; Start the command with its working directory inside WORKSPACE, RUN_DIR or HARNESS_DIR.
+;;
+;; Two things this profile cannot do by itself, which the verifier therefore does around it:
+;; - A program may replace the very folder it is allowed to write (WORKSPACE or RUN_DIR itself)
+;;   with a link to somewhere else. The verifier keeps the folder ABOVE them read-only while a
+;;   step runs, which this profile does not let the program undo, and checks them afterwards.
+;; - A program that stays running keeps these rights. The verifier renames the folder above
+;;   WORKSPACE and RUN_DIR when a step is done: the names below stop existing, and this profile
+;;   does not let the program bring them back.
+;; A missing -D value makes sandbox-exec refuse to start anything: it fails closed.
+;; Rule order matters: when two rules match, the LATER one wins.
+(version 1)
+(allow default)
+
+(define home (param "HOME"))
+(define data-dir (param "DATA_DIR"))
+(define workspace (param "WORKSPACE"))
+(define run-dir (param "RUN_DIR"))
+(define site-dir (param "SITE_DIR"))
+(define harness-dir (param "HARNESS_DIR"))
+(define node-dir (param "NODE_DIR"))
+(define tools-dir (param "TOOLS_DIR"))
+(define pw-browsers (param "PW_BROWSERS"))
+(define npm-cache (param "NPM_CACHE"))
+(define (home-path rel) (string-append home rel))
+(define (data-path rel) (string-append data-dir rel))
+(define (tools-path rel) (string-append tools-dir rel))
+(define (node-path rel) (string-append node-dir rel))
+
+;; Lets a folder be reached (each folder above it may be stat'ed) without those folders being listable or readable.
+(define (allow-traverse path)
+  (let loop ((i 1))
+    (if (< i (string-length path))
+        (begin
+          (if (char=? (string-ref path i) #\/)
+              (allow file-read-metadata (literal (substring path 0 i))))
+          (loop (+ i 1))))))
+
+;; 1. Ways out of the sandbox: starting or scripting other apps, creating background jobs.
+(deny lsopen)
+(deny appleevent-send)
+(deny job-creation)
+
+;; 2. Other processes: no signals to, and no inspecting of, anything outside this sandbox.
+;;    "Same sandbox" means this one start of sandbox-exec (measured Oct 10, 2026): a second start
+;;    with the same profile and the same folders is a different sandbox, so a program left over
+;;    from one step cannot see or signal the programs of the next.
+(deny signal)
+(allow signal (target same-sandbox))
+(deny process-info*)
+(allow process-info* (target same-sandbox))
+;;    Command lines of other programs (the detector's holds what was just said). The PREFIX form
+;;    is needed: the name the sandbox compares is longer than "kern.procargs2" (the process id
+;;    follows it), so (sysctl-name "kern.procargs2") matched nothing and any program's command
+;;    line could be read by trying process ids in turn. The prefix also covers the older
+;;    "kern.procargs". Measured with this rule: a process outside the sandbox is refused (EPERM),
+;;    while programs inside it can still read their own, their parent's and their children's.
+;;    pgrep gets command lines another way (the com.apple.sysmond service), which section 6
+;;    denies; ps cannot start in a sandbox at all (it is setuid).
+;;    The process table (sysctl kern.proc.all and its relatives): the rules above do not cover it.
+;;    Without the second prefix below, a program in here got every process on this Mac with its
+;;    id, owner and program name (measured Oct 10, 2026: over 900 records), so it did not even
+;;    have to guess ids. With it, the table and questions about one outside process are refused,
+;;    and a program can still ask about itself and its children. The prefix ends in a dot so that
+;;    it names the process table only, not other settings whose names merely begin the same way.
+(deny sysctl-read
+  (sysctl-name-prefix "kern.procargs")
+  (sysctl-name-prefix "kern.proc."))
+;;    This Mac's name (sysctl kern.hostname) stays readable, although it often holds its owner's
+;;    first name. Denying it was tried on Oct 10, 2026: Node 24 then aborts as soon as its "os"
+;;    module loads (uname() fails and Node asserts), which takes npm and Playwright with it. The
+;;    verifier searches the built app for the name before anything is published instead.
+;;    Programs: a file that may not be read can still be RUN unless that is denied too (measured:
+;;    the user's gh and Bee programs started from inside an earlier version of this profile). So
+;;    nothing in the home or data folder may be run, except from the folders the run needs.
+;;    Of the Node install only node, npm and npx: tools installed "globally" live in the same
+;;    folder (the Bee program does on this Mac, with its command on Node's own bin folder).
+(deny process-exec*
+  (subpath home)
+  (subpath data-dir)
+  (subpath node-dir))
+(allow process-exec*
+  (subpath workspace)
+  (subpath run-dir)
+  (literal (node-path "/bin/node"))
+  (literal (node-path "/bin/npm"))
+  (literal (node-path "/bin/npx"))
+  (subpath (node-path "/lib/node_modules/npm"))
+  (subpath (node-path "/lib/node_modules/corepack"))
+  (subpath pw-browsers))
+
+;; 3. Reading: nothing in the home folder, Overnight's data folder, the Node install, other disks,
+;;    shared folders or temp folders, and not the list of this Mac's accounts ...
+(deny file-read*
+  (subpath home)
+  (subpath data-dir)
+  (subpath node-dir)
+  (literal "/Users")
+  (subpath "/Volumes")
+  (subpath "/Users/Shared")
+  (subpath "/private/tmp")
+  (subpath "/private/var/tmp")
+  (subpath "/private/var/folders")
+  ;; system-wide places that describe this Mac or its owner rather than the operating system
+  (subpath "/private/var/log")
+  (subpath "/private/var/root")
+  (subpath "/Library/Logs")
+  (subpath "/Library/Keychains")
+  (subpath "/Library/Preferences")
+  (subpath "/Library/Application Support"))
+;; ... except what the run needs. Of our own node_modules only Playwright is readable, and of the
+;; Node install only node, npm, npx and the headers, so the Bee program and everything else
+;; installed in either place stays out of reach.
+(allow file-read*
+  (subpath workspace)
+  (subpath run-dir)
+  (subpath site-dir)
+  (subpath harness-dir)
+  (literal (node-path "/bin/node"))
+  (literal (node-path "/bin/npm"))
+  (literal (node-path "/bin/npx"))
+  (subpath (node-path "/lib/node_modules/npm"))
+  (subpath (node-path "/lib/node_modules/corepack"))
+  (subpath (node-path "/include"))
+  (subpath (tools-path "/@playwright/test"))
+  (subpath (tools-path "/playwright"))
+  (subpath (tools-path "/playwright-core"))
+  (subpath pw-browsers)
+  ;; of the npm cache only the package store: not npm's logs, which name other projects on this Mac
+  (subpath (string-append npm-cache "/_cacache")))
+(allow-traverse workspace)
+(allow-traverse run-dir)
+(allow-traverse site-dir)
+(allow-traverse harness-dir)
+(allow-traverse (node-path "/bin/node"))
+(allow-traverse (node-path "/lib/node_modules/npm"))
+(allow-traverse (node-path "/include"))
+(allow-traverse (tools-path "/@playwright/test"))
+(allow-traverse (tools-path "/playwright"))
+(allow-traverse (tools-path "/playwright-core"))
+(allow-traverse pw-browsers)
+(allow-traverse (string-append npm-cache "/_cacache"))
+
+;; 4. Writing: nowhere at all ...
+(deny file-write*)
+;; ... except the workspace copy, the run folder, and the usual device files.
+(allow file-write*
+  (subpath workspace)
+  (subpath run-dir)
+  (literal "/dev/null")
+  (literal "/dev/zero")
+  (literal "/dev/dtracehelper")
+  (literal "/dev/tty")
+  (regex #"^/dev/fd/[0-9]+$")
+  (regex #"^/dev/ttys[0-9]+$"))
+
+;; 5. Logins and transcripts, named one by one. Already covered by 3 and 4; kept so that a wrong
+;;    WORKSPACE or RUN_DIR (say, all of the data folder) still cannot open them.
+(deny file-read* file-write*
+  (literal (data-path "/overnight.db"))
+  (literal (data-path "/overnight.db-wal"))
+  (literal (data-path "/overnight.db-shm"))
+  (literal (data-path "/overnight.db-journal"))
+  (subpath (data-path "/logs"))
+  (subpath (data-path "/kiro-detector"))
+  (subpath (data-path "/spikes"))
+  (subpath (data-path "/pages"))
+  (literal (home-path "/.overnight/overnight.db"))
+  (literal (home-path "/.overnight/overnight.db-wal"))
+  (literal (home-path "/.overnight/overnight.db-shm"))
+  (literal (home-path "/.overnight/overnight.db-journal"))
+  (subpath (home-path "/.overnight/logs"))
+  (subpath (home-path "/.overnight/kiro-detector"))
+  (subpath (home-path "/.overnight/spikes"))
+  (subpath (home-path "/.overnight/pages"))
+  (subpath (home-path "/.ssh"))
+  (subpath (home-path "/.aws"))
+  (subpath (home-path "/.config/gh"))
+  (subpath (home-path "/Library/Keychains"))
+  (subpath (home-path "/.kiro"))
+  (subpath (home-path "/Library/Application Support/kiro-cli"))
+  (literal (home-path "/Documents/overnight/.env")))
+
+;; 6. System services (Keychain, clipboard, preferences, Spotlight, launching apps ...): none.
+;;    The one exception is the name Chromium's own processes use to find each other.
+(deny mach-lookup)
+(allow mach-lookup
+  (global-name-regex #"^org\.chromium\.Chromium\.MachPortRendezvousServer\.[0-9]+$"))
+
+;; 7. Network: only two ports on this Mac, the static server and our registry-only proxy.
+;;    Seatbelt can match "localhost" or "*" and a port, never a host name or an address.
+(deny network*)
+(allow network-outbound
+  (remote ip (string-append "localhost:" (param "PORT")))
+  (remote ip (string-append "localhost:" (param "PROXY_PORT"))))
+(allow network-bind network-inbound
+  (local ip (string-append "localhost:" (param "PORT"))))

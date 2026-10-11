@@ -1,0 +1,14 @@
+{
+  "name": "@overnight/deliver",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@overnight/core": "*",
+    "@playwright/test": "1.64.0",
+    "zod": "4.6.5"
+  }
+}

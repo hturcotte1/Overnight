@@ -54,6 +54,10 @@ const schema = z.object({
   MAX_BUILDS_PER_NIGHT: z.preprocess(blankToUndefined, intInRange(2, 0, 10)),
   BUILD_TIMEOUT_MIN: z.preprocess(blankToUndefined, intInRange(45, 1, 240)),
   WRITE_BEE_FACTS: z.preprocess(blankToUndefined, bool(true)),
+  BUILD_BACKEND: z.preprocess(blankToUndefined, z.enum(["kiro-crew", "kiro-cli"]).default("kiro-crew")),
+  // "overnight": Kiro Crew runs inside Overnight's own sandbox (the owner's decision, Oct 10).
+  // "crew": Kiro Crew's own sandbox at strict, which leaves logins and transcripts reachable.
+  BUILD_SANDBOX: z.preprocess(blankToUndefined, z.enum(["overnight", "crew"]).default("overnight")),
   // Quiet until told otherwise: a fresh install listens and detects but never buzzes a wrist.
   PAUSED: z.preprocess(blankToUndefined, bool(true)),
 });
@@ -69,6 +73,10 @@ export interface Config {
   maxBuildsPerNight: number;
   buildTimeoutMin: number;
   writeBeeFacts: boolean;
+  /** Which builder runs first each night. The other one is the fallback. */
+  buildBackend: "kiro-crew" | "kiro-cli";
+  /** Which sandbox the Kiro Crew gateway runs in. See SPEC section 6. */
+  buildSandbox: "overnight" | "crew";
   /** The starting value only. `overnight pause` / `resume` store the live value in the database. */
   pausedByDefault: boolean;
 }
@@ -105,6 +113,8 @@ export function parseConfig(env: Record<string, string | undefined>): Config {
     maxBuildsPerNight: value.MAX_BUILDS_PER_NIGHT,
     buildTimeoutMin: value.BUILD_TIMEOUT_MIN,
     writeBeeFacts: value.WRITE_BEE_FACTS,
+    buildBackend: value.BUILD_BACKEND,
+    buildSandbox: value.BUILD_SANDBOX,
     pausedByDefault: value.PAUSED,
   };
 }
