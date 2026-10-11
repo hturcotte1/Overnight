@@ -584,7 +584,7 @@ Both jobs ended with exit code 0. The app is at `https://hturcotte1.github.io/ov
 
 **Also learned.** The listener's keep-awake (`caffeinate -s`) only works on mains power. On battery the Mac sleeps after a minute, and with the lid closed it sleeps whatever is asked. That night a second keep-awake was started by hand for battery; building that in is Milestone 3 too.
 
-**Not known yet:** whether the wrist really buzzed at about 7:32. To hear from the wearer.
+**Confirmed by the wearer:** the watch buzzed at 7:32 am, and the to-do said the app was built.
 
 ## Decisions that came out of the spikes
 
