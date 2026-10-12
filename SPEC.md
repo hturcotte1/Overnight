@@ -780,7 +780,7 @@ The spikes:
   - *The morning's printed line did not say when a page was pushed but not seen live.* Fixed (§7).
 - **Decided Oct 10:** a Kiro Crew job listing the names in the home folder is accepted (§9, limit 5).
 
-**M3: Dashboard and hardening (Wed Oct 14 – Fri Oct 16).** **Built on Oct 11, ahead of plan. Reviewed by four independent reviews the same night and fixed. Tests, typecheck and lint pass (3,546 tests in 116 files on Oct 12; one race test in the builder's safe-read tests used to fail now and then in its own clean-up, and was fixed that night: 30 runs in a row passed). It has not yet met the real tools, and it is not yet what runs at night:** the live night jobs still run the Milestone 2 code, on macOS's calendar, until the proofs below have passed and the jobs are moved over.
+**M3: Dashboard and hardening (Wed Oct 14 – Fri Oct 16).** **Built on Oct 11, ahead of plan. Reviewed by four independent reviews the same night and fixed. Tests, typecheck and lint pass (3,546 tests in 116 files on Oct 12; one race test in the builder's safe-read tests used to fail now and then in its own clean-up, and was fixed that night: 30 runs in a row passed). Proved against the real tools in the small hours of Oct 12 (proofs P1, P2, P3, P5 and the first half of P4: `docs/spikes.md`, "Still to be proved for real"): the new sandbox rules passed a real build with each builder, the every-minute jobs kept time under real launchd, and a clean clone passes everything. It is not yet what runs at night:** the live night jobs still run the Milestone 2 code, on macOS's calendar, until the sleep test with Henry at the Mac is done and the jobs are moved over.
 
 *Henry's decisions of Oct 11:*
 1. On battery, with the lid open, Overnight keeps the Mac awake, so that it keeps listening and can build at night.
@@ -795,7 +795,7 @@ Two things followed from decision 1. There is no "builds only on mains power" ru
 - Re-runs are safe to repeat. (Built in M2 for build and deliver. Milestone 3 added: one start per night job per day, §6.)
 - Timeouts and cost caps. (Timeouts were built in M2. **Built in Milestone 3:** the monthly ceiling on counted build credits, `MAX_BUILD_CREDITS_PER_MONTH`, and a sleep that stops a run instead of running it past its time limit.)
 - `build-now`, `pause` and `resume`. (Already built, in M2 and M1.)
-- README setup works from a clean clone (with fixtures). **The README is rewritten in true order; trying it from a clean clone is pending (P5 below).**
+- README setup works from a clean clone (with fixtures). **The README is rewritten in true order, and a clean clone passed on Oct 12 (P5): `npm ci`, typecheck, lint, all 3,546 tests, the README's commands, and the detector's evaluation.**
 
 *Also built in Milestone 3:*
 - **Overnight's own clock** for the two night jobs (§6): macOS only wakes them every minute.

@@ -994,8 +994,12 @@ const realNodeDir = path.dirname(path.dirname(realpathSync(process.execPath)));
 const realNpm = path.join(realNodeDir, "bin", "npm");
 const realKirocrew = path.join(realHome, ".local", "bin", "kirocrew");
 const realKiro = [path.join(realHome, ".local", "bin", "kiro-cli"), "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli"].find((candidate) => existsSync(candidate));
+// These tests are about a person's real home folder. A made-up HOME in a temporary folder (as a
+// clean-clone check uses) is closed to both profiles for being a temporary folder, and holds
+// none of Kiro's own files, so the answers there would say nothing about a real install.
+const homeIsReal = !/^\/private\/(tmp|var)\//.test(realHome);
 
-describe.skipIf(!canSandbox || !existsSync(realNpm))("the real node and npm, started inside each profile", () => {
+describe.skipIf(!canSandbox || !existsSync(realNpm) || !homeIsReal)("the real node and npm, started inside each profile", () => {
   /** A scratch data folder and made-up Kiro folders; the home folder, the Node.js install and npm's cache are the real ones. */
   function realWorld() {
     const root = tempDir("overnight-sandbox-real-");
