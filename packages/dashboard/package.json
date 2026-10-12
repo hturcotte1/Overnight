@@ -1,0 +1,20 @@
+{
+  "name": "@overnight/dashboard",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@overnight/builder": "*",
+    "@overnight/core": "*",
+    "better-sqlite3": "13.0.3",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@overnight/cli": "*",
+    "@overnight/deliver": "*",
+    "@playwright/test": "1.64.0"
+  }
+}

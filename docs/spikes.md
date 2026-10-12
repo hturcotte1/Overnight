@@ -519,6 +519,59 @@ An install with an empty npm cache, through the registry-only proxy, worked in t
 
 **Tests.** 1,467 pass (76 files), with typecheck and lint clean, on Oct 10 after the last round.
 
+### Spike 12: reading the database read-only, beside the listener. Passed (2026-10-11)
+
+Done for Milestone 3, before the dashboard was built on it.
+
+**Question:** the dashboard is a page that only reads. Can a second program read `overnight.db` while the listener writes to it, without ever making the listener wait? And can it tell whether the listener, a build or a deliver is running without touching their lock files?
+
+**Answer:** yes to both, with one rule (**never leave a read open**) and one honest footnote (SQLite's two side files).
+
+`spikes/12-sqlite-read-only.ts` uses the real `Store` as the writer and the cli's own `takeLock` as the lock holder. Every line it writes is invented. It works in a new temporary folder, removes it at the end, and never opens the data folder. It ran five times (better-sqlite3 13.0.3, SQLite 3.53.4, Node 24.21.0); where the runs differed, the range is given. It costs no Kiro credits.
+
+A look is: `new Database(file, { readonly: true, fileMustExist: true, timeout: 250 })`, then `PRAGMA query_only = ON`, a few SELECTs inside one short transaction, close.
+
+| Try | Result |
+|---|---|
+| Read-only open of a file that is not there | `SQLITE_CANTOPEN`. Nothing is created |
+| Read-only open inside a folder that is not there | better-sqlite3 throws a `TypeError` before SQLite is asked |
+| An empty (zero-byte) file | Opens. `user_version` is 0, and any SELECT fails with `SQLITE_ERROR`, "no such table" |
+| A write through the read-only connection | `SQLITE_READONLY`, also with `query_only` switched back off |
+| The writer alone, in another process: a line every 5 ms for 3 s | 509 to 520 lines. Slowest write 2.7 to 5.2 ms, average 0.14 to 0.24 ms |
+| The same writer beside a reader taking 1,367 to 2,088 looks | 515 to 529 lines. Slowest write 1.4 to 3.1 ms, average 0.07 to 0.21 ms. No error on either side. Slowest look 1.3 to 3.0 ms. The count of lines never went backwards |
+| One line written, then a look | The line is in the very next look |
+| A look while another process holds a write open for 1.5 s | Answered in under half a millisecond |
+| The writer killed mid-way (3.4 to 4.0 MB left in the write-ahead file) | The next look reads. SQLite's `integrity_check` says ok. The next `Store` to open and close leaves only `overnight.db` |
+| 3,000 lines, with a short look after every tenth | The write-ahead file stays at about 4 MB, its usual size. Slowest write 0.8 to 1.6 ms |
+| **3,000 lines beside a read that is left open** | Writes are still not slowed (slowest 0.3 to 2.6 ms). But the write-ahead file grew to **86 to 90 MB**: about 21,000 pages, none of which a checkpoint could move into the database. The held read went on counting the lines as they were when it began, 3,000 fewer than a new look. Once the read was let go, a checkpoint emptied the file |
+| An `.iterate()` that was not finished | The same in small: a checkpoint reports busy until it is finished |
+
+**The two side files.**
+- After a clean close the folder holds only `overnight.db`. A read-only open then makes SQLite create `overnight.db-shm` (32,768 bytes) and an empty `overnight.db-wal`, both private (mode 600), and it leaves them there when it closes.
+- The database file itself did not change: same bytes, same size, same modification time.
+- The next `Store` to open and close removed both files. While the listener runs they exist anyway, so a look adds nothing.
+- SQLite's "immutable" mode would avoid them, but it is not on offer: a `file:...?immutable=1` name fails with `SQLITE_CANTOPEN`, because this better-sqlite3 build has URI file names switched off (`SQLITE_USE_URI=0` in its build settings).
+- In a folder that cannot be written and has no side files yet, the open fails with `SQLITE_READONLY_DIRECTORY`.
+
+**Looking at a lock file.** `listen.lock`, `build.lock` and `deliver.lock` are empty SQLite files that a running program holds a transaction on. The look is `new Database(file, { readonly: true, fileMustExist: true, timeout: 0 })`, `SELECT COUNT(*) FROM sqlite_master`, close.
+
+| State of the lock file | What the look says |
+|---|---|
+| No file | `SQLITE_CANTOPEN`, so nothing is running. Nothing is created |
+| Held by another process (the cli's `takeLock`) | `SQLITE_BUSY`, at once |
+| The holder gave it back | Free. The file is 0 bytes and its `-journal` is gone |
+| The holder was killed (`kill -9`) and its 512-byte `-journal` is left behind | Free, twice in a row. A real start afterwards got the lock |
+| While it looks | No file's name or size changes, nor the lock file's time. The 512-byte `-journal` is the holder's, not the look's |
+| 40 real starts, one after another, while this process looked non-stop (2,871 to 3,025 looks) | 40 of 40 got the lock |
+
+**What follows for the dashboard:**
+- Every look opens read-only, reads in one short transaction with `.get()` and `.all()` only, and closes. No connection is kept, there is no `.iterate()`, and nothing but SQL happens inside the transaction. Tests guard this.
+- "The dashboard never writes in the data folder" is true of our code. SQLite's two side files are the footnote, and only when no other Overnight program is running.
+- A missing file and a `user_version` of 0 both mean "nothing saved yet". `SQLITE_BUSY` means: show the last good look and try again.
+- Whether the listener, a build or a deliver is running is read from the lock files with the read-only look, about once a second at most. A starting job waits up to 500 ms for its lock; in the 200 starts of the five runs, none was turned away.
+
+Not tried: the real data folder beside the running listener (that is the dashboard's last proof step, with Henry at the screen), a database on a read-only disk, and several readers at once.
+
 ## The rehearsal and switching on (2026-10-10, evening)
 
 The first time every part ran for real together: the real Kiro Crew install (its real home, its usual port) inside our sandbox, the real verifier, the real publisher. Only Bee was a stand-in, and the data folder was a scratch one (`~/.overnight-rehearsal`), so nothing could reach the wearer or the real database.

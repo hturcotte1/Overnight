@@ -21,7 +21,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "eval:detector": "node packages/detector/src/eval.ts",
-    "overnight": "node packages/cli/src/main.ts"
+    "overnight": "node packages/cli/src/main.ts",
+    "dashboard": "node packages/dashboard/src/main.ts",
+    "dashboard:demo": "node packages/dashboard/src/main.ts --demo"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
