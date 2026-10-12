@@ -12,7 +12,7 @@ import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, readdirSync,
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { dataPaths } from "@overnight/core";
+import { DASHBOARD_PORT, dataPaths } from "@overnight/core";
 import { CREW_GATEWAY_SANDBOX_PROFILE, KIRO_CLI_SANDBOX_PROFILE, sealWorkspace } from "../src/index.ts";
 import { BEE_COPY, BUILT_MARKER_FILE, BUILT_TESTS, DECOY_MARK, DECOY_PATTERN, judgeProbe, LIST_TESTS, listTestTargets, probeCommand, startDecoy, takeMadeFiles, WRITE_TEST_FILE, WRITE_TESTS, writeTestTargets, writeTries } from "../src/probe.ts";
 import { profileParams, SANDBOX_VALUE_NAMES } from "../src/sandbox-values.ts";
@@ -199,10 +199,13 @@ function world(layout: "split" | "usual" = "split") {
   /** sandbox-exec's arguments for a profile file: one -D for each name it asks for, as the builder gives them. */
   const values = (profileFile: string) => ["-f", profileFile, ...profileParams(readFileSync(profileFile, "utf8")).flatMap((name) => ["-D", `${name}=${given[name]}`])];
   const inside = (profileFile: string) => {
-    const run = (command: string, args: string[]): SpawnSyncReturns<string> =>
-      spawnSync("/usr/bin/sandbox-exec", [...values(profileFile), command, ...args], { cwd: workspace, encoding: "utf8", timeout: 15_000, env: { HOME: home, PATH: "/usr/bin:/bin", TMPDIR: buildTmp } });
+    /** Run a command inside the profile, started in a folder of the test's choosing. */
+    const runIn = (cwd: string, command: string, args: string[]): SpawnSyncReturns<string> =>
+      spawnSync("/usr/bin/sandbox-exec", [...values(profileFile), command, ...args], { cwd, encoding: "utf8", timeout: 15_000, env: { HOME: home, PATH: "/usr/bin:/bin", TMPDIR: buildTmp } });
+    const run = (command: string, args: string[]): SpawnSyncReturns<string> => runIn(workspace, command, args);
     return {
       run,
+      runIn,
       canRead: (file: string) => run("/bin/cat", [file]).status === 0,
       canList: (dir: string) => run("/bin/ls", [dir]).status === 0,
       /** Look at a file or folder without opening it (its name, kind and size). */
@@ -1087,5 +1090,369 @@ describe.skipIf(!canSandbox || !existsSync(realNpm))("the real node and npm, sta
     }
     // Found by name where the gateway's PATH has it.
     expect(w.run(CREW_GATEWAY_SANDBOX_PROFILE, "/bin/sh", ["-c", "kiro-cli --version"]).status).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Milestone 3: section 11 of both profiles (other programs' socket files, the dashboard's port)
+// and the two rules only the Kiro CLI profile has (the list of running programs, the list of
+// running apps). One block of tests for each rule, so that a rule which fails its real proof can
+// be dropped together with its tests.
+// ---------------------------------------------------------------------------------------------
+
+/** The rules of a profile without its comments: what the sandbox is actually given. */
+const rulesOf = (profile: string): string => profile.replace(/^\s*;;.*$/gm, "");
+const SECTION_11 = ";; 11. Other programs' socket files, and Overnight's own dashboard.";
+const SOCKETS_REFUSED = '(deny network-outbound (remote unix-socket (path-regex #"^/")))';
+const SSH_AGENT_REFUSED = '(deny network-outbound\n  (remote unix-socket (path-regex #"^/private/var/run/com\\.apple\\.launchd\\.[^/]+/Listeners$")))';
+const FOUR_RULES = '(deny process-info*)\n(allow process-info* (target same-sandbox))\n(deny sysctl-read (sysctl-name-prefix "kern.procargs"))\n(deny mach-lookup (global-name "com.apple.sysmond"))';
+const PROCESS_TABLE_REFUSED = '(deny sysctl-read (sysctl-name-prefix "kern.proc."))';
+const APP_LIST_REFUSED = '(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))';
+
+describe("the sandbox profiles: what section 11 and the Kiro CLI extras say", () => {
+  it("end with section 11, after every other rule", () => {
+    for (const profile of [GATEWAY, KIRO]) {
+      const at = profile.indexOf(SECTION_11);
+      expect(at).toBeGreaterThan(profile.indexOf(";; 10. System services"));
+      expect(profile.slice(at)).not.toMatch(/^;; 1[2-9]\./m);
+      // Nothing about files, programs or services follows it: only the socket and port rules.
+      expect(rulesOf(profile.slice(at)).match(/^\((allow|deny) [a-z*-]+/gm)).toEqual(["(deny network-outbound", "(allow network-outbound", "(deny network-outbound", "(deny network-outbound", "(deny network-bind"]);
+    }
+  });
+
+  it("refuse every socket file, then open a short list, then refuse the ssh agent by name: in that order", () => {
+    for (const profile of [GATEWAY, KIRO]) {
+      const rules = rulesOf(profile);
+      const refuseAll = rules.indexOf(SOCKETS_REFUSED);
+      const allow = rules.indexOf("(allow network-outbound\n  (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\"))");
+      const sshAgent = rules.indexOf(SSH_AGENT_REFUSED);
+      expect(refuseAll).toBeGreaterThan(0);
+      expect(allow).toBeGreaterThan(refuseAll);
+      // The ssh agent's rule is the one the profiles always had, and it is the last word on socket files.
+      expect(sshAgent).toBeGreaterThan(allow);
+      expect(rules.slice(sshAgent + SSH_AGENT_REFUSED.length)).not.toContain("unix-socket");
+      expect(rules.split(SSH_AGENT_REFUSED)).toHaveLength(2);
+      expect(rules.match(/\(allow network-outbound/g)).toHaveLength(1);
+    }
+  });
+
+  it("open only the system's name service and socket files in folders a build may write anyway", () => {
+    const entries = (profile: string): string[] => {
+      const rules = rulesOf(profile);
+      const from = rules.indexOf("(allow network-outbound");
+      return rules.slice(from, rules.indexOf(SSH_AGENT_REFUSED)).split("\n").map((line) => line.trim()).filter((line) => line.startsWith("(remote unix-socket")).map((line) => line.replace(/\)+$/, ""));
+    };
+    const inFolder = (folder: string): string => `(remote unix-socket (path-regex (string-append "^" (regex-quote ${folder}`;
+    expect(entries(GATEWAY)).toEqual([
+      '(remote unix-socket (path-literal "/private/var/run/mDNSResponder"',
+      `${inFolder("crew-home")}) "/"`,
+      `${inFolder("build-tmp")}) "/"`,
+      `${inFolder('(data-path "/workspaces")')}) "/"`,
+      `${inFolder('(data-path "/tmp/build-probe")')}) "/"`,
+      `${inFolder('(home-path "/workplace/kirocrew-workspace")')}) "/"`,
+      `${inFolder('(home-path "/Library/Application Support/kiro-cli")')}) "/"`,
+    ]);
+    // The Kiro CLI build: its own workspace only, and nothing of Kiro Crew's.
+    expect(entries(KIRO)).toEqual([
+      '(remote unix-socket (path-literal "/private/var/run/mDNSResponder"',
+      `${inFolder("build-tmp")}) "/"`,
+      `${inFolder("workspace")}) "/"`,
+      `${inFolder('(home-path "/Library/Application Support/kiro-cli")')}) "/"`,
+    ]);
+  });
+
+  it("refuse the dashboard's port by its number, the one core gives the dashboard, for connecting and for taking it", () => {
+    expect(DASHBOARD_PORT).toBe(4321);
+    for (const profile of [GATEWAY, KIRO]) {
+      const rules = rulesOf(profile);
+      expect(rules).toContain(`(deny network-outbound (remote ip "localhost:${DASHBOARD_PORT}"))`);
+      expect(rules).toContain(`(deny network-bind (local ip "localhost:${DASHBOARD_PORT}"))`);
+      // No other port is named: the gateway's own has to stay open, and a build serves its preview on one.
+      expect(rules.match(/"localhost:[^"]*"/g)).toEqual([`"localhost:${DASHBOARD_PORT}"`, `"localhost:${DASHBOARD_PORT}"`]);
+      // No new value is asked for: the port is written into the profile.
+      expect(profileParams(profile)).not.toContain("PORT");
+    }
+  });
+
+  it("keep the four rules about other programs as they were, and add two after them in the Kiro CLI profile only", () => {
+    for (const profile of [GATEWAY, KIRO]) expect(rulesOf(profile).split(FOUR_RULES)).toHaveLength(2);
+    const kiro = rulesOf(KIRO);
+    expect(kiro.indexOf(PROCESS_TABLE_REFUSED)).toBeGreaterThan(kiro.indexOf(FOUR_RULES));
+    expect(kiro.indexOf(APP_LIST_REFUSED)).toBeGreaterThan(kiro.indexOf(PROCESS_TABLE_REFUSED));
+    expect(kiro.indexOf(APP_LIST_REFUSED)).toBeLessThan(kiro.indexOf("(deny file-read* process-exec*"));
+    // Not in the gateway profile: the first also refuses a job's own process group, which Kiro
+    // Crew asks for, and the second is pointless while the first is open. The profile says so.
+    const gateway = rulesOf(GATEWAY);
+    expect(gateway).not.toContain(PROCESS_TABLE_REFUSED);
+    expect(gateway).not.toContain("launchservicesd");
+    expect(GATEWAY).toMatch(/the list of running programs, names and numbers only/);
+    expect(KIRO).toContain("which is why crew-gateway.sb does not have this rule");
+  });
+});
+
+/** Wait, without giving up the thread for long, until a helper has made its socket file. */
+function waitForFile(file: string): void {
+  for (let tries = 0; tries < 100 && !existsSync(file); tries += 1) spawnSync("/bin/sleep", ["0.05"]);
+  expect(existsSync(file), `the test's own listener did not start: ${path.basename(path.dirname(file))}`).toBe(true);
+}
+
+/**
+ * A listener on a socket file, outside the sandbox: the stand-in for another program's socket.
+ * It is started in the folder and named by a short name, because a socket's name may not be
+ * longer than 104 bytes and the made-up folders' full paths are. The sandbox still judges the
+ * socket by its full path.
+ */
+function listenIn(dir: string, name = "s.sock"): void {
+  mkdirSync(dir, { recursive: true });
+  helpers.push(spawn("/usr/bin/nc", ["-lkU", name], { cwd: dir, stdio: "ignore" }));
+  waitForFile(path.join(dir, name));
+}
+
+/** Can a program inside the profile connect to the socket file in this folder? (Started in the folder, as the listener was.) */
+const connects = (box: Inside, dir: string, name = "s.sock"): boolean => box.runIn(dir, "/usr/bin/nc", ["-U", name]).status === 0;
+/** The same from outside any sandbox: the control that shows the test's own tools work. */
+const connectsOutside = (dir: string, name = "s.sock"): boolean => spawnSync("/usr/bin/nc", ["-U", name], { cwd: dir, stdio: "ignore", timeout: 15_000 }).status === 0;
+
+/** Where other programs keep socket files, and where a build's own tools may. */
+function socketPlaces(w: World) {
+  return {
+    documents: path.join(w.home, "Documents"),
+    homeLibrary: path.join(w.home, "Library", "Application Support", "Some Browser"),
+    homeItself: w.home,
+    dataFolder: w.data,
+    finishedBuilds: w.built,
+    buildTmp: w.buildTmp,
+    workspace: w.workspace,
+    kiroCliOwn: w.support,
+    otherWorkspace: path.join(w.data, "workspaces", "idea_other"),
+    probe: w.probe,
+    crewHome: w.crewHome,
+    crewDeep: path.join(w.crewHome, "mcp-gateway"),
+    crewRuns: path.join(w.home, "workplace", "kirocrew-workspace"),
+  };
+}
+type SocketPlace = keyof ReturnType<typeof socketPlaces>;
+const ALWAYS_REFUSED: SocketPlace[] = ["documents", "homeLibrary", "homeItself", "dataFolder", "finishedBuilds"];
+
+function expectSockets(w: World, box: Inside, open: SocketPlace[], profileFile: string): void {
+  const places = socketPlaces(w);
+  for (const dir of Object.values(places)) listenIn(dir);
+  // Outside the sandbox every one of them answers: the listeners are there, and the tool works.
+  for (const [name, dir] of Object.entries(places)) expect(connectsOutside(dir), `outside: ${name}`).toBe(true);
+  for (const [name, dir] of Object.entries(places)) expect(connects(box, dir), `inside: ${name}`).toBe(open.includes(name as SocketPlace));
+  for (const name of ALWAYS_REFUSED) expect(open, name).not.toContain(name);
+  // A socket file is matched by where it is, not by how it is named: reached the long way round, it is still refused.
+  expect(box.runIn(w.workspace, "/usr/bin/nc", ["-U", path.relative(w.workspace, path.join(places.dataFolder, "s.sock"))]).status).not.toBe(0);
+  // Without the one rule that refuses socket files (a deliberately loosened copy) each of them
+  // answers from inside too: it is that rule, and nothing else, that closes them.
+  const loose = w.loosened(profileFile, '(allow network-outbound (remote unix-socket (path-regex #"^/")))');
+  for (const [name, dir] of Object.entries(places)) expect(connects(loose, dir), `loosened: ${name}`).toBe(true);
+}
+
+/**
+ * Asks macOS about processes the direct way (the sysctl "kern.proc" family, which is what a
+ * program uses to list what is running). Usage: questions.pl <process number of a program outside>.
+ * It starts one child of its own, in a process group of its own, and asks six things. Prints
+ * "answered" or "refused" for each, and never what it was told. Ported from the reader in
+ * packages/deliver/test/sandbox-real.test.ts, with the process group added.
+ */
+const PROCESS_QUESTIONS = `# Synthetic test tool, made for one test. It only ever asks about itself and a decoy process.
+use strict; use warnings; use POSIX ();
+sub ask {
+  my (@mib) = @_;
+  # sysctl({ CTL_KERN = 1, KERN_PROC = 14, <which>, <number> }) is system call 202.
+  my $mib = pack("i" . scalar(@mib), @mib);
+  my $room = 8 << 20;
+  my $size = pack("Q", $room);
+  my $buf = "\\0" x $room;
+  my $rc = syscall(202, $mib, scalar(@mib), $buf, $size, 0, 0);
+  # An answer of at least one record. (A table too big for the room given would also count as readable.)
+  my $got = $rc == 0 ? unpack("Q", $size) > 100 : $! == 12;
+  return $got ? "answered" : "refused";
+}
+my $outside = $ARGV[0] + 0;
+my $child = fork();
+if ($child == 0) { POSIX::setpgid(0, 0); sleep 30; exit 0; }
+select(undef, undef, undef, 0.3);
+print "own child, by its number: ", ask(1, 14, 1, $child), "\\n";         # KERN_PROC_PID
+print "own child's process group: ", ask(1, 14, 2, $child), "\\n";        # KERN_PROC_PGRP
+print "a program outside, by its number: ", ask(1, 14, 1, $outside), "\\n";
+print "a program outside, by its process group: ", ask(1, 14, 2, $outside), "\\n";
+print "every program of this user: ", ask(1, 14, 5, $<), "\\n";          # KERN_PROC_UID
+print "the whole list: ", ask(1, 14, 0), "\\n";                          # KERN_PROC_ALL
+kill "KILL", $child; waitpid($child, 0);
+`;
+
+/** Ask the six questions, inside a profile or (with no box) outside any sandbox. */
+function processAnswers(w: World, box: Inside | null): string[] {
+  const script = path.join(w.workspace, "questions.pl");
+  writeFileSync(script, PROCESS_QUESTIONS);
+  // The program outside: its own process group, so its number is its group's number too.
+  const outside = spawn("/bin/sleep", ["60"], { stdio: "ignore", detached: true });
+  helpers.push(outside);
+  const args = [script, String(outside.pid)];
+  const result = box === null ? spawnSync("/usr/bin/perl", args, { encoding: "utf8", timeout: 15_000 }) : box.run("/usr/bin/perl", args);
+  return result.stdout.trim().split("\n");
+}
+
+/** Does `lsappinfo list` name any running app? Only counted: what it prints is never kept or shown. */
+function appsListed(box: Inside | null): number {
+  const result = box === null ? spawnSync("/usr/bin/lsappinfo", ["list"], { encoding: "utf8", timeout: 15_000 }) : box.run("/usr/bin/lsappinfo", ["list"]);
+  return (result.stdout.match(/bundleID/g) ?? []).length;
+}
+
+/**
+ * Tries the dashboard's port and a free one from a program inside the sandbox (a copy of node in
+ * the workspace), and prints one word for each try: "connected", "bound", or the error's code.
+ * Nothing has to listen on the dashboard's port: a refusal by the sandbox is EPERM, and a port
+ * nobody listens on is ECONNREFUSED.
+ */
+const PORT_TRIES = `
+const net = require("net");
+const [dashboard, free] = process.argv.slice(1).map(Number);
+const connect = (port) => new Promise((done) => { const s = net.connect(port, "127.0.0.1"); s.on("connect", () => { s.destroy(); done("connected"); }); s.on("error", (e) => done(e.code)); });
+const bind = (port, host) => new Promise((done) => { const s = net.createServer(); s.on("error", (e) => done(e.code)); s.listen(port, host, () => s.close(() => done("bound"))); });
+(async () => {
+  console.log("connect to the dashboard's port: " + await connect(dashboard));
+  for (const host of ["127.0.0.1", "0.0.0.0", "::1", "::"]) console.log("take the dashboard's port on " + host + ": " + await bind(dashboard, host));
+  console.log("connect to another port: " + await connect(free));
+  console.log("take a free port: " + await bind(0, "127.0.0.1"));
+})();
+`;
+
+/** A listener on a free port of this Mac's own address, outside the sandbox. Answers its port once it is listening. */
+function listenOnFreePort(): Promise<number> {
+  const helper = spawn(process.execPath, ["-e", 'const s = require("net").createServer((c) => c.end()); s.listen(0, "127.0.0.1", () => console.log(s.address().port)); setTimeout(() => process.exit(0), 60000);'], { stdio: ["ignore", "pipe", "ignore"] });
+  helpers.push(helper);
+  return new Promise((resolve, reject) => {
+    helper.stdout.once("data", (chunk: Buffer) => resolve(Number(chunk.toString().trim())));
+    helper.once("error", reject);
+    helper.once("exit", () => reject(new Error("The test's own listener did not start.")));
+  });
+}
+
+function portAnswers(w: World, box: Inside, freePort: number): string[] {
+  return box.run(w.binaries.inWorkspace, ["-e", PORT_TRIES, String(DASHBOARD_PORT), String(freePort)]).stdout.trim().split("\n");
+}
+
+const REFUSED_BY_THE_SANDBOX = [
+  "connect to the dashboard's port: EPERM",
+  "take the dashboard's port on 127.0.0.1: EPERM",
+  "take the dashboard's port on 0.0.0.0: EPERM",
+  "take the dashboard's port on ::1: EPERM",
+  "take the dashboard's port on ::: EPERM",
+  "connect to another port: connected",
+  "take a free port: bound",
+];
+
+async function expectDashboardPortClosed(w: World, box: Inside, profileFile: string): Promise<void> {
+  const freePort = await listenOnFreePort();
+  expect(freePort).toBeGreaterThan(1023);
+  expect(portAnswers(w, box, freePort)).toEqual(REFUSED_BY_THE_SANDBOX);
+  // With the two rules taken back (a deliberately loosened copy) the sandbox no longer has a say:
+  // whatever the answers are then (a dashboard may or may not be running on this Mac), none is EPERM.
+  const loose = w.loosened(profileFile, `(allow network-outbound (remote ip "localhost:${DASHBOARD_PORT}"))\n(allow network-bind (local ip "localhost:${DASHBOARD_PORT}"))`);
+  const loosened = portAnswers(w, loose, freePort);
+  expect(loosened).toHaveLength(7);
+  expect(loosened.join("\n")).not.toContain("EPERM");
+  expect(loosened[0]).toMatch(/: (connected|ECONNREFUSED)$/);
+  for (const line of loosened.slice(1, 5)) expect(line).toMatch(/: (bound|EADDRINUSE)$/);
+}
+
+describe.skipIf(!canSandbox)("section 11, run for real: other programs' socket files", () => {
+  it("the Kiro CLI profile refuses every socket file but those in the build's temporary folder, its workspace and Kiro CLI's own folder", () => {
+    const w = world();
+    expectSockets(w, w.kiro, ["buildTmp", "workspace", "kiroCliOwn"], KIRO_CLI_SANDBOX_PROFILE);
+  });
+
+  it("the gateway profile also opens Kiro Crew's own folders, every workspace and the check's results folder, and nothing else", () => {
+    const w = world();
+    expectSockets(w, w.gateway, ["buildTmp", "workspace", "kiroCliOwn", "otherWorkspace", "probe", "crewHome", "crewDeep", "crewRuns"], CREW_GATEWAY_SANDBOX_PROFILE);
+  });
+
+  it("holds when the data folder is inside the home folder, as on a real install", () => {
+    const w = world("usual");
+    const places = socketPlaces(w);
+    for (const name of ["documents", "dataFolder", "finishedBuilds", "buildTmp", "workspace", "crewHome"] as const) listenIn(places[name]);
+    for (const [box, open] of [
+      [w.kiro, ["buildTmp", "workspace"]],
+      [w.gateway, ["buildTmp", "workspace", "crewHome"]],
+    ] as const) {
+      for (const name of ["documents", "dataFolder", "finishedBuilds", "buildTmp", "workspace", "crewHome"] as const) expect(connects(box, places[name]), name).toBe((open as readonly string[]).includes(name));
+    }
+  });
+
+  for (const [label, profileFile, pick] of [
+    ["the Kiro CLI profile", KIRO_CLI_SANDBOX_PROFILE, (w: World) => w.kiro],
+    ["the gateway profile", CREW_GATEWAY_SANDBOX_PROFILE, (w: World) => w.gateway],
+  ] as const) {
+    it(`${label} still reaches the system's name service, which is one line of the list`, () => {
+      const w = world();
+      const nameService = ["-U", "/private/var/run/mDNSResponder"];
+      // Connect and hang up: nothing is asked of it.
+      expect(pick(w).run("/usr/bin/nc", nameService).status).toBe(0);
+      // With that one line taken back, it is refused like every other socket file.
+      const without = w.loosened(profileFile, '(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))');
+      expect(without.run("/usr/bin/nc", nameService).status).not.toBe(0);
+    });
+  }
+});
+
+describe.skipIf(!canSandbox)("section 11, run for real: the dashboard's port", () => {
+  it("the Kiro CLI profile refuses connecting to it and taking it, on every address, and leaves other ports alone", async () => {
+    const w = world();
+    await expectDashboardPortClosed(w, w.kiro, KIRO_CLI_SANDBOX_PROFILE);
+  });
+
+  it("the gateway profile refuses connecting to it and taking it, on every address, and leaves other ports alone", async () => {
+    const w = world();
+    await expectDashboardPortClosed(w, w.gateway, CREW_GATEWAY_SANDBOX_PROFILE);
+  });
+});
+
+describe.skipIf(!canSandbox)("the Kiro CLI profile's two extras, run for real: the lists of running programs and apps", () => {
+  it("the test's own questions are all answered outside any sandbox", () => {
+    expect(processAnswers(world(), null)).toEqual([
+      "own child, by its number: answered",
+      "own child's process group: answered",
+      "a program outside, by its number: answered",
+      "a program outside, by its process group: answered",
+      "every program of this user: answered",
+      "the whole list: answered",
+    ]);
+  });
+
+  it("the Kiro CLI profile refuses the list of running programs, a program outside and every process group, and still answers about a build's own child", () => {
+    const w = world();
+    expect(processAnswers(w, w.kiro)).toEqual([
+      "own child, by its number: answered",
+      // Also refused, although it is the build's own: the rule cannot tell. This is why the gateway profile does not have it.
+      "own child's process group: refused",
+      "a program outside, by its number: refused",
+      "a program outside, by its process group: refused",
+      "every program of this user: refused",
+      "the whole list: refused",
+    ]);
+    // It is that one rule: with it taken back, everything is answered again.
+    const loose = w.loosened(KIRO_CLI_SANDBOX_PROFILE, '(allow sysctl-read (sysctl-name-prefix "kern.proc."))\n(deny sysctl-read (sysctl-name-prefix "kern.procargs"))');
+    expect(processAnswers(w, loose).filter((line) => line.endsWith("refused"))).toEqual([]);
+    // Command lines stay hidden either way: that is the older rule's work, and it is still there.
+    expectOtherProgramsHidden(w, w.kiro, KIRO_CLI_SANDBOX_PROFILE);
+  });
+
+  it("the gateway profile still answers all of it: the accepted limit, because Kiro Crew asks for its jobs' process groups", () => {
+    const w = world();
+    const answers = processAnswers(w, w.gateway);
+    expect(answers).toHaveLength(6);
+    expect(answers.filter((line) => line.endsWith("refused"))).toEqual([]);
+  });
+
+  it.skipIf(appsListed(null) === 0)("the Kiro CLI profile shows no running app, and the gateway profile still does", () => {
+    const w = world();
+    expect(appsListed(w.kiro)).toBe(0);
+    // With the one rule taken back the apps are listed again.
+    expect(appsListed(w.loosened(KIRO_CLI_SANDBOX_PROFILE, '(allow mach-lookup (global-name "com.apple.coreservices.launchservicesd"))'))).toBeGreaterThan(0);
+    // Not hidden from Kiro Crew jobs: pointless while the list of running programs is open there.
+    expect(appsListed(w.gateway)).toBeGreaterThan(0);
   });
 });

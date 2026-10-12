@@ -111,7 +111,7 @@ Both profiles in `packages/builder/sandbox/` follow the same two rules:
 - **Nothing in the home folder, the data folder, this repo, the Node.js folder, other disks, `/Users/Shared` or the shared temporary folders can be read or run, except a short list.**
 - **Nothing in those places, or where programs are installed, can be written, except a shorter list.**
 
-A real gateway start, sandbox check and agent build ran with exactly these lists (Oct 10), and so did a real Kiro CLI build.
+A real gateway start, sandbox check and agent build ran with exactly these lists (Oct 10), and so did a real Kiro CLI build. The rules about socket files, the dashboard's port and (Kiro CLI only) the lists of running programs and apps were added on Oct 11. They are tried against a throwaway gateway by `spikes/11-hardening-proof.ts` (see "Proving a change to a profile" below).
 
 A build **can read and run**:
 
@@ -138,12 +138,17 @@ A build **cannot**:
 - run `gh`, or the Bee program that is installed on this Mac
 - write where programs are run from or settings are read from: `~/.local`, the Node.js folder, `~/.kiro/crew-venv`, `~/.kiro/crew-python`, `/Applications`, this repo, `~/.zshenv` and the other shell start-up files, `~/.gitconfig`, `~/.config`, `~/Library/LaunchAgents`, `~/Library/Preferences`, `~/.kiro/settings`, Kiro's steering, skills and prompts folders, `~/.npm/_npx`
 - use the Keychain, the clipboard or the ssh agent, start other apps, run `launchctl`
+- connect to another program's socket file (the way a terminal that keeps sessions, a container tool, an editor or a password manager's helper is reached). Every socket file is refused, except the system's name service (without it no host name can be looked up) and those inside folders a build may write anyway: the temporary folder, its workspace and Kiro CLI's own folder, and with Kiro Crew also Kiro Crew's own folders, the other workspaces and the sandbox check's results folder
+- connect to Overnight's dashboard (port 4321 on this Mac), or take that port for itself
+- Kiro CLI only: list the running programs, or the running apps
 - send a signal to, look at, or read the command line of any program it did not start itself. (This mattered most while the detector handed Kiro what was just said as a command-line argument. Since Oct 10 it sends that text on standard input instead; a listener started before the change keeps the old way until it is restarted.)
 
 It **can still**:
 
 - use the network;
+- connect to any port on this Mac except the dashboard's. The gateway's own port has to stay open and a build serves its own preview on one, so anything else that listens on this Mac without a password is in reach;
 - read macOS's own files outside the home folder (`/Applications`, `/Library`, `/System`, `/usr`, `/private/etc`);
+- **Kiro Crew only: list the running programs and apps** (names and process numbers, never command lines). The rule that hides the list of programs also refuses a job's own process group (measured Oct 11), and Kiro Crew asks for exactly that to look after its jobs;
 - **Kiro Crew only: list the names directly inside the home folder, `/Users`, `~/.kiro`, `~/workplace`, `~/.local` and the Node.js folder.** Kiro Crew 0.8.0 will not start an agent unless it can open every folder above its own folder and above the folder it runs the agent in, and it drops from the agent's `PATH` every folder it cannot open that way (tried: without this an agent job fails at once, or runs without `node`). Opening a folder lets its names be listed; the sandbox cannot tell the two apart. Nothing behind the names can be looked at, opened or run. A Kiro CLI build cannot list any of them.
 
 That is why the brief is kept to our own words: what the agent is fed is the first protection, and the sandbox is the second.

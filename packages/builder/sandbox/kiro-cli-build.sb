@@ -33,12 +33,14 @@
 ;;     line directly and with pgrep.)
 ;;   - Starting other apps, creating background jobs, the Keychain, the clipboard, the
 ;;     preferences service and the ssh agent are refused.
+;;   - Other programs' socket files are refused, all but the system's name service and those in
+;;     the folders this build may write. So is the port of Overnight's own dashboard (section 11).
 ;;
-;; Still reachable from inside, by design or because it cannot be helped: the network, Kiro
-;; CLI's own sign-in store, settings and saved sessions, the build's own temporary folder, and
-;; macOS's own files outside the home folder (/Applications, /Library, /System, /usr,
-;; /private/etc ...). That is why a brief only ever holds our own words plus a cleaned title and
-;; pitch.
+;; Still reachable from inside, by design or because it cannot be helped: the network and every
+;; port on this Mac but the dashboard's, Kiro CLI's own sign-in store, settings and saved
+;; sessions, the build's own temporary folder, and macOS's own files outside the home folder
+;; (/Applications, /Library, /System, /usr, /private/etc ...). That is why a brief only ever
+;; holds our own words plus a cleaned title and pitch.
 ;;
 ;; Rule order matters: when two rules match, the LATER one wins.
 (version 1)
@@ -97,6 +99,14 @@
 (allow process-info* (target same-sandbox))
 (deny sysctl-read (sysctl-name-prefix "kern.procargs"))
 (deny mach-lookup (global-name "com.apple.sysmond"))
+;;    The list of running programs (their names and numbers) is a separate question to macOS,
+;;    which the four rules above do not cover. With this rule the whole list and any program
+;;    outside are refused, and a build can still ask about a program it started itself, by its
+;;    number. It also refuses a build's own process GROUP (measured Oct 11). Kiro Crew asks for
+;;    exactly that to look after its jobs, which is why crew-gateway.sb does not have this rule.
+(deny sysctl-read (sysctl-name-prefix "kern.proc."))
+;;    The list of running apps comes from another system service (`lsappinfo list`, tried Oct 11).
+(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))
 
 ;; 2. Reading and running: nothing in the home folder, Overnight's data folder, this repo, the
 ;;    Node.js install, other disks, the folder shared between accounts or the shared temporary
@@ -296,7 +306,27 @@
   ;; whatever the file rules above say
   (global-name "com.apple.cfprefsd.agent")
   (global-name "com.apple.cfprefsd.daemon"))
-;;    The ssh agent: macOS gives every program its socket, and keys loaded in it could be used
-;;    without ever reading ~/.ssh.
+
+;; 11. Other programs' socket files, and Overnight's own dashboard.
+;;     A socket file is opened with "connect", which none of the file rules above covers (found
+;;     Oct 10). Whatever listens on one (a terminal that keeps sessions, a container tool, an
+;;     editor, a password manager's helper) would be a way out of this fence. So every socket
+;;     file is refused ...
+(deny network-outbound (remote unix-socket (path-regex #"^/")))
+;;     ... except the system's name service, without which no host name can be looked up (tried
+;;     Oct 11: Node then answers ENOTFOUND for the npm registry), and socket files inside the
+;;     folders this build may write anyway.
+(allow network-outbound
+  (remote unix-socket (path-literal "/private/var/run/mDNSResponder"))
+  (remote unix-socket (path-regex (string-append "^" (regex-quote build-tmp) "/")))
+  (remote unix-socket (path-regex (string-append "^" (regex-quote workspace) "/")))
+  (remote unix-socket (path-regex (string-append "^" (regex-quote (home-path "/Library/Application Support/kiro-cli")) "/"))))
+;;     The ssh agent: macOS gives every program its socket, and keys loaded in it could be used
+;;     without ever reading ~/.ssh. Refused by name as well, after the list above, so that no
+;;     entry added to that list can ever open it.
 (deny network-outbound
   (remote unix-socket (path-regex #"^/private/var/run/com\.apple\.launchd\.[^/]+/Listeners$")))
+;;     Overnight's dashboard shows what Bee heard. No build may read it, or take its port. (Every
+;;     other port on this Mac stays open: a build serves its own preview on one.)
+(deny network-outbound (remote ip "localhost:4321"))
+(deny network-bind (local ip "localhost:4321"))
