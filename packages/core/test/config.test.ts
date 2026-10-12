@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { ConfigError, dataPaths, ensureDataDirs, parseConfig } from "../src/index.ts";
+import { ConfigError, DASHBOARD_PORT, HIGHEST_BUILD_CREDIT_LIMIT, dataPaths, ensureDataDirs, parseConfig } from "../src/index.ts";
 
 describe("config", () => {
   it("uses the spec defaults when nothing is set", () => {
@@ -18,6 +18,7 @@ describe("config", () => {
       maxAsksPerDay: 3,
       maxBuildsPerNight: 2,
       buildTimeoutMin: 45,
+      maxBuildCreditsPerMonth: 400,
       writeBeeFacts: true,
       buildBackend: "kiro-crew",
       buildSandbox: "overnight",
@@ -44,6 +45,27 @@ describe("config", () => {
     expect(() => parseConfig({ TZ: "Mars/Olympus" })).toThrow("TZ");
     expect(() => parseConfig({ PAUSED: "yes" })).toThrow("PAUSED");
     expect(() => parseConfig({ BUILD_SANDBOX: "none" })).toThrow("BUILD_SANDBOX");
+  });
+
+  it("reads the monthly ceiling on build credits, where 0 means never build", () => {
+    expect(parseConfig({}).maxBuildCreditsPerMonth).toBe(400);
+    expect(parseConfig({ MAX_BUILD_CREDITS_PER_MONTH: "" }).maxBuildCreditsPerMonth).toBe(400);
+    expect(parseConfig({ MAX_BUILD_CREDITS_PER_MONTH: "0" }).maxBuildCreditsPerMonth).toBe(0);
+    expect(parseConfig({ MAX_BUILD_CREDITS_PER_MONTH: "1" }).maxBuildCreditsPerMonth).toBe(1);
+    expect(parseConfig({ MAX_BUILD_CREDITS_PER_MONTH: "100000" }).maxBuildCreditsPerMonth).toBe(100_000);
+    for (const bad of ["abc", "-1", "1.5", "100001", "400 credits"]) {
+      expect(() => parseConfig({ MAX_BUILD_CREDITS_PER_MONTH: bad }), bad).toThrow(ConfigError);
+      expect(() => parseConfig({ MAX_BUILD_CREDITS_PER_MONTH: bad }), bad).toThrow("MAX_BUILD_CREDITS_PER_MONTH");
+    }
+  });
+
+  it("has one number for the highest ceiling, the one the ledger of build credits goes by too", () => {
+    expect(parseConfig({ MAX_BUILD_CREDITS_PER_MONTH: String(HIGHEST_BUILD_CREDIT_LIMIT) }).maxBuildCreditsPerMonth).toBe(HIGHEST_BUILD_CREDIT_LIMIT);
+    expect(() => parseConfig({ MAX_BUILD_CREDITS_PER_MONTH: String(HIGHEST_BUILD_CREDIT_LIMIT + 1) })).toThrow("MAX_BUILD_CREDITS_PER_MONTH");
+  });
+
+  it("has one port for the dashboard", () => {
+    expect(DASHBOARD_PORT).toBe(4321);
   });
 
   it("refuses a data folder that is not a full path", () => {

@@ -1,9 +1,10 @@
 // The SQLite store. One file (~/.overnight/overnight.db), private to the user.
-// It holds what Bee heard, every detector run, and each idea with its timeline.
+// It holds what Bee heard, every detector run, each idea with its timeline, and what builds cost.
 // All times are ISO 8601 strings in UTC. All idea state changes go through transitionIdea().
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync } from "node:fs";
 import Database from "better-sqlite3";
+import { HIGHEST_BUILD_CREDIT_LIMIT } from "./config.ts";
 import { assertTransition } from "./state-machine.ts";
 import type { DetectorVerdict, Idea, IdeaEvent, IdeaState, StoredConversation, StoredUtterance } from "./types.ts";
 
@@ -97,6 +98,19 @@ const MIGRATIONS: string[] = [
   ALTER TABLE ideas ADD COLUMN failure_notified_at TEXT;
   CREATE UNIQUE INDEX ideas_by_slug ON ideas(slug) WHERE slug IS NOT NULL;
   `,
+  // Milestone 3: the ledger of Kiro credits that builds used, one row per try that started an
+  // agent. It only adds a table: code from before it opens the same file and never looks at it.
+  `
+  CREATE TABLE build_costs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idea_id TEXT NOT NULL REFERENCES ideas(id),
+    at TEXT NOT NULL,
+    backend TEXT NOT NULL,
+    credits REAL NOT NULL CHECK (credits >= 0),
+    measured INTEGER NOT NULL CHECK (measured IN (0, 1))
+  );
+  CREATE INDEX build_costs_by_time ON build_costs(at);
+  `,
 ];
 
 export interface ConversationRef {
@@ -182,6 +196,28 @@ const PATCH_COLUMNS: Record<keyof IdeaPatch, string> = {
   failureNotifiedAt: "failure_notified_at",
 };
 
+/** What one try at building an idea cost. One row per try that started an agent. */
+export interface NewBuildCost {
+  ideaId: string;
+  /** The time the try is counted at, as `toISOString()` writes it. It decides which month the try counts towards. */
+  at: string;
+  /** Which builder ran: "kiro-crew" or "kiro-cli". */
+  backend: string;
+  /** Kiro credits. Never negative, and never more than MAX_BUILD_CREDITS_PER_MONTH can be set to (100000). */
+  credits: number;
+  /** True for the builder's own figure, false for our estimate from how long the agent ran. */
+  measured: boolean;
+}
+
+export interface BuildCreditsTotal {
+  /** All credits counted, measured and estimated together. */
+  credits: number;
+  /** The part of `credits` that is an estimate. */
+  estimated: number;
+  /** How many tries were counted. */
+  tries: number;
+}
+
 export interface AwaitingDetection {
   conversationKey: string;
   pendingCount: number;
@@ -258,34 +294,94 @@ function toIdeaEvent(row: Row): IdeaEvent {
   };
 }
 
+/** Sums of credits are kept to three decimals, so adding many small numbers leaves no stray digits. */
+function toThreeDecimals(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
 function randomKey(prefix: string, bytes = 6): string {
   return `${prefix}_${randomBytes(bytes).toString("hex")}`;
+}
+
+/** How long a step waits for another program that has the file locked, before it gives up. */
+const BUSY_WAIT_MS = 5000;
+
+/** True for SQLite's "database is locked": another program has the file for a moment. */
+function isLocked(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && code.startsWith("SQLITE_BUSY");
+}
+
+/** Stop here for a moment. Opening the database is one step, not something to await. */
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 export class Store {
   readonly #db: Database.Database;
 
-  /** Open (and create or upgrade) the database. Pass ":memory:" in tests. */
+  /**
+   * Open (and create or upgrade) the database. Pass ":memory:" in tests.
+   *
+   * Two programs can open the same file in the same instant: macOS wakes both night jobs in the
+   * same second, every minute. Neither may fail because of the other, so each step here waits
+   * its turn.
+   */
   constructor(file: string) {
     const isNew = file !== ":memory:" && !existsSync(file);
     this.#db = new Database(file);
     if (isNew) chmodSync(file, 0o600);
-    this.#db.pragma("journal_mode = WAL");
-    this.#db.pragma("foreign_keys = ON");
-    this.#db.pragma("busy_timeout = 5000");
-    this.#migrate();
+    try {
+      // Said first, and in so many words: every step after it waits this long for a lock before
+      // it gives up. (better-sqlite3 opens with the same five seconds by itself.)
+      this.#db.pragma(`busy_timeout = ${BUSY_WAIT_MS}`);
+      this.#useWriteAheadLog();
+      this.#db.pragma("foreign_keys = ON");
+      this.#migrate();
+    } catch (error) {
+      // An open that failed leaves nothing open behind it.
+      this.#db.close();
+      throw error;
+    }
+  }
+
+  /**
+   * Switch the file to SQLite's write-ahead log, which lets one program write while others read.
+   * The switch is the one step SQLite does not wait for: when two programs make the same new file
+   * at once, the second is told "database is locked" straight away. So that answer is asked
+   * again here, for as long as any other step would wait.
+   */
+  #useWriteAheadLog(): void {
+    const giveUpAt = Date.now() + BUSY_WAIT_MS;
+    for (;;) {
+      try {
+        this.#db.pragma("journal_mode = WAL");
+        return;
+      } catch (error) {
+        if (!isLocked(error) || Date.now() >= giveUpAt) throw error;
+        pause(20);
+      }
+    }
   }
 
   #migrate(): void {
-    const current = Number(this.#db.pragma("user_version", { simple: true }));
-    for (let version = current; version < MIGRATIONS.length; version += 1) {
-      const sql = MIGRATIONS[version];
-      if (sql === undefined) continue;
-      this.#db.transaction(() => {
-        this.#db.exec(sql);
-        this.#db.pragma(`user_version = ${version + 1}`);
-      })();
-    }
+    const version = () => Number(this.#db.pragma("user_version", { simple: true }));
+    // Nearly every open: the file is up to date, and nothing is locked to find that out.
+    if (version() >= MIGRATIONS.length) return;
+    // All the missing steps in one go, with the file locked for writing before the version is
+    // read again. Of two programs that open an older file at the same moment, the second waits
+    // here and then finds nothing left to do. Reading the version only once, before the lock,
+    // had it run the same step a second time and fail on a table that was already there.
+    this.#db
+      .transaction(() => {
+        for (let next = version(); next < MIGRATIONS.length; next += 1) {
+          const sql = MIGRATIONS[next];
+          if (sql === undefined) continue;
+          this.#db.exec(sql);
+          this.#db.pragma(`user_version = ${next + 1}`);
+        }
+      })
+      .immediate();
   }
 
   close(): void {
@@ -588,7 +684,38 @@ export class Store {
     return Object.fromEntries(rows.map((row) => [String(row.state), Number(row.n)])) as Partial<Record<IdeaState, number>>;
   }
 
-  // ---------- small values (backfill cursor, paused flag) ----------
+  // ---------- what builds cost ----------
+
+  /** Add one try to the ledger. Throws for an idea that does not exist, or a figure or a time that cannot be counted. */
+  recordBuildCost(cost: NewBuildCost): void {
+    // One figure that is not a plain number would spoil every sum it is part of.
+    if (!Number.isFinite(cost.credits) || cost.credits < 0) throw new Error("A build's credits must be a number, zero or more.");
+    // Nor is a figure no build could have used. The measured ones come from a file a build job can
+    // write, and one row above the highest limit there is would close the month with no setting
+    // left that opens it again.
+    if (cost.credits > HIGHEST_BUILD_CREDIT_LIMIT) throw new Error(`One build cannot have used more than ${HIGHEST_BUILD_CREDIT_LIMIT} credits.`);
+    // Rows are found by comparing times as text, which only works for times of this one shape.
+    const ms = Date.parse(cost.at);
+    if (Number.isNaN(ms) || new Date(ms).toISOString() !== cost.at) throw new Error("A build cost needs a UTC time like 2026-10-12T07:00:00.000Z.");
+    this.#db
+      .prepare("INSERT INTO build_costs (idea_id, at, backend, credits, measured) VALUES (?, ?, ?, ?, ?)")
+      .run(cost.ideaId, cost.at, cost.backend, cost.credits, cost.measured ? 1 : 0);
+  }
+
+  /** The credits counted between two instants (start inclusive, end exclusive). */
+  buildCreditsBetween(start: string, end: string): BuildCreditsTotal {
+    const row = this.#db
+      .prepare(
+        `SELECT COALESCE(SUM(credits), 0) AS credits,
+                COALESCE(SUM(CASE WHEN measured = 0 THEN credits ELSE 0 END), 0) AS estimated,
+                COUNT(*) AS tries
+         FROM build_costs WHERE at >= ? AND at < ?`,
+      )
+      .get(start, end) as Row;
+    return { credits: toThreeDecimals(Number(row.credits)), estimated: toThreeDecimals(Number(row.estimated)), tries: Number(row.tries) };
+  }
+
+  // ---------- small values (backfill cursor, paused flag, the night clock's records) ----------
 
   getValue(key: string): string | null {
     const row = this.#db.prepare("SELECT value FROM kv WHERE key = ?").get(key) as Row | undefined;

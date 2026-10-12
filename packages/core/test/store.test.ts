@@ -1,6 +1,10 @@
 // All text in this file is made up for the tests. None of it is Bee data.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import Database from "better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
-import { InvalidTransitionError, Store } from "../src/index.ts";
+import { HIGHEST_BUILD_CREDIT_LIMIT, InvalidTransitionError, Store, budgetReachedText, buildBudget } from "../src/index.ts";
 
 const T0 = "2026-10-09T18:00:00.000Z";
 const at = (seconds: number) => new Date(Date.parse(T0) + seconds * 1000).toISOString();
@@ -173,7 +177,7 @@ describe("database upgrades", () => {
 
       // Put the file back the way the first version of the app wrote it.
       const raw = new Database(file);
-      raw.exec("DROP INDEX utterances_by_spoken_at; DROP INDEX ideas_by_slug;");
+      raw.exec("DROP INDEX utterances_by_spoken_at; DROP INDEX ideas_by_slug; DROP TABLE build_costs;");
       for (const column of ["slug", "build_backend", "build_started_at", "built_at", "published_url", "published_at", "delivered_at", "morning_todo_id", "fact_id", "failure_reason", "failure_notified_at"]) {
         raw.exec(`ALTER TABLE ideas DROP COLUMN ${column}`);
       }
@@ -184,13 +188,195 @@ describe("database upgrades", () => {
       expect(upgraded.utterancesSpokenNear(at(1), 1000).map((u) => u.text)).toEqual(["kept"]);
       upgraded.close();
       const check = new Database(file, { readonly: true });
-      expect(check.pragma("user_version", { simple: true })).toBe(3);
+      expect(check.pragma("user_version", { simple: true })).toBe(4);
       const plan = check.prepare("EXPLAIN QUERY PLAN SELECT * FROM utterances WHERE spoken_at BETWEEN ? AND ? ORDER BY spoken_at, id").all("a", "b") as Array<{ detail: string }>;
       expect(plan.map((row) => row.detail).join(" ")).toContain("utterances_by_spoken_at");
       check.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("database upgrades: the ledger of build credits (version 4)", () => {
+  const sample = { title: "Tip splitter", pitch: "Split a bill.", quote: "we should make a tip splitter", confidence: 0.9, detectorRunId: null };
+
+  /** A database file in a scratch folder of its own, removed afterwards. */
+  function withScratchFile(run: (file: string) => void): void {
+    const dir = mkdtempSync(path.join(tmpdir(), "overnight-store-"));
+    try {
+      run(path.join(dir, "overnight.db"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** Put a file back the way the Milestone 2 code wrote it: no ledger, version 3. */
+  function backToVersion3(file: string): void {
+    const raw = new Database(file);
+    raw.exec("DROP TABLE build_costs;");
+    raw.pragma("user_version = 3");
+    raw.close();
+  }
+
+  it("adds the ledger to a version 3 file and keeps everything that was in it", () => {
+    withScratchFile((file) => {
+      const first = new Store(file);
+      const { key } = first.resolveConversation({ uuid: "u-1" }, T0);
+      first.insertUtterance({ beeUtteranceId: 1, conversationKey: key, text: "kept", spokenAt: at(1), receivedAt: at(2), source: "stream" });
+      const idea = first.createIdea({ ...sample, conversationKey: key }, T0);
+      first.transitionIdea(idea.id, "asked", { todoId: 7 }, at(3));
+      first.setValue("cursor", "v1-9", at(4));
+      first.setPaused(false, at(5));
+      first.close();
+      backToVersion3(file);
+
+      const before = new Database(file, { readonly: true });
+      expect(before.pragma("user_version", { simple: true })).toBe(3);
+      expect(before.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'build_costs%'").all()).toEqual([]);
+      before.close();
+
+      const upgraded = new Store(file);
+      expect(upgraded.getIdea(idea.id)).toMatchObject({ state: "asked", todoId: 7, title: "Tip splitter" });
+      expect(upgraded.ideaEvents(idea.id)).toHaveLength(2);
+      expect(upgraded.pendingUtterances(key).map((u) => u.text)).toEqual(["kept"]);
+      expect(upgraded.getValue("cursor")).toBe("v1-9");
+      expect(upgraded.isPaused(true)).toBe(false);
+      // The new table is there, empty, and works.
+      expect(upgraded.buildCreditsBetween(T0, at(1000))).toEqual({ credits: 0, estimated: 0, tries: 0 });
+      upgraded.recordBuildCost({ ideaId: idea.id, at: at(10), backend: "kiro-crew", credits: 2.5, measured: true });
+      expect(upgraded.buildCreditsBetween(T0, at(1000))).toEqual({ credits: 2.5, estimated: 0, tries: 1 });
+      upgraded.close();
+
+      const check = new Database(file, { readonly: true });
+      expect(check.pragma("user_version", { simple: true })).toBe(4);
+      expect((check.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'build_costs%' ORDER BY name").all() as Array<{ name: string }>).map((row) => row.name)).toEqual(["build_costs", "build_costs_by_time"]);
+      check.close();
+
+      // Opening it again changes nothing.
+      const again = new Store(file);
+      expect(again.buildCreditsBetween(T0, at(1000)).tries).toBe(1);
+      again.close();
+    });
+  });
+
+  it("upgrades while an older program has the file open, and that program carries on", () => {
+    withScratchFile((file) => {
+      const first = new Store(file);
+      first.setValue("cursor", "v1-1", T0);
+      first.close();
+      backToVersion3(file);
+
+      // The listener that is running: started before the upgrade, with its statements already made.
+      const listener = new Database(file);
+      listener.pragma("journal_mode = WAL");
+      listener.pragma("foreign_keys = ON");
+      const read = listener.prepare("SELECT value FROM kv WHERE key = ?");
+      const write = listener.prepare("INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at");
+      expect(read.get("cursor")).toEqual({ value: "v1-1" });
+
+      const upgraded = new Store(file);
+      expect(upgraded.buildCreditsBetween(T0, at(1000)).tries).toBe(0);
+
+      write.run("cursor", "v1-2", at(1));
+      expect(read.get("cursor")).toEqual({ value: "v1-2" });
+      expect(upgraded.getValue("cursor")).toBe("v1-2");
+      upgraded.setValue("night.build.checkedAt", at(2), at(2));
+      expect(read.get("night.build.checkedAt")).toEqual({ value: at(2) });
+      listener.close();
+      upgraded.close();
+    });
+  });
+
+  it("opens a file that newer code has upgraded, and leaves its version alone", () => {
+    // This is what keeps a step back safe: code that does not know a table still opens the file.
+    withScratchFile((file) => {
+      const first = new Store(file);
+      first.setValue("cursor", "v1-1", T0);
+      first.close();
+      const raw = new Database(file);
+      raw.exec("CREATE TABLE something_newer (id INTEGER PRIMARY KEY, note TEXT);");
+      raw.pragma("user_version = 9");
+      raw.close();
+
+      const store = new Store(file);
+      expect(store.getValue("cursor")).toBe("v1-1");
+      store.setValue("cursor", "v1-2", at(1));
+      store.close();
+      const check = new Database(file, { readonly: true });
+      expect(check.pragma("user_version", { simple: true })).toBe(9);
+      expect(check.prepare("SELECT COUNT(*) AS n FROM something_newer").get()).toEqual({ n: 0 });
+      check.close();
+    });
+  });
+});
+
+describe("what builds cost", () => {
+  const sample = (conversationKey: string) => ({ title: "Tip splitter", pitch: "Split a bill.", quote: "we should make a tip splitter", confidence: 0.9, conversationKey, detectorRunId: null });
+  const newIdea = () => store.createIdea(sample(store.resolveConversation({ uuid: "u-1" }, T0).key), T0);
+
+  it("has an empty ledger in a new database", () => {
+    expect(store.buildCreditsBetween(T0, at(1000))).toEqual({ credits: 0, estimated: 0, tries: 0 });
+  });
+
+  it("adds up the tries in a time range, start included and end excluded", () => {
+    const idea = newIdea();
+    store.recordBuildCost({ ideaId: idea.id, at: at(10), backend: "kiro-crew", credits: 3.25, measured: true });
+    store.recordBuildCost({ ideaId: idea.id, at: at(20), backend: "kiro-cli", credits: 1.5, measured: false });
+    store.recordBuildCost({ ideaId: idea.id, at: at(30), backend: "kiro-crew", credits: 0, measured: true });
+
+    expect(store.buildCreditsBetween(T0, at(100))).toEqual({ credits: 4.75, estimated: 1.5, tries: 3 });
+    expect(store.buildCreditsBetween(at(10), at(20))).toEqual({ credits: 3.25, estimated: 0, tries: 1 });
+    expect(store.buildCreditsBetween(at(11), at(21))).toEqual({ credits: 1.5, estimated: 1.5, tries: 1 });
+    expect(store.buildCreditsBetween(at(20), at(31))).toEqual({ credits: 1.5, estimated: 1.5, tries: 2 });
+    expect(store.buildCreditsBetween(at(31), at(100))).toEqual({ credits: 0, estimated: 0, tries: 0 });
+  });
+
+  it("keeps sums to three decimals", () => {
+    const idea = newIdea();
+    // 0.1 added ten times is 0.9999999999999999 in a computer's arithmetic.
+    for (let n = 0; n < 10; n += 1) store.recordBuildCost({ ideaId: idea.id, at: at(n), backend: "kiro-cli", credits: 0.1, measured: false });
+    store.recordBuildCost({ ideaId: idea.id, at: at(50), backend: "kiro-crew", credits: 2.71828, measured: true });
+    expect(store.buildCreditsBetween(T0, at(100))).toEqual({ credits: 3.718, estimated: 1, tries: 11 });
+  });
+
+  it("refuses a try for an idea that does not exist", () => {
+    expect(() => store.recordBuildCost({ ideaId: "idea_missing", at: at(1), backend: "kiro-crew", credits: 1, measured: true })).toThrow();
+    expect(store.buildCreditsBetween(T0, at(100)).tries).toBe(0);
+  });
+
+  it("refuses a figure or a time that would spoil the sums", () => {
+    const idea = newIdea();
+    const cost = { ideaId: idea.id, at: at(1), backend: "kiro-crew", measured: true };
+    for (const credits of [-0.1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(() => store.recordBuildCost({ ...cost, credits }), String(credits)).toThrow("credits");
+    }
+    for (const when of ["", "yesterday", "2026-10-12 07:00", "2026-10-12T07:00:00Z", "2026-10-12T01:00:00.000-06:00"]) {
+      expect(() => store.recordBuildCost({ ...cost, at: when, credits: 1 }), when).toThrow("UTC time");
+    }
+    expect(store.buildCreditsBetween("2026-01-01T00:00:00.000Z", "2027-01-01T00:00:00.000Z").tries).toBe(0);
+  });
+
+  it("refuses a figure no build could have used: more than the highest limit a month can be given", () => {
+    const idea = newIdea();
+    const cost = { ideaId: idea.id, at: at(1), backend: "kiro-crew", measured: true };
+    expect(HIGHEST_BUILD_CREDIT_LIMIT).toBe(100_000);
+    // The measured figure comes from a file a build job can write. One such row would close the
+    // month, with no allowed setting left that opens it again.
+    for (const credits of [100_000.001, 5e15, 1e306, Number.MAX_VALUE]) {
+      expect(() => store.recordBuildCost({ ...cost, credits }), String(credits)).toThrow("One build cannot have used more than 100000 credits.");
+    }
+    expect(store.buildCreditsBetween(T0, at(100))).toEqual({ credits: 0, estimated: 0, tries: 0 });
+
+    // Exactly the highest limit is still a figure.
+    store.recordBuildCost({ ...cost, credits: 100_000 });
+    store.recordBuildCost({ ...cost, at: at(2), credits: 100_000, measured: false });
+    const total = store.buildCreditsBetween(T0, at(100));
+    expect(total).toEqual({ credits: 200_000, estimated: 100_000, tries: 2 });
+    // Every sum can be printed: none of them is "Infinity", or null in `status --json`.
+    const budget = buildBudget(store, { maxBuildCreditsPerMonth: 100_000, timeZone: "America/Boise" }, new Date(T0));
+    expect(JSON.parse(JSON.stringify(budget))).toMatchObject({ counted: 200_000, limit: 100_000, reached: true });
+    expect(budgetReachedText(budget, "America/Boise")).toBe("this month's build credits are used up (200000 of 100000 counted): approved ideas wait until Nov 1, or until MAX_BUILD_CREDITS_PER_MONTH in .env is raised");
   });
 });
 

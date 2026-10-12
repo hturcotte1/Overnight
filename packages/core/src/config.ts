@@ -30,6 +30,12 @@ const intInRange = (fallback: number, min: number, max: number) => z.coerce.numb
 // Blank values in .env (KEY=) mean "use the default".
 const blankToUndefined = (value: unknown) => (typeof value === "string" && value.trim() === "" ? undefined : value);
 
+/**
+ * The highest MAX_BUILD_CREDITS_PER_MONTH can be set. The ledger of build credits refuses a single
+ * build above it (Store.recordBuildCost), so one wrong figure can never close a month for good.
+ */
+export const HIGHEST_BUILD_CREDIT_LIMIT = 100_000;
+
 const schema = z.object({
   OVERNIGHT_DATA_DIR: z.preprocess(blankToUndefined, z.string().optional()),
   GITHUB_PAGES_REPO: z.preprocess(blankToUndefined, z.string().regex(/^[A-Za-z0-9._-]+$/, "must be a repo name, not a URL").default("overnight-apps")),
@@ -53,6 +59,8 @@ const schema = z.object({
   MAX_ASKS_PER_DAY: z.preprocess(blankToUndefined, intInRange(3, 0, 20)),
   MAX_BUILDS_PER_NIGHT: z.preprocess(blankToUndefined, intInRange(2, 0, 10)),
   BUILD_TIMEOUT_MIN: z.preprocess(blankToUndefined, intInRange(45, 1, 240)),
+  // Kiro credits that builds may use in one calendar month, as Overnight counts them. 0: never build.
+  MAX_BUILD_CREDITS_PER_MONTH: z.preprocess(blankToUndefined, intInRange(400, 0, HIGHEST_BUILD_CREDIT_LIMIT)),
   WRITE_BEE_FACTS: z.preprocess(blankToUndefined, bool(true)),
   BUILD_BACKEND: z.preprocess(blankToUndefined, z.enum(["kiro-crew", "kiro-cli"]).default("kiro-crew")),
   // "overnight": Kiro Crew runs inside Overnight's own sandbox (the owner's decision, Oct 10).
@@ -72,6 +80,8 @@ export interface Config {
   maxAsksPerDay: number;
   maxBuildsPerNight: number;
   buildTimeoutMin: number;
+  /** No build starts once this many Kiro credits have been counted for the month. 0 means never build. */
+  maxBuildCreditsPerMonth: number;
   writeBeeFacts: boolean;
   /** Which builder runs first each night. The other one is the fallback. */
   buildBackend: "kiro-crew" | "kiro-cli";
@@ -80,6 +90,12 @@ export interface Config {
   /** The starting value only. `overnight pause` / `resume` store the live value in the database. */
   pausedByDefault: boolean;
 }
+
+/**
+ * The dashboard's port on this Mac (http://localhost:4321). Not a setting: both build sandboxes
+ * refuse this port by number, so a build job can never reach the dashboard.
+ */
+export const DASHBOARD_PORT = 4321;
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -112,6 +128,7 @@ export function parseConfig(env: Record<string, string | undefined>): Config {
     maxAsksPerDay: value.MAX_ASKS_PER_DAY,
     maxBuildsPerNight: value.MAX_BUILDS_PER_NIGHT,
     buildTimeoutMin: value.BUILD_TIMEOUT_MIN,
+    maxBuildCreditsPerMonth: value.MAX_BUILD_CREDITS_PER_MONTH,
     writeBeeFacts: value.WRITE_BEE_FACTS,
     buildBackend: value.BUILD_BACKEND,
     buildSandbox: value.BUILD_SANDBOX,
