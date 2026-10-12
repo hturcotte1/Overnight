@@ -363,6 +363,8 @@ export function scene(): Scene {
     agentStarted: { at: boise(10, 1, 0, 40), backend: "kiro-crew" },
     fellBack: null,
     finished: { at: packing.builtAt ?? "", ok: true, seconds: 160, credits: 4.59 },
+    slept: null,
+    sealed: { at: packing.builtAt ?? "", ok: true, moved: true, files: null },
   };
   const packingDeliver: DeliverFacts = {
     firstAt: boise(10, 6, 30, 5),
@@ -383,7 +385,7 @@ export function scene(): Scene {
     cutShort: 0,
     delivered: 0,
     credits: null,
-    buildRun: { command: "build", startedAt: boise(11, 1, 0), finishedAt: null, waiting: 2, taking: 2, built: null, failed: null, paused: false, nothingApproved: false, sandboxCheck: { at: boise(11, 1, 0, 40), ok: true, ms: 7100, reused: false }, ideaIds: [choreWheel.id] },
+    buildRun: { command: "build", startedAt: boise(11, 1, 0), finishedAt: null, waiting: 2, taking: 2, built: null, failed: null, paused: false, nothingApproved: false, slept: false, sandboxCheck: { at: boise(11, 1, 0, 40), ok: true, ms: 7100, reused: false }, ideaIds: [choreWheel.id] },
     deliverRun: null,
   };
   const lastNightNight: Night = {
@@ -399,8 +401,8 @@ export function scene(): Scene {
     cutShort: 0,
     delivered: 1,
     credits: 4.59,
-    buildRun: { command: "build", startedAt: boise(10, 1, 0), finishedAt: boise(10, 1, 48, 40), waiting: 2, taking: 2, built: 1, failed: 1, paused: false, nothingApproved: false, sandboxCheck: { at: boise(10, 1, 0, 30), ok: true, ms: 7100, reused: false }, ideaIds: [packing.id, baleYield.id] },
-    deliverRun: { command: "build", startedAt: boise(10, 6, 30), finishedAt: boise(10, 6, 31, 10), delivered: 1, failed: 1, notified: 2, ideaIds: [packing.id, baleYield.id] },
+    buildRun: { command: "build", startedAt: boise(10, 1, 0), finishedAt: boise(10, 1, 48, 40), waiting: 2, taking: 2, built: 1, failed: 1, paused: false, nothingApproved: false, slept: false, sandboxCheck: { at: boise(10, 1, 0, 30), ok: true, ms: 7100, reused: false }, ideaIds: [packing.id, baleYield.id] },
+    deliverRun: { command: "build", startedAt: boise(10, 6, 30), finishedAt: boise(10, 6, 31, 10), delivered: 1, failed: 1, notified: 2, slept: false, ideaIds: [packing.id, baleYield.id] },
   };
   const rehearsalNight: Night = {
     key: "2026-10-08",
@@ -412,7 +414,7 @@ export function scene(): Scene {
     cutShort: 0,
     delivered: 1,
     credits: 3.09,
-    buildRun: { command: "rehearse", startedAt: boise(7, 15, 0, 20), finishedAt: boise(7, 15, 2, 50), waiting: null, taking: null, built: 1, failed: 0, paused: false, nothingApproved: false, sandboxCheck: null, ideaIds: [rehearsal.id] },
+    buildRun: { command: "rehearse", startedAt: boise(7, 15, 0, 20), finishedAt: boise(7, 15, 2, 50), waiting: null, taking: null, built: 1, failed: 0, paused: false, nothingApproved: false, slept: false, sandboxCheck: null, ideaIds: [rehearsal.id] },
     deliverRun: null,
   };
 

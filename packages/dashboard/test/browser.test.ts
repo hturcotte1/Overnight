@@ -309,6 +309,8 @@ describe.skipIf(!browserInstalled())("the dashboard in a browser", { timeout: 30
       if (key === "choreWheel" && name === "file-build-notes") await idea.evaluate(`document.getElementById("notes-text").open = true`);
       // The pretend clock: the night at 1:02 AM, the morning's checks from 6:30 AM, and nobody told before 7:00 AM.
       if (name === "built") expect(await wallClock(), `${key} built`).toMatch(/^1:0[2-4] AM$/);
+      // Built, and in the same breath moved out of the build jobs' reach: the builder's next line, and the next tick.
+      if (name === "built") await until(page, tick("sealed", "done")(id), `the idea's page says where "${key}" was put`);
       if (key === "lunchTurns" && name === "deliver-starting") await expect.poll(wallClock, { timeout: 5000, interval: 25 }).toBe("6:30 AM");
       if (key === "lunchTurns" && name === "live-and-published") expect(await wallClock()).toMatch(/^6:3[0-2] AM$/);
       if (name === "told-and-delivered") await expect.poll(wallClock, { timeout: 5000, interval: 25 }).toMatch(/^7:0[0-2] AM$/);
@@ -333,6 +335,8 @@ describe.skipIf(!browserInstalled())("the dashboard in a browser", { timeout: 30
     for (const page of Object.values(own)) expect(await value<string[]>(page, `Array.from(document.querySelectorAll('#story [data-step]'), (step) => step.dataset.status)`)).toEqual(Array.from({ length: 7 }, () => "done"));
     expect(await truthy(idea, `document.getElementById("brief-text").open && document.getElementById("notes-text").open`)).toBe(true);
     expect(await truthy(idea, `Array.from(document.images).length === 2`)).toBe(true);
+    // Every tick of the night and the morning, in the order they happened.
+    for (const page of Object.values(own)) expect(await value<string[]>(page, `Array.from(document.querySelectorAll('#story [data-check]'), (tick) => tick.dataset.check + ":" + tick.dataset.status)`)).toEqual(["sign-in:done", "sandbox:done", "agent:done", "built:done", "sealed:done", "checked:done", "pushed:done", "live:done", "told:done", "fact:done"]);
     // No tick carries the player's own two and a half seconds.
     for (const page of Object.values(own)) expect(await text(page, "#story .checks")).not.toContain("2.5 s");
     // The clocks ran on by the pretend clock, and no page was ever loaded again.
@@ -468,6 +472,31 @@ describe.skipIf(!browserInstalled())("the dashboard in a browser", { timeout: 30
       expect(detail.ellipsis).toBeGreaterThan(5);
       expect(detail.right).toBeGreaterThanOrEqual(detail.ellipsis / 2);
       expect(detail.left).toBeGreaterThanOrEqual(detail.ellipsis / 2);
+    }
+  });
+
+  // "Cut short. It will be built once more at the next nightly…": the sentence that says what happens next lost its end
+  // on a wide screen, and nothing else on the page says it.
+  it("shows what a waiting step says whole, at desktop and at phone width", async () => {
+    const { stage, served } = await demo();
+    for (const width of [1280, 390]) {
+      const page = await pageAt(served, width);
+      await page.goto(`${served.origin}/ideas/${stage.ideaIds.recipeDoubler}`);
+      const waiting = await value<{ text: string; cut: boolean } | null>(
+        page,
+        `(() => { const detail = document.querySelector('#story [data-step="built"][data-status="waiting"] .step__detail'); return detail === null ? null : { text: detail.textContent, cut: detail.scrollHeight > detail.clientHeight + 1 }; })()`,
+      );
+      expect(waiting, String(width)).toEqual({ text: "Cut short. It will be built once more at the next nightly build.", cut: false });
+      // Its two ticks are of the same kind: stopped and not yet built, neither of them a failure.
+      expect(await value<string[]>(page, `Array.from(document.querySelectorAll('#story [data-check]'), (tick) => tick.dataset.check + ":" + tick.dataset.status + ":" + tick.textContent.trim())`), String(width)).toEqual([
+        "sign-in:done:Kiro sign-in fresh 41 min left",
+        "sandbox:done:Sandbox check passed 7 s",
+        "agent:waiting:Kiro Crew was stopped",
+        "built:waiting:Not built yet after 3 min 37 s",
+      ]);
+      // The mark of a waiting tick is the step's own dashed ring, not a cross on red.
+      expect(await value<string>(page, `getComputedStyle(document.querySelector('#story [data-check="agent"] .check__mark')).borderTopStyle`), String(width)).toBe("dashed");
+      expect(await notWiderThanTheScreen(page), String(width)).toBe(true);
     }
   });
 

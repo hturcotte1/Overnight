@@ -12,6 +12,7 @@ import type { Config, Idea, IdeaState } from "@overnight/core";
 import { reportPath } from "@overnight/deliver";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEMO_MARKER_FILE, DemoFolderError, IS_THE_REAL_FOLDER, LEADS_OUTSIDE, NOT_A_DEMO_FOLDER, NOT_A_FOLDER, NOT_THERE } from "../src/demo/folder.ts";
+import { DEMO_FILES_MADE_ANEW } from "../src/demo/night-files.ts";
 import type { DemoReport } from "../src/demo/night-files.ts";
 import { DEMO_NIGHT_STEP_NAMES, demoNightSteps } from "../src/demo/night-script.ts";
 import { PNG_SIGNATURE } from "../src/demo/png.ts";
@@ -171,7 +172,8 @@ describe("demoNightSteps, for an approved idea", () => {
       [],
       [],
       [],
-      ["ideaBuilt"],
+      // Built, and at once moved out of the build jobs' reach: the builder's two lines, one after the other.
+      ["ideaBuilt", "sealed"],
       ["deliverRunStart"],
       ["verified"],
       ["pushed"],
@@ -181,7 +183,7 @@ describe("demoNightSteps, for an approved idea", () => {
     ]);
     const build = logRows(d.dir, "build").slice(buildBefore);
     const deliver = logRows(d.dir, "deliver").slice(deliverBefore);
-    expect(build.map((row) => row.at)).toEqual([0, 0, 1, 2, 3, 9].map((step) => d.given[step]?.toISOString()));
+    expect(build.map((row) => row.at)).toEqual([0, 0, 1, 2, 3, 9, 9].map((step) => d.given[step]?.toISOString()));
     expect(deliver.map((row) => row.at)).toEqual([10, 11, 12, 13, 14, 15, 15].map((step) => d.given[step]?.toISOString()));
     const id = d.ids.lunchTurns;
     // What the page shows from each line: how many wait, how long a step took, how big the app is.
@@ -191,6 +193,8 @@ describe("demoNightSteps, for an approved idea", () => {
     expect(build[4]).toMatchObject({ ideaId: id });
     // The build's own length is the one time that is the player's: the page showed its clock running.
     expect(build[5]).toMatchObject({ ideaId: id, backend: "kiro-crew", seconds: 23, credits: 3.87 });
+    // The line the builder writes once the finished build is where no build job can reach it.
+    expect(build[6]).toMatchObject({ level: "info", message: "finished build moved out of the builders' reach", ideaId: id, filesMadeAnew: DEMO_FILES_MADE_ANEW });
     expect(deliver[1]).toMatchObject({ ideaId: id, files: 3, bytes: 5871 });
     expect(deliver[2]).toMatchObject({ ideaId: id });
     expect(deliver[3]).toMatchObject({ ideaId: id });
@@ -334,8 +338,9 @@ describe("demoNightSteps, for the idea that is already being built", () => {
     const idea = ideaNow(d, "choreWheel");
     // Built 3 steps on from a build that began 72 seconds before the clock started.
     expect(idea).toMatchObject({ state: "delivered", note: "built with Kiro Crew in 82 s", publishedUrl: "https://example.invalid/overnight-apps/chore-wheel/" });
-    expect(logKeys(d.dir, "build", before)).toEqual(["ideaBuilt"]);
-    expect(logRows(d.dir, "build").at(-1)).toMatchObject({ ideaId: id, seconds: 82 });
+    expect(logKeys(d.dir, "build", before)).toEqual(["ideaBuilt", "sealed"]);
+    expect(logRows(d.dir, "build").at(-2)).toMatchObject({ ideaId: id, seconds: 82 });
+    expect(logRows(d.dir, "build").at(-1)).toMatchObject({ ideaId: id, filesMadeAnew: DEMO_FILES_MADE_ANEW });
     expect(finishedBuildDir(dataPaths(d.dir), id)).toBe(path.join(dataPaths(d.dir).built, id));
   });
 
@@ -367,7 +372,7 @@ describe("demoNightSteps, for two ideas played as one night", () => {
     const steps = demoNightSteps(d.dir, d.ids.lunchTurns, d.config, d.clock, LUNCH);
     const before = logRows(d.dir, "build").length;
     for (const step of steps.slice(0, 10)) step.run();
-    expect(logKeys(d.dir, "build", before).slice(-3)).toEqual(["ideaBuilt", "nightEnd", "buildRunEnd"]);
+    expect(logKeys(d.dir, "build", before).slice(-4)).toEqual(["ideaBuilt", "sealed", "nightEnd", "buildRunEnd"]);
     const [nightEnd, runEnd] = logRows(d.dir, "build").slice(-2);
     // Still waiting in the scene: the build that was cut short (Chore Wheel is being built, and is not waiting).
     expect(nightEnd).toMatchObject({ built: 2, failed: 0, leftForAnotherNight: 1 });
@@ -377,7 +382,7 @@ describe("demoNightSteps, for two ideas played as one night", () => {
     const other = demo();
     const otherBefore = logRows(other.dir, "build").length;
     for (const step of demoNightSteps(other.dir, other.ids.choreWheel, other.config, other.clock, CHORE).slice(0, 4)) step.run();
-    expect(logKeys(other.dir, "build", otherBefore)).toEqual(["ideaBuilt"]);
+    expect(logKeys(other.dir, "build", otherBefore)).toEqual(["ideaBuilt", "sealed"]);
   });
 
   it("an idea that joins a morning already going has no start of its own, and only the last one ends the morning's run", () => {
@@ -402,7 +407,7 @@ describe("demoNightSteps, for two ideas played as one night", () => {
     const d = demo();
     const [buildBefore, deliverBefore] = [logRows(d.dir, "build").length, logRows(d.dir, "deliver").length];
     for (const step of demoNightSteps(d.dir, d.ids.lunchTurns, d.config, d.clock)) step.run();
-    expect(logKeys(d.dir, "build", buildBefore)).toEqual(["nightStart", "ideaStart", "signInReady", "sandboxPassed", "crewStarted", "ideaBuilt"]);
+    expect(logKeys(d.dir, "build", buildBefore)).toEqual(["nightStart", "ideaStart", "signInReady", "sandboxPassed", "crewStarted", "ideaBuilt", "sealed"]);
     expect(logKeys(d.dir, "deliver", deliverBefore)).toEqual(["deliverRunStart", "verified", "pushed", "live", "told", "fact", "deliverRunEnd"]);
     expect(logRows(d.dir, "deliver").at(-1)).toMatchObject({ delivered: 1 });
   });

@@ -60,7 +60,20 @@ export interface BuildFacts {
   agentStarted: { at: string; backend: Backend } | null;
   /** The first builder failed and the other one was tried. */
   fellBack: { at: string } | null;
+  /**
+   * `seconds` is null for a build the Mac slept through: its start-to-end time holds the sleep,
+   * so it is not how long anything was built for.
+   */
   finished: { at: string; ok: boolean; seconds: number | null; credits: number | null } | null;
+  /** The Mac went to sleep while this build was going, and the run stopped it when it woke (cli, sleep-watch.ts). */
+  slept: { at: string } | null;
+  /**
+   * Whether the finished build was moved out of the build jobs' reach (builder, seal.ts).
+   * `ok`: moved, and every file in it made anew. `moved` without `ok`: moved, but `files` of its
+   * files (null: the log did not say how many) were not made anew, so a build job could still
+   * change them. Neither: it stayed where build jobs can reach it. Null: the log has no line about it.
+   */
+  sealed: { at: string; ok: boolean; moved: boolean; files: number | null } | null;
 }
 
 /** The morning's ticks for one idea, read from deliver.log. */
@@ -84,12 +97,14 @@ export interface BuildRun {
   failed: number | null;
   paused: boolean;
   nothingApproved: boolean;
+  /** The Mac went to sleep during the run, and what was in progress was stopped when it woke. */
+  slept: boolean;
   sandboxCheck: BuildFacts["sandboxCheck"];
   ideaIds: string[];
 }
 
-/** One run of the deliver command. */
-export interface DeliverRun { command: RunCommand; startedAt: string; finishedAt: string | null; delivered: number | null; failed: number | null; notified: number | null; ideaIds: string[] }
+/** One run of the deliver command. `slept`: as for a build run. */
+export interface DeliverRun { command: RunCommand; startedAt: string; finishedAt: string | null; delivered: number | null; failed: number | null; notified: number | null; slept: boolean; ideaIds: string[] }
 
 // ---------- What decides whether, and when, the night's work happens ----------
 
@@ -178,8 +193,11 @@ export interface IdeaExtras {
 export type StepKey = "heard" | "asked" | "approved" | "built" | "checked" | "published" | "delivered";
 export type StepStatus = "done" | "active" | "todo" | "failed" | "waiting" | "ended";
 export interface StoryStep { key: StepKey; label: string; status: StepStatus; at: string | null; detail: string | null; said: Said | null }
-/** One of the night's ticks. `since` starts a running clock. */
-export interface Check { key: string; label: string; status: "done" | "active" | "todo" | "failed"; detail: string | null; since: string | null }
+/**
+ * One of the night's ticks. `since` starts a running clock.
+ * "waiting": it did not happen, and that is not a failure (a build that was cut short and gets one more try).
+ */
+export interface Check { key: string; label: string; status: "done" | "active" | "todo" | "failed" | "waiting"; detail: string | null; since: string | null }
 export interface Story { ideaId: string; steps: StoryStep[]; checks: Check[]; runningSince: string | null; runningLabel: string | null; hint: string | null }
 
 /** One night, noon to noon, named by its morning. */

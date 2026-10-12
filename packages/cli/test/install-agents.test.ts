@@ -39,10 +39,12 @@ import {
   inQuietHours,
   labelProblem,
   launchctlProblem,
+  notAsleepReason,
   NOTHING_APPROVED_LINE,
   powerEvent,
   REAL_LABELS,
   settingsProblem,
+  sittingSteps,
   SPIKE_LABELS,
   STARTING_MESSAGE,
   throwawaySettings,
@@ -2561,6 +2563,45 @@ describe("spikes/10-night-clock.ts (its own tools only: no job is loaded, and no
     // Anything odd in the words is dropped, and they are cut to a length.
     const long = powerEvent(`2026-10-11 14:59:51 -0600 Sleep \t${"<made-up> {words}; ".repeat(20)}`);
     expect(long?.text).toMatch(/^Sleep: [A-Za-z0-9 '[\]._/-]{1,90}$/);
+  });
+
+  it("tells the person at a sitting to pull out the power plug before closing the lid, and to put it back afterwards", () => {
+    // On mains power this Mac stays awake with the lid closed (the live listener holds it awake),
+    // so a sitting with the plug in measures nothing. The build's time here is 14:05:00.
+    const clock = (at: Date) => at.toISOString().slice(11, 19);
+    const steps = sittingSteps(new Date("2026-10-12T14:05:00.000Z"), clock);
+    expect(steps).toHaveLength(4);
+    expect(steps.map((step) => step.slice(0, 3))).toEqual(["1. ", "2. ", "3. ", "4. "]);
+    const [wait, close, open, leave] = steps;
+    // First the plug stays in: unplugged with the lid open, this Mac falls asleep by itself after an idle minute.
+    expect(wait).toContain("Leave the power plug in.");
+    expect(wait).toContain('two lines saying "the build job looked at the clock"');
+    // The plug comes out first, the lid follows at once, half a minute before the build's time at the latest.
+    expect(close).toContain("pull out the power plug and close the lid at once, before 14:04:30.");
+    expect(close?.indexOf("pull out the power plug")).toBeLessThan(close?.indexOf("close the lid") ?? -1);
+    expect(close).toContain("With the plug in, this Mac stays awake with the lid closed.");
+    // Two minutes after the build's time, and the plug goes back.
+    expect(open).toContain("Open the lid again any time after 14:07:00, log in, and put the power plug back.");
+    expect(leave).toContain("Leave it open for five minutes.");
+    // Nowhere is the lid closed without the plug being named in the same step.
+    for (const step of steps) if (/close the lid/i.test(step)) expect(step, step).toMatch(/power plug/);
+    // With no clock of its own given, the times are this Mac's: a time of day, nothing else.
+    expect(sittingSteps(new Date("2026-10-12T14:05:00.000Z"))[1]).toMatch(/before \d\d:\d\d:\d\d\./);
+  });
+
+  it("says the likely cause when a sitting's Mac was not asleep at the build's time: still on mains power", () => {
+    const never = notAsleepReason(false);
+    expect(never).toContain("the Mac never slept");
+    expect(never).toContain("Most likely it was still on mains power");
+    expect(never).toContain("Pull out the power plug, then close the lid at once");
+    expect(never).toContain("this was an ordinary run");
+    // It slept, at another time: then the plug was out, and the timing was off.
+    const elsewhen = notAsleepReason(true);
+    expect(elsewhen).toContain("the Mac slept, but not across the build's time");
+    expect(elsewhen).toContain("closed too late or opened too early");
+    expect(elsewhen).not.toContain("mains power");
+    // Each is the end of a line the script prints, and is put into a sentence of its last line.
+    for (const reason of [never, elsewhen]) expect(reason, reason).toMatch(/^the Mac [^\n]*[a-z]$/);
   });
 
   it("looks for the lines the tool itself writes: the build's summary, and the night clock's two messages", () => {

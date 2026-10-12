@@ -182,6 +182,146 @@ describe("every address of the dashboard, over the invented scene", () => {
   });
 });
 
+// The builder keeps more in <data>/built than one folder per finished build (builder, seal.ts and
+// probe.ts): a file of the sandbox check's, older builds moved aside, and after a move that was
+// killed midway a folder of half-made copies. Here they are put beside the scene's own finished
+// builds, with words in them that no page may ever show.
+describe("what the builder keeps among the finished builds besides the builds", () => {
+  const STAMP = "20261011T070040Z";
+  const SECRET = "WORDS-FROM-A-FOLDER-THAT-IS-NO-IDEA";
+  const GONE = "idea_20261001_g0ne0000";
+
+  /** A folder that looks like a whole build, with the secret words in everything the pages read from a build. */
+  function wholeBuildAt(folder: string): void {
+    mkdirSync(path.join(folder, "dist"), { recursive: true });
+    mkdirSync(path.join(folder, "node_modules"));
+    writeFileSync(path.join(folder, "BUILD_NOTES.md"), `${SECRET}: the notes of a build that was moved aside\n`);
+    writeFileSync(path.join(folder, "BUILD_STATUS.json"), '{"status":"built"}\n');
+    writeFileSync(path.join(folder, "package.json"), "{}\n");
+    writeFileSync(path.join(folder, "brief.md"), `${SECRET}: a brief\n`);
+    writeFileSync(path.join(folder, "dist", "index.html"), `<!doctype html><title>${SECRET}</title>\n`);
+  }
+
+  function addTheExtras(scene: ReturnType<typeof seeded>): string[] {
+    const { built } = scene.paths;
+    const names = [
+      ".overnight-probe-marker",
+      // Of an app that is out, of the idea that is being built right now, and of one that was approved and never built.
+      `${scene.ideaIds.packingChecklist}.old-${STAMP}`,
+      `${scene.ideaIds.packingChecklist}.old-${STAMP}-2`,
+      `${scene.ideaIds.packingChecklist}.sealing`,
+      `${scene.ideaIds.choreWheel}.old-${STAMP}`,
+      `${scene.ideaIds.choreWheel}.sealing`,
+      `${scene.ideaIds.lunchTurns}.old-${STAMP}`,
+      // And of ideas the database does not have (any more): a build, and what was kept beside it.
+      GONE,
+      `${GONE}.old-${STAMP}`,
+      `${GONE}.sealing`,
+    ];
+    writeFileSync(path.join(built, ".overnight-probe-marker"), `${SECRET}: Overnight keeps this file here for its build sandbox check.\n`);
+    for (const name of names.slice(1)) wholeBuildAt(path.join(built, name));
+    // The same names where the reports, the briefs and the pictures are kept, in case a page ever went looking by one.
+    for (const name of names) {
+      mkdirSync(path.join(scene.paths.ideas, name), { recursive: true });
+      writeFileSync(path.join(scene.paths.ideas, name, "brief.md"), `${SECRET}: a brief\n`);
+      writeFileSync(path.join(scene.paths.reports, `${name}.json`), JSON.stringify({ ideaId: name, title: SECRET, confirmedLive: true }));
+      writeFileSync(path.join(scene.paths.screenshots, `${name}.png`), Buffer.concat([PNG_SIGNATURE, Buffer.from(SECRET)]));
+    }
+    return names;
+  }
+
+  it("shows none of it as an idea and breaks no page over it: every page is exactly the page it was", async () => {
+    const scene = seeded();
+    const served = await serve(scene);
+    const addresses = pageAddresses(scene.ideaIds);
+    const before = new Map<string, { etag: string | null; text: string }>();
+    for (const address of addresses) {
+      const answer = await served.get(address);
+      before.set(address, { etag: answer.headers.get("etag"), text: answer.text });
+    }
+    // The scene keeps its finished builds where the builder does, so the extras really do lie beside builds the pages read.
+    expect(readdirSync(scene.paths.built)).toContain(scene.ideaIds.packingChecklist);
+    expect((await served.get(`/ideas/${scene.ideaIds.packingChecklist}`)).text).toContain("Build notes");
+
+    const names = addTheExtras(scene);
+    for (const name of names) expect(readdirSync(scene.paths.built), name).toContain(name);
+
+    for (const address of addresses) {
+      const answer = await served.get(address);
+      expect(answer.status, address).toBe(200);
+      // The version mark is a fingerprint of everything on the page but the clock, and the scene's clock stands still.
+      expect(answer.headers.get("etag"), address).toBe(before.get(address)?.etag);
+      expect(answer.text, address).toBe(before.get(address)?.text);
+      for (const word of [SECRET, ".sealing", ".old-", "overnight-probe-marker", GONE]) expect(answer.text.includes(word), `${word} on ${address}`).toBe(false);
+    }
+    // Thirteen ideas, as before: one card each, and no card for anything in the folder.
+    const ideas = (await served.get("/ideas")).text;
+    expect(ideas).toContain("13 ideas, newest first");
+    expect(Array.from(ideas.matchAll(/<a class="card idea" href="\/ideas\/([^"]+)">/g), (match) => match[1]).sort()).toEqual(Object.values(scene.ideaIds).sort());
+    // The idea that is being built still shows its own build's files so far, not the whole build that lies under its name plus ".old-".
+    const building = (await served.get(`/ideas/${scene.ideaIds.choreWheel}`)).text;
+    expect(Array.from(building.matchAll(/data-check="(mark-[a-z]+)" data-status="(\w+)"/g), (match) => `${match[1]}:${match[2]}`)).toEqual(["mark-started:done", "mark-project:done", "mark-packages:todo", "mark-app:todo", "mark-notes:todo"]);
+    // An approved idea that was never built has no build notes, whatever lies under its name plus ".old-".
+    expect((await served.get(`/ideas/${scene.ideaIds.lunchTurns}`)).text).not.toContain("Build notes");
+    expect(served.logged).toEqual([]);
+  });
+
+  it("serves none of it, under any address", async () => {
+    const scene = seeded();
+    const served = await serve(scene);
+    const names = addTheExtras(scene);
+    const packing = scene.ideaIds.packingChecklist;
+    const tried: string[] = [];
+    const refused = async (address: string): Promise<void> => {
+      tried.push(address);
+      const answer = await served.get(address);
+      // 404 from the list of routes; an address the gate cannot read at all is 400. Never a page, a file or a picture.
+      expect([400, 404], address).toContain(answer.status);
+      expect(answer.text.includes(SECRET), address).toBe(false);
+      expect(answer.headers.get("content-type"), address).not.toBe("image/png");
+    };
+    for (const name of names) {
+      await refused(`/ideas/${name}`);
+      await refused(`/ideas/${encodeURIComponent(name)}`);
+      await refused(`/ideas/${name.replaceAll(".", "%2E")}`);
+      await refused(`/shots/${name}/phone.png`);
+      await refused(`/shots/${name}/desktop.png`);
+      await refused(`/shots/${name}.png`);
+      // There is no address for a file of a build at all: not by the folder's name, not through an idea's page.
+      await refused(`/built/${name}`);
+      await refused(`/built/${name}/BUILD_NOTES.md`);
+      await refused(`/built/${name}/dist/index.html`);
+      await refused(`/ideas/${packing}/${name}`);
+      await refused(`/ideas/${packing}%2F..%2F${name}`);
+      await refused(`/assets/${name}`);
+    }
+    for (const address of ["/built", "/built/", `/built/${packing}`, `/built/${packing}/BUILD_NOTES.md`, `/built/${packing}/dist/index.html`, `/workspaces/${scene.ideaIds.choreWheel}/brief.md`, "/assets/../built/.overnight-probe-marker", "/assets/%2E%2E/built/.overnight-probe-marker"]) await refused(address);
+    expect(tried.length).toBeGreaterThan(100);
+    // The site itself, asked without the server in front of it, gives no picture for any of the names.
+    const site = createSite({ config: scene.config, paths: scene.paths, filming: NOT_FILMING, demo: true, port: 4999 });
+    for (const name of names) {
+      expect(site.shot(name, "phone"), name).toBeNull();
+      expect(site.page({ kind: "idea", id: name }).status, name).toBe(404);
+    }
+    // And an app that is out still has its page and both its pictures.
+    expect((await served.get(`/ideas/${packing}`)).status).toBe(200);
+    expect((await served.get(`/shots/${packing}/phone.png`)).headers.get("content-type")).toBe("image/png");
+    expect(served.logged).toEqual([]);
+  });
+
+  it("shows no idea for a finished build the database knows nothing of, also while filming", async () => {
+    const scene = seeded();
+    addTheExtras(scene);
+    const served = await serve(scene, { filming: FILMING });
+    for (const address of pageAddresses(scene.ideaIds)) {
+      const answer = await served.get(address);
+      expect(answer.status, address).toBe(200);
+      expect(answer.text.includes(SECRET) || answer.text.includes(GONE), address).toBe(false);
+    }
+    expect((await served.get(`/ideas/${GONE}`)).status).toBe(404);
+  });
+});
+
 describe("what the shell says", () => {
   it("marks the tab of the view that is open; an idea's page belongs to Ideas", async () => {
     const scene = seeded();

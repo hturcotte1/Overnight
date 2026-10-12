@@ -2,9 +2,9 @@
 
 One small script per outside piece, run for real before we build on it. This file records what each one proved. No Bee data appears here: only field names, timings and yes/no answers.
 
-Later sections record what building Milestones 1 and 2 added, each checked against the real tools.
+Later sections record what building Milestones 1, 2 and 3 added. Milestones 1 and 2 were checked against the real tools. Milestone 3 has so far met tests, stand-ins and made-up folders only: its section says so line by line, and ends with a list of what is still to be proved for real.
 
-Last updated: 2026-10-10
+Last updated: 2026-10-12
 
 ## Status
 
@@ -19,6 +19,9 @@ Last updated: 2026-10-10
 | 7 | Does publishing a `dist/` folder to `overnight-apps` give a working GitHub Pages link? | `spikes/07-pages-publish.ts` | **Passed** (2026-10-09) |
 | 8 | Does `kiro-cli chat --no-interactive` (no tools) return valid detector JSON? | `spikes/08-kiro-detector.ts` | **Passed** (2026-10-09): 6 of 6 valid and correct |
 | 9 | Does `kiro-cli chat --no-interactive` read its prompt from standard input, so the prompt need not be on the command line? | `spikes/09-kiro-stdin-prompt.ts` | **Passed** (2026-10-10): the whole prompt is read from standard input, and it appears in no process's arguments |
+| 10 | Does macOS really wake the two night jobs every minute, and does Overnight's own clock then start the build once, at its minute, and catch up after a sleep? | `spikes/10-night-clock.ts` | **Pending.** Written on 2026-10-11. Only its `check` and `dry` modes have run, and those load no job, so nothing here is yet a fact about macOS |
+| 11 | Do the two builder sandbox profiles, with Milestone 3's new rules, still let Kiro Crew and Kiro CLI do their work? | `spikes/11-hardening-proof.ts` | **Pending.** Written on 2026-10-11. Only its `check` mode has run, which starts no gateway and no Kiro program |
+| 12 | Can a second program read the database beside the listener without ever making it wait? | `spikes/12-sqlite-read-only.ts` | **Passed** (2026-10-11). The rule that came out of it: never leave a read open |
 
 ## This Mac's setup
 
@@ -35,7 +38,7 @@ Everything except Kiro CLI is installed per user, with no Homebrew. Kiro CLI's i
 
 `~/.zshenv` adds `~/.local/bin` and `~/.local/node/bin` to `PATH`. Background jobs (launchd) don't read that file, so they must use full paths.
 
-Kiro: `kiro-cli` is signed in with GitHub on the **Kiro Pro** plan (1,000 credits a month). All of today's Kiro tests together, including a second run of each script, used about 1.1 credits. Kiro Crew settings changed from their defaults: `stt.enabled false` (voice typing, unused), `timezone America/Boise`, `auto_update false`. On Oct 9 the sandbox and approval settings were untouched. Since Milestone 2 experiment A (Oct 10), `agent.sandbox` on the real install is `strict` (it was `auto`). `agent.sandbox_allow_unsandboxed_exec` has not been switched on there yet; every test that needed it used a throwaway Kiro Crew home. Switching it on is the first step of the real set-up, which is pending. Kiro CLI settings changed: `codeWhisperer.shareCodeWhispererContentWithAWS false` and `telemetry.enabled false`, in the default settings folder and in the detector's own `KIRO_HOME` (Henry's decision, Oct 9).
+Kiro: `kiro-cli` is signed in with GitHub on the **Kiro Pro** plan (1,000 credits a month). All of today's Kiro tests together, including a second run of each script, used about 1.1 credits. Kiro Crew settings changed from their defaults: `stt.enabled false` (voice typing, unused), `timezone America/Boise`, `auto_update false`. On Oct 9 the sandbox and approval settings were untouched. Since Milestone 2 experiment A (Oct 10), `agent.sandbox` on the real install is `strict` (it was `auto`). Until the evening of Oct 10, `agent.sandbox_allow_unsandboxed_exec` was not switched on there, and every test that needed it used a throwaway Kiro Crew home. It has been on since that evening: the rehearsal ran the real install inside our sandbox, which Kiro Crew refuses to do without it, and `overnight preflight` ticked the setting then and again after the restart on Oct 11 (see "The rehearsal and switching on"). Kiro CLI settings changed: `codeWhisperer.shareCodeWhispererContentWithAWS false` and `telemetry.enabled false`, in the default settings folder and in the detector's own `KIRO_HOME` (Henry's decision, Oct 9).
 
 GitHub: `gh` is logged in as `hturcotte1` (token in the macOS keychain, scopes `repo`, `read:org`, `gist`). This folder's `origin` is `https://github.com/hturcotte1/Overnight.git`.
 
@@ -384,7 +387,7 @@ Three experiments before building the build-and-deliver half. Probes printed onl
 
 Milestone 2 was built, reviewed, fixed, reviewed again as a whole, and fixed once more, all on Oct 10. This section records what those rounds learned about the tools and about the macOS sandbox, and what was run for real. Everything here used scratch data folders and, where a Kiro Crew gateway was needed, a throwaway Kiro Crew home on another port. Probes printed only counts and yes/no.
 
-**What has still never happened** (and is not claimed anywhere below): a night job running under launchd, the Kiro Crew gateway starting from its installed job, a real push to GitHub Pages from the deliver step, a real morning Bee to-do or fact, the rehearsal, and the first real night. All pending.
+**What had still never happened when this section was written** (and is not claimed anywhere in it): a night job running under launchd, the Kiro Crew gateway starting from its installed job, a real push to GitHub Pages from the deliver step, a real morning Bee to-do or fact, the rehearsal, and the first real night. All of those happened later on Oct 10 and on Oct 11; they are in "The rehearsal and switching on" and "The first real night" below.
 
 ### Spike 9: Kiro CLI reads its prompt from standard input. Passed (2026-10-10)
 
@@ -416,7 +419,7 @@ Checked afterwards, with the final code and a scratch data folder:
 | One detection on a synthetic transcript, with the process list read 74 times meanwhile | An idea, first try, 4.3 s. The text in no process's arguments or environment (92 search strings). Kiro recorded a prompt of 6,336 bytes, equal to what was sent; 0 tools; 0.016 credits |
 | The golden set (66 synthetic transcripts) | 24 of 24 ideas asked, 0 of 42 non-ideas asked, precision 1.00, recall 1.00. One transcript needed a second try. Median 3.3 s each (3.1 s the old way). 67 calls, 0 tools, 0.93 credits |
 
-Not tried: a signed-out Kiro with a piped prompt, and the new path from inside a launchd job. The listener that is running was started before the change, so it uses the old way until it is restarted (pending).
+Not tried: a signed-out Kiro with a piped prompt, and the new path from inside a launchd job. The listener that was running on Oct 10 had been started before the change. The Mac's restart on Oct 11 started it again, so the listener running since then was started after it. (That follows from the restart; it was not read back from the listener's log.)
 
 ### What the macOS sandbox does and does not do
 
@@ -430,7 +433,7 @@ Found while writing and attacking our three `sandbox-exec` profiles on macOS 26.
 | "Same sandbox" means one start of `sandbox-exec`. A second start with the same profile and folders can't signal, see or read a program in the first. | A program left over from one step can't touch the next step's programs. |
 | The exact name does nothing: `(deny sysctl-read (sysctl-name "kern.procargs2"))` let a program read any other program's command line by its process number. `"kern.procargs2.*"` does nothing either. The prefix forms work (`sysctl-name-prefix "kern.procargs2."`, or the prefix `"kern.procargs"`), which suggests the process number follows the name. Refusing only `procargs2` leaves the older `kern.procargs` readable. | Use the prefix `"kern.procargs"`, in all three profiles. Every rule of this kind gets a real test with a decoy process. |
 | The refusal only bites for programs outside the sandbox. A program can still read the command lines of itself, its parent and its children. Measured, not explained. | Good: build tools need that. |
-| The list of running programs is a separate hole. `(deny process-info*)` stops one way of listing them, but `sysctl kern.proc.all` still returned every program on the Mac (over 900, with number and name). The prefix `"kern.proc."` closes it, and npm, tsc, Vite, Playwright and headless Chromium all still work. | In `deliver.sb`. Not yet in the two builder profiles, where the list is still readable (over 900 entries, counted again on Oct 10 with the final profiles; command lines stayed refused). Untested there: Kiro Crew may need the list to manage its jobs. |
+| The list of running programs is a separate hole. `(deny process-info*)` stops one way of listing them, but `sysctl kern.proc.all` still returned every program on the Mac (over 900, with number and name). The prefix `"kern.proc."` closes it, and npm, tsc, Vite, Playwright and headless Chromium all still work. | In `deliver.sb`. On Oct 10 not yet in the two builder profiles, where the list was still readable (over 900 entries, counted again that day with the final profiles; command lines stayed refused). Milestone 3 added the rule to the Kiro CLI profile and found why the gateway profile cannot have it (see "Milestone 3" below). |
 | `pgrep` gets command lines from a system service, `com.apple.sysmond`. Allowing only that service made `pgrep -fl` print an outside program's command line in spite of the other rules. | Refuse that service in the builder profiles. `deliver.sb` allows no system service at all. |
 | Programs that run with extra rights (`ps`, `crontab`) can't start inside any sandbox: exit code 71. From Node it shows as "not permitted". | `crontab` is not a way out, and the build skill tells the agent that `ps` does not work. |
 
@@ -572,6 +575,14 @@ A look is: `new Database(file, { readonly: true, fileMustExist: true, timeout: 2
 
 Not tried: the real data folder beside the running listener (that is the dashboard's last proof step, with Henry at the screen), a database on a read-only disk, and several readers at once.
 
+**After the dashboard was built on it (2026-10-11):**
+- **The dashboard's own look beside a real writer** in another process, three runs: 500 lines written each time, 755 to 791 looks, no error on either side, slowest write 0.8 to 1.3 ms, write-ahead file about 4.1 MB. With a read deliberately left open the file reached 14.7 MB, and the test that guards the rule failed, as it should.
+- **The look grew.** It now also reads the month's sum from the build credits ledger, a count of rehearsal ideas and the night clock's small values, in the same single transaction. A database with no ledger table yet is read without it and is not upgraded.
+- **On the rehearsal's scratch folder** (`~/.overnight-rehearsal`, invented ideas only), with no other program on it: the folder listing went from 2,897 entries to 2,899. The two new ones were `overnight.db-shm` (32,768 bytes) and an empty `overnight.db-wal`. The database's checksum was the same before and after. "Practice Dice Roller" read as Kiro Crew, 2 min 19 s, 3.09 credits, checked in 5.2 s, 3 files, 5.6 KB, live after 21 s, delivered: the figures recorded in "The rehearsal" below.
+- **SQLite waits for ever on a named pipe.** A pipe standing where the database, a lock file, or one of the files SQLite keeps beside them (`-journal`) should be, made the first query hang; raw SQLite on such a pipe was still waiting when a 5-second alarm ended it. So the dashboard looks first, and only opens what is a plain file.
+- **"Busy" is rare.** A reader only ever got it when another connection had the database in exclusive locking mode. The look then waits a quarter of a second, and the page shows the last good look.
+- **Two things about our own locks.** A lock taken with the cli's `takeLock` lasts only as long as the program keeps hold of the function that gives it back: a test helper that dropped it lost its lock at random moments. And a lock held by one connection is seen as held by another connection in the same process, which is how the demo shows "Listening" with no second program.
+
 ## The rehearsal and switching on (2026-10-10, evening)
 
 The first time every part ran for real together: the real Kiro Crew install (its real home, its usual port) inside our sandbox, the real verifier, the real publisher. Only Bee was a stand-in, and the data folder was a scratch one (`~/.overnight-rehearsal`), so nothing could reach the wearer or the real database.
@@ -608,6 +619,8 @@ The practice app is public at `https://hturcotte1.github.io/overnight-apps/pract
 | `git` and `mktemp -t` do not work inside the build sandboxes | No build has needed them. Noted here |
 | When a page was pushed but not seen live, the morning's printed line does not say so | The note is on the idea, in the report and in the log. One more printed line is Milestone 3 |
 
+The "Status" column is as it stood on Oct 10. What Milestone 3 did with each line that says "Left for Milestone 3" is in "Milestone 3" below, under "What became of Milestone 2's left-overs".
+
 ## The first real night (2026-10-10 to 10-11)
 
 The whole loop for real, with nobody at the Mac: an idea spoken near the watch on the morning of Oct 10, approved on the wrist, built overnight and delivered the next morning.
@@ -633,22 +646,309 @@ Both jobs ended with exit code 0. The app is at `https://hturcotte1.github.io/ov
 
 **What was off: an hour late.** Both jobs ran exactly one hour after their set times, to the second (2:00:01 and 7:30:01). macOS's own log shows why. After the build it wrote "Rescheduling StartCalendarInterval: com.overnight.build: Monday, October 12, 2026 at 2:00:00 AM Mountain Daylight Time" for a job whose settings say hour 1. The part of macOS that keeps the calendar for background jobs had been running since the Mac last restarted (Oct 6), and the Mac's time zone was changed the day after (Oct 7). It was still counting in the old zone, one hour behind. Because the morning run came after `DELIVER_TIME`, the to-do's alarm was set two minutes out (about 7:32) instead of for 7:00.
 - Fix for now: restart the Mac once, so that part of macOS starts again in the right zone. Done on Oct 11 at 11:26 am: macOS's log then showed "Registered StartCalendarInterval: com.overnight.build: Monday, October 12, 2026 at 1:00:00 AM Mountain Daylight Time", and 6:30:00 AM for deliver. The listener, the gateway and both night jobs came back by themselves at login, and `overnight preflight` said "Ready".
-- Fix for good (Milestone 3): have the jobs wake often and let Overnight's own code, which knows its time zone, decide whether it is time. That also covers a Mac that was asleep at 1:00.
+- Fix for good (Milestone 3): have the jobs wake often and let Overnight's own code, which knows its time zone, decide whether it is time. That also covers a Mac that was asleep at 1:00. This is built now ("Milestone 3" below). It is not yet what runs at night: the live jobs stay on macOS's calendar until the switch-over.
 
-**Also learned.** The listener's keep-awake (`caffeinate -s`) only works on mains power. On battery the Mac sleeps after a minute, and with the lid closed it sleeps whatever is asked. That night a second keep-awake was started by hand for battery; building that in is Milestone 3 too.
+**Also learned.** The listener's keep-awake (`caffeinate -s`) only works on mains power. On battery the Mac sleeps after a minute, and with the lid closed it sleeps whatever is asked. That night a second keep-awake was started by hand for battery; building that in is Milestone 3 too. It is built now as well: the listener's code asks with `caffeinate -i -s`. The listener that is running keeps the old way until it is restarted with the new code.
 
 **Confirmed by the wearer:** the watch buzzed at 7:32 am, and the to-do said the app was built.
+
+## Milestone 3: dashboard and hardening (2026-10-11 to 10-12)
+
+Milestone 3 was designed, built, reviewed by four independent reviews and fixed between the morning of Oct 11 and the small hours of Oct 12. This section records why it is built the way it is, what was measured on the way, and what has not been proved.
+
+**Read this first.** Nothing in this section called Bee, started a Kiro Crew gateway or a Kiro agent, loaded a background job, published anything or spent Kiro credits. (Kiro's two programs were asked for their version number, and Kiro CLI for one setting.) Everything was run on scratch data folders and made-up home folders, with stand-ins where a real tool would have been needed. "For real" below means the real macOS sandbox, the real `overnight` command, the real database library or a real browser, as each line says. What that leaves unproved is listed at the end, under "Still to be proved for real".
+
+### The decisions, and why
+
+| Decision | Why |
+|---|---|
+| **Overnight keeps its own time.** macOS starts the two night jobs every 60 seconds; Overnight's own clock decides whether it is time. One start per job per day, written down before the work begins | On the first real night macOS's calendar ran both jobs exactly an hour late: it was still counting in the time zone the Mac had before its last restart. A calendar that goes by the Mac's zone and not by Overnight's `TZ` cannot be trusted with the night. A job that wakes often and asks also catches up by itself after a sleep |
+| **Builds are not tied to mains power** | The first design said "a build starts only on mains power", so that a Mac closed in the middle of a catch-up build would not fail a good idea. Henry decided the other way on Oct 11: on battery, with the lid open, Overnight keeps the Mac awake so it keeps listening and can build. A mains-only rule contradicts that, so it was taken out everywhere |
+| **Instead, a run the Mac slept through is stopped, and falls under the one-more-try rule** | Every time limit goes by the clock on the wall. Without care a build the lid was closed on wakes hours later "past its time limit", the idea is failed for good and the wearer is told "couldn't finish". Stopping it on waking puts it under the existing rule: a stopped build gets one more try |
+| **A due run that finds the Mac has just woken waits one minute in place** | The first design made such a run wait for the next look instead. That needs two looks close together for anything ever to start, and macOS promises no such thing: a slow timer would have meant no night at all. Waiting in place costs a minute, never a night |
+| **A run starts only when the internet answers** | When neither builder can start, the idea is failed for good, and a publish that cannot reach GitHub is failed for good. A Mac that has just woken on a network with no way out is exactly that case, and the new clock makes it likelier |
+| **Finished builds are sealed:** moved to `built/`, their files made anew | With Kiro Crew one sandbox covers every job, so a later job could change an app that was waiting for the morning, and it would be published under the other idea's name. The move is one rename and needed no change to the sandbox rules: both profiles already closed all of the data folder but three folders |
+| **A monthly ceiling on build credits, 400** (Henry, Oct 11). Silent on the wrist | The only limit before was two builds a night. The ceiling counts what Overnight saw and fails open: a fault in it must not cost a night |
+| **The nightly sandbox check grew by two lines, not ten** | The check decides whether Kiro Crew builds at all that night. Ten new lines would have doubled the length of its command, and Kiro Crew's limit is not written down anywhere. The socket and port rules are covered by tests against the real sandbox and by spike 11 instead |
+| **The dashboard opens from a link with a key, never shows the lines Bee heard, and hides quotes when filming** (Henry, Oct 11) | It shows quotes of what people said, on a port every program on the Mac can reach |
+| **The dashboard is a plain Node web server that makes its pages itself**, not the Vite and React app first planned | No framework, no build step, no new package. Every page is made on the server through one template that escapes whatever it is handed, so it is hard to forget to |
+
+Left out on purpose, each with its reason, is in SPEC §10.
+
+### Spikes 10, 11 and 12, and their modes
+
+| Spike | Mode | What it does | Has it run? |
+|---|---|---|---|
+| 10 `10-night-clock.ts` | `check` | Changes nothing. Checks the script's own tools: that it refuses the four real job names and the real data folders, and that the installer's filled-in settings files are valid | Yes: every line "yes" |
+| | `dry` | The script itself stands in for launchd: it starts the tool exactly as the two settings files say, at the start and every 60 seconds, and watches. It says nothing about macOS | Yes, twice. Both jobs looked at the clock at load and every 60 seconds, each wrote one first-look line, the build started exactly once at its minute, and `status --json` gave 0 minutes late |
+| | `run` | Loads two throwaway jobs (`com.overnight-spike.night-clock.build` and `.deliver`) under real launchd for a few minutes, with the build's time set a few minutes ahead, on an empty scratch database | **No. Pending (P4)** |
+| | `sitting` | The same with the Mac asleep across the build's time. It needs a person at the Mac, who pulls the power plug and then closes the lid at once: plugged in, this Mac does not sleep with the lid closed | **No. Pending (P4)** |
+| | `cleanup` | Removes the two throwaway jobs if a killed run left them | Not needed yet |
+| 11 `11-hardening-proof.ts` | `check` | No gateway, no Kiro program, no credits. Checks the script's own tools: that it refuses the real folders and the real port, that the profiles and its copies of them load, and that it can read what the sandbox decided out of macOS's log | Yes. In its first form on Oct 11: every line as expected. On Oct 12 it was extended to try the rewritten last step on harmless programs, and the last checker ran that form three times in a row: about 12 seconds each, exit code 0 each time. In those runs: the script's own four test refusals were found in macOS's log, 4 of 4; another program's refused socket file was in the log and was not counted; Node was refused the system log's socket on 5 or 6 of 6 starts, shown as expected; the script's own four tries at a closed socket failed the step, and with those set aside the same log passed; with the log program swapped for one that fails, or for one that prints nothing, the answer was "could not tell". Three scratch copies of the script with the log program replaced each stopped with exit code 1. A fourth run, made when this line was written, gave the same answers (Node refused on 5 of 6 starts) |
+| | `p1` | No credits. A throwaway Kiro Crew gateway inside the gateway profile: the nightly check, one command job added, started, cancelled and removed, and one settings question to Kiro CLI inside its profile | **No. Pending (P1)** |
+| | `p2 --spend-credits` | About half a Kiro credit. A one-line Kiro CLI chat and a one-line Kiro Crew agent job, each of which writes one file | **No. Pending (P2)** |
+| 12 `12-sqlite-read-only.ts` | (none) | Reads the database beside a writer, in a temporary folder of its own | Yes, five times. Its own section is above |
+
+Two notes on how spike 10 keeps away from the real system: the deliver job's time is set twelve hours off, because a delivery would talk to Bee; and both throwaway jobs get a made-up, empty home folder. Spike 11's gateway runs inside a copy of the shipped profile with a few lines added that only report what is used and refuse nothing.
+
+### What was measured: the clock, sleep and launchd
+
+Read from manuals and from this Mac (Oct 11, read-only):
+
+| Fact | Where from | Result |
+|---|---|---|
+| What macOS promises for a job started every N seconds | `man launchd.plist` | It is started every N seconds. A start that falls while the Mac is asleep is missed, and so is one that falls while the job is still running. No time zone is involved |
+| What one look at the clock costs | A cli command on a scratch folder, 3 runs; later the real `--if-due` | About 0.1 seconds each. Two jobs every minute is about 6 minutes of processor time a day |
+| What would have shown the hour-late night beforehand | The date of the Mac's time-zone link against its last start-up | The zone was changed on Oct 7; the Mac had last started on Oct 6. "Zone changed after the last restart" was true on the bad night and false after the restart of Oct 11 |
+| This Mac's sleep setting | `pmset -g custom` | It sleeps after one idle minute, on battery and on mains, unless something holds it |
+| The keep-awake flags | `man caffeinate` | `-s` is "valid only when system is running on AC power". `-i` stops idle sleep and has no such limit |
+| What the two flags really hold | The real `caffeinate`, started through the listener's own code, read back with `pmset -g assertions` (on mains power) | `-s` alone holds `PreventSystemSleep`. `-i -s` holds that and `PreventUserIdleSystemSleep`. Both end when the listener stops, and within 0.1 s of the listener being killed outright |
+| How the power source reads | `pmset -g ps`, first line | `Now drawing from 'Battery Power'`, and `Now drawing from 'AC Power'` |
+| How sleeps and wakes read | `pmset -g log` | Lines of the form date, time, zone, then `Sleep`, `Wake` or `DarkWake`, and the system's reason. Spike 10 prints these lines for the minutes it watched, so P4 shows a wake the Mac makes by itself only if one happens in those minutes |
+
+Run through the real `overnight` command, on scratch folders:
+
+| Try | Result |
+|---|---|
+| An empty scratch folder, the build's time two minutes ahead, a look every 20 seconds | `--from-now` printed its line. Every look printed nothing and made no log file. Exactly one "Tonight's build: 0 built, 0 failed; nothing approved." came at the set minute, then silence. `status --json` said 0 minutes late. This used the real internet check, real locks and a real keep-awake helper for an instant |
+| Six processes looking at the same instant, at the build's time (17 rounds in all) | Always exactly one start and one summary line. Every other process ended with exit code 0 |
+| The internet check for real | GitHub answered in 173 ms, with no login sent. A network that swallows the request costs 5 seconds and counts as offline. So does an answer with a certificate that cannot be trusted, which is what a sign-in-page network gives |
+| A wake after hours asleep (a made-up clock) | The first look waits one minute in place, then builds, logged as 121 minutes late. A brief wake in which the clock jumps during that minute starts nothing, and the next wake builds |
+| A late morning with both runs due at 10:00, in both orders | The build starts first. The delivery waits and runs within a minute of the build ending. With a 45-minute build the delivery stops waiting after 20 minutes |
+| The clock changes (a made-up clock, a look a minute) | Nov 1, 2026: one build at the first 1:00 a.m., none at the second, the next one 25 hours later. Mar 14, 2027: one build and one delivery, the next build 23 hours later. A time inside the skipped hour (02:30) runs once, an hour early by the wall clock |
+| `BUILD_TIME` or `TZ` changed in the middle of a day | Never more than one start for a day. `status` names the run the clock will really start (a day later than the new time, until the job is installed again) |
+| A run killed outright after its start was written | `status` at once says "cut short". The next look closes that day's run and warns once. Nothing starts again that day, and the next night runs |
+| Plain `overnight build` and `overnight deliver` | Wrote none of the night clock's values, in any state, and asked nothing of the internet |
+
+Sleep, with a frozen process standing in for it (the process is stopped by a signal and continued later, while the wall clock runs on):
+
+| Try | Result |
+|---|---|
+| `build --if-due` with a stand-in builder, frozen for 70 seconds | On thaw it logged the sleep line with a gap of 66 seconds, stopped the builder, closed the run as cut short and ended with exit code 0. The idea was left with one more try waiting |
+| The real deliver step inside its sandbox, on a made-up app whose build never ends, frozen | Exit code 0, the idea stays `built`, the run is cut short, and the sandboxed build script was gone afterwards |
+| The same idea frozen on two nights running | After the first night it waits for its one more try. After the second it counts as failed, and `status` shows nothing waiting |
+| A sleep that outlasts the command's own last-resort time limit (4.5 hours for a build with the default settings) | Before the fix: "could not finish", exit code 1, and the idea left `building` for a day. After: the normal summary, exit code 0, the idea stopped with its one more try waiting |
+| What a slept-through build is counted as | Before the fix: a 2-minute agent the Mac slept on for hours counted as a full-length try, 90 credits. After, run end to end with a process frozen for 30 made-up minutes: 173 seconds of agent time, 5.8 credits |
+| A 5-second timer after a freeze | It fired at once on thaw, so a freeze is seen immediately. Whether a real sleep is seen as fast is not known. P4's sitting shows it for a timer of spike 10's own, not for Overnight's sleep watch, which is not in that run ("Still to be proved for real", below) |
+
+One trap for anyone repeating the freeze: start the process from bash or from node. A zsh subshell keeps continuing a stopped job, which undoes the freeze.
+
+Simulated, a minute at a time with the real rule (no process, no clock but a made-up one): awake all night; asleep until 3:00 and until 10:00, in both orders of the two jobs; a 45-minute build; a wake with no internet; a brief wake; off for three days; Nov 1; a killed build; the Mac sleeping in the middle of a build; and seeded random nights and weeks (1,500 weeks in the review's run). Never a second start for a day, never a day left unstarted. One fix came out of it: the delivery's 20 minutes used to count time asleep, so a moment's wake at 7 a.m. used them up hours before anyone opened the lid. With a 40-second wake every 15 minutes, 0 of 300 mornings delivered the same morning before the fix, and 300 of 300 after.
+
+**Not measured, and open:** whether macOS starts the jobs in the brief wakes a sleeping Mac makes by itself, whether the one-minute wait is long enough for those, and whether the keep-awake helper would then keep such a wake going. The simulation, fed with wake lengths taken from this Mac's own sleep log, still lost mornings to builds started inside a long wake. P4's sitting can show something of this only if the Mac happens to wake by itself in the few minutes its lid is closed (the script prints macOS's power log for that time). Nothing else looks at it yet.
+
+Small facts about macOS's tools, found while writing the installer and spike 10:
+- `plutil -lint` passes a job template whose placeholders sit inside text values, and fails one with bare text inside a list. So the build and deliver templates are valid as they stand, and the gateway's is not, on purpose.
+- A comment in a job's settings file may not contain two hyphens in a row. The templates therefore say "the if-due switch" and never spell the switch.
+- `plutil -convert json -o - -` reads standard input, so a settings file can be checked without writing it. The result does not keep the file's order of keys.
+
+### What was measured: the database
+
+| Try | Result |
+|---|---|
+| Milestone 2's code and Milestone 3's on one database file | The old code made a version 3 file. The new code upgraded it to version 4 (one new table and its index; every other table byte for byte the same) while the old code still had it open. The old code carried on reading and writing, opened the version 4 file from cold, built and delivered on it, and left the version at 4. The new code found its ledger rows and its night clock records intact |
+| Two or more programs opening the database in the same instant, before the fix | A brand-new file: 8 rounds of 8 failed ("database is locked", or a column added twice). A version 3 file: 5 of 8 |
+| The same after the fix (the upgrade locks the file first and reads the version again inside the lock) | 0 failures in 12 rounds with 2 programs, 12 with 4 programs, and 12 with 3 programs on a version 3 file |
+| How long the database library waits for a lock | 5 seconds by default. But SQLite does not wait at all at the one step that switches a new file to its write-ahead log, so two programs creating one file at once need a retry there |
+
+The read-only measurements (reading beside a writer, the two side files, looking at a lock file, a named pipe) are in "Spike 12" above.
+
+### What was measured: the macOS sandbox
+
+Tried on Oct 11 (macOS 26) with throwaway rules around macOS's own tools, and afterwards with the two shipped profiles on made-up home folders. No gateway and no Kiro agent was involved.
+
+**Rule forms that work:**
+
+| Rule | What it does |
+|---|---|
+| `(deny network-outbound (remote unix-socket (path-regex #"^/")))` | Refuses every socket file. A later allow for one exact path opens just that one again |
+| An allow worked out from a folder: `(remote unix-socket (path-regex (string-append "^" (regex-quote dir) "/")))` | A socket inside that folder connects; one in the next folder is refused |
+| The same refusal, tried by other routes | A socket reached by a short relative name, through a link, through a linked folder, by a name with `..` in it, through a hard link made beforehand, or by a datagram: all still refused. The sandbox goes by the full real path |
+| With only `/private/var/run/mDNSResponder` allowed | Node can look up a host name and reach the npm registry. With every socket refused it cannot (`ENOTFOUND`) |
+| `(deny network-outbound (remote ip "*:4321"))` and `(deny network-bind (local ip "*:4321"))` | Port 4321 can be neither connected to nor taken, by every spelling of this Mac's address that was tried (four for connecting, six for taking, and by datagram too). Another local port still connects and can still be taken |
+| `(deny sysctl-read (sysctl-name-prefix "kern.proc."))` | The whole list of programs and any program outside are refused. A program's own child, asked for by its number, is still answered |
+| `(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd"))` | `lsappinfo list` then shows no running app. The process-list rule alone does not empty it |
+| `(allow <operation> <filter> (with report))` | Changes nothing and writes each use to macOS's log, which can be read with `/usr/bin/log show` without a password. This is how spike 11 learns what a real build uses without refusing anything first |
+
+**Rule forms that do not do what they seem to:**
+
+| Rule | What really happens |
+|---|---|
+| `(deny network-outbound (remote ip "localhost:4321"))` | It refuses `127.0.0.1`, `::1` and this Mac's network address. **It does not cover `::ffff:127.0.0.1`**, which is 127.0.0.1 written as an IPv6 address. By that spelling a sandboxed program read a page served on 127.0.0.1, and with the page gone it took the port and served its own. The same holds for `network-bind`. Found by the review; the shipped rules use `"*:4321"`. The price: port 4321 on any other machine is refused too |
+| The process-list rule above, inside the gateway's profile | It also refuses a program **its own process group**, while its own child by number is answered. Kiro Crew's installed code asks for process groups to look after its jobs (read in its code, by names only; a real gateway was not tried under the rule). So the gateway's profile does not have this rule (F-053) |
+| A report-only allow, placed before the profile's own rules | It is silent wherever a later allow matches. Only refusals, local ports and process-list questions show up in the log |
+| Trusting a job's own word for "I could not write there" | Where a program may write but not look, `touch` makes the file and still ends with an error, and `rm` then cannot remove it. The nightly check's write lines would have passed a fence that was open for writing only. Overnight now looks for the files itself, from outside the sandbox |
+
+**Other things seen:**
+- A refusal of a port by the sandbox shows as "not permitted". A port nobody listens on shows as "connection refused". The tests tell the two apart.
+- A socket path longer than 104 bytes fails even outside a sandbox.
+- Under the new Kiro CLI profile, **Node itself asks for the system log's socket file** (`/private/var/run/syslog`) when it starts, and is refused. It showed in macOS's log on 6 of 10 starts in one run and on 2 of 10 in another, and never inside the gateway profile. It is harmless: under both new profiles the test browser opened a local page, clicked and took a screenshot, and a name lookup, a connection to the npm registry (IPv4 and IPv6), a forked child, a worker, a named pipe in the temporary folder, servers on two local ports, `node`, `npm --version`, `kiro-cli --version` and one `kiro-cli settings` read all worked. It matters for the proofs: "no socket refused" is not a fair pass line for a Kiro CLI build.
+- Kiro's desktop app keeps two socket files in this account's usual temporary folder (`kirorun/desktop.sock` and `kirorun/remote.sock`). If a proof shows one of them refused, that is the rule doing its job (F-056).
+- Kiro Crew keeps its own socket files inside its home folder (read in its code), which the gateway profile allows.
+- The nightly check's command is 3,562 characters long with this Mac's real paths. Whether Kiro Crew accepts a command that long is not known until P1.
+
+**Sealing, tried for real in both profiles:**
+
+| Try | Result |
+|---|---|
+| Reading, listing, looking at, writing, running, moving, removing or linking into `built/` | All refused, also for a folder that was moved there a moment ago |
+| A program a "build" left running, writing through a file it had opened before the move | **It worked**: a rename moves the same file. Every change by name from the folder it held open was refused (renaming, removing, linking, making a folder, changing permissions) |
+| A later job writing through a hard link made beforehand in a folder jobs may write | **It worked**, for the same reason |
+| The same two tries after the files are made anew | The sealed file still read as it was built, both times |
+| A build that makes a hard link to a file and then marks the file "locked" | Marking a file locked works inside the sandbox. The seal cannot put a new copy in a locked file's place, counts it and logs an error. A later job unlocked the file by its other name, wrote to it, and the sealed file was changed. **Open** (SPEC §6) |
+| How long making the files anew takes | 10,127 files and 590 MB: between 1.3 and 2.8 seconds |
+
+In passing: Node's "clone this file" way of copying answered "not supported" in the session that built the seal, so the seal makes plain copies.
+
+**The nightly check, fourteen lines:** it passes under the shipped gateway profile and fails by name on copies loosened in exactly one way (each list, the look at another program, `built/` listed, `built/` written). Run under the Milestone 2 gateway profile it passes too, because that profile already closes `built/`. All of this is the real `sandbox-exec` around the check's own command on a made-up home, not a real gateway.
+
+### What was measured: build credits
+
+| Try | Result |
+|---|---|
+| A job adding one line to Kiro Crew's usage file, before the fix | The figure was believed: 100,000 credits, the month closed, and no setting could open it again. A line of minus 4.6 cancelled a real figure to 0 |
+| The same after the fix (a figure is believed only up to 10 credits for each minute the agent ran) | Both ideas of the night were built, 12 credits were counted, all of it as an estimate, with a warning in the log. The minus line is not counted at all |
+| What is left to a job | It can still write that file (F-054). It can make the count too low, and make one try count for up to 10 credits a minute |
+| Real builds so far | 1.3 to 1.7 credits a minute |
+
+### What was measured: the real data folder by its other names
+
+- macOS has two more names for every folder: `/System/Volumes/Data<path>` and `/.vol/<device number>/<file number>`. Neither is a link. Asking for the real path of the first gives the same name back, and asking for the real path of the second fails although the folder can be looked at.
+- So Milestone 2's rule, which compared real paths as text, **let a rehearsal run on the real data folder** when it was named either way (tried on a made-up home folder).
+- The new rule compares what the disk says a folder is: its device number and its file number. It refused both spellings, also when the real folder had not been made yet. One file number on this Mac is too big for an ordinary number, so they are read as big integers.
+- The dashboard's demo and both new spikes use the same kind of check.
+
+### What was measured: the dashboard
+
+| Try | Result |
+|---|---|
+| A link written with `localhost` | The dashboard listens on `127.0.0.1` only. With a stand-in listening on the IPv6 address of the same name and port, both `curl` and a browser sent a `localhost` link, key and all, to the stand-in. Taking that address while ours was in use gave no error. So the dashboard writes its links with `127.0.0.1` |
+| `npm run dashboard:demo --play`, typed without the two dashes | npm keeps the option, and reads `--play` as four of its own one-letter switches run together (`-p -l -a -y`), with no warning. Left alone, `--filming` typed that way would have started the dashboard with every quote showing, and `--demo` would have opened the real data. The dashboard now looks for what npm leaves behind and refuses to start |
+| The request gate, over real HTTP | No key: 401. Another site's name in the request, also with the right key: 403. A request that is not a read: 405. A background request from another site, also with the cookie: 403. The key link: a redirect to the plain address. Listening on `127.0.0.1` only. No answer carries a header that lets another site read it |
+| A link clicked on another site's page, in a real browser | It opened the dashboard. That site's pictures, frames and background requests to the dashboard got nothing, before and after the browser held the key |
+| Node's own web server | It answers some requests by itself, before our code sees them (a request with no host, a malformed one, too many headers, one that is too slow), and leaves our safety headers off those answers unless told otherwise. It also drops a second host header without a word. All switched over to our own handling |
+| Every page in a browser, on invented data | Phone and desktop sizes, light and dark: no console error, nothing wider than the screen, no request left the Mac, and text contrast above the usual reading threshold on all 17 pages |
+| The invented night (`--play`) | 25 steps arrived over about 70 seconds with one page load and no error |
+| Real build output, read through the dashboard | The Oct 10 rehearsal's scratch folder read back with the figures recorded for it (see "Spike 12", above) |
+| The hostile test | Invented titles, notes and links full of markup and script addresses, on every page: nothing ran, nothing was linked |
+
+### What was measured: the morning
+
+All with the real deliver code, a real database and the real sandbox, and stand-ins for Bee and for the publisher.
+
+| Try | Result |
+|---|---|
+| An app sealed in `built/<id>` | Verified from there and delivered; the folder was not changed. Milestone 2's deliver code on the same folder: "The app's folder does not exist.", and a `🌙` to-do. (That is the reason for the first step of "Backing out" below) |
+| An app still in `workspaces/<id>` | Verified from there and delivered |
+| A push that ran into its time limit | `publish_failed`, no link, the reason ending "The push may have reached GitHub all the same, so the app may be public.", one `🌙` to-do |
+| Two failed ideas, and a second process that starts rebuilding one of them while Bee is being asked about the other | Old code: two `🌙` to-dos, one of them for an idea that was being built. New code: one |
+| A run killed outright while Bee is being asked | The mark was on disk. The next run asked for no to-do and closed the idea with the careful note |
+| Real `git`, stopped in the middle of a push to a stand-in repo | The stand-in got nothing, and the publisher still, rightly, says the push may be out. 15 runs of 15 |
+| The detector's evaluation and `.env` (a stand-in for Kiro, no credits) | Before: it ignored `.env` and used the default data folder. After: `.env`'s folder, and the environment's when both are given. With neither it still uses the default folder, `~/.overnight`, and nothing refuses that |
+
+### What the review round found
+
+Four independent reviews (the night clock; the builder and its sandbox; the morning and the listener; the day of the merge), then fixes, then a fifth check of the fixes. 23 findings in all.
+
+| Outcome | Count | Which |
+|---|---|---|
+| Fixed, and the fix holds under the reviewer's own reproduction | 10 | A sleep past the command's time limit; `status` promising a run the clock would not start; the port rule and `::ffff:127.0.0.1`; believing any figure in Kiro Crew's usage file; a slept build counted as 90 credits; a log line promising a second try that a second start does not get; two notes that said "told" or "pushed" when that was not known; the installer replacing the gateway's rules before it could refuse; the Power row; the dashboard promising builds that `status` said would not happen |
+| Partly fixed | 2 | A due run that never starts now shows in `status` and fails `preflight`, with two small cases left (SPEC §3). The seal now makes files anew, with the locked-file case left (SPEC §6) |
+| Not fixed when the round ended | 1 | Spike 11's last, deciding step passed when macOS's log could not be read and failed on another program's refusals. It was rewritten on Oct 12, after the round. As the script now stands, the step first proves the log was read (it makes a connection the profile certainly refuses and looks for it in what was read), counts only refusals made to this run's own programs, and prints Node's refused try at the system log's socket as "expected". The script's `check` mode has tried the rewritten step on harmless programs (the table of modes, above). The rewrite has not been through a real `p1` or `p2` |
+| Left for the integrator | 10 | Seven are this pass over the documents. The other three: the pass line "no socket refused" cannot be met by a Kiro CLI build (see the system log's socket, above); the detector's evaluation needs a scratch data folder named on its command in a clean clone; and the merge itself puts the new sandbox rules under part of that night's builds: Overnight's own `kirocrew` commands and the Kiro CLI builder load the rules from the repo on every run. (A Kiro Crew agent does not get them from the merge. It runs inside the gateway, which goes by its own copy of the rules until `install crew` is run again.) That last one is why P1 to P3 come before the merge |
+
+Tests on Oct 12, after the last round: 3,546 pass in 116 files, with typecheck and lint clean. One race test in the builder's safe-read tests (a link swapped in while the file is read) is a real flake. It failed once for a fixer and then passed 39 runs in a row; it failed again in one of the last checker's three whole runs. It fails in its clean-up, not in what it checks: the test stopped its helper program without waiting for it to be gone, and the helper could put a file back while the test's folder was being removed. Run alone it passed 8 times of 8. The fault is the test's, not that of the code it tests. It was fixed the same night: the test now waits until its helper is gone. Outside the test runner the old order (stop the helper, remove the folder at once) failed in 99 of 300 rounds and the new order in 0 of 300; the test file then passed 30 runs in a row, and the whole suite passed in full (3,546 of 3,546).
+
+### What became of Milestone 2's left-overs
+
+| Left over on Oct 10 | Milestone 3 |
+|---|---|
+| A build job can read the list of running programs and apps | Closed for the Kiro CLI builder. Accepted for Kiro Crew (F-053) |
+| A build job can connect to another program's socket file | Refused in both profiles |
+| A build job can connect to any local port | Only the dashboard's port is refused. The rest is accepted and written down (SPEC §9, limit 11) |
+| A Kiro Crew job can read and change Kiro Crew's own settings and secret | Unchanged and accepted (SPEC §9, limit 4) |
+| A Kiro Crew job can read, write and rename another idea's workspace | A finished build is sealed. A workspace in progress is still in reach |
+| A job can make a folder named `kirocrew...` in Kiro's agents folder | Left as it is: a job can already rewrite Kiro Crew's own agent files there |
+| `rehearse` could be pointed at the real data folder by an unusual spelling | Fixed |
+| A brand-new Kiro home cannot start an agent inside the sandbox (F-052) | No check was built. The README's set-up now makes the two Kiro settings commands a required step, and they create the files in question |
+| `git` and `mktemp -t` do not work inside the build sandboxes | Left as it is |
+| The morning's printed line did not say when a page was not seen live | Fixed |
+
+### Still to be proved for real
+
+**None of the following has happened.** Each is written here so that its result can be filled in beside it. The plan: daytime only, scratch data folders only, throwaway job names, a throwaway Kiro Crew home on another port, stop at the first failure. Budget: about 10 Kiro credits, and never past 20 without asking Henry.
+
+| Step | What | Credits | Result |
+|---|---|---|---|
+| P1 | Spike 11, `p1`: a throwaway gateway under the new rules answers; the fourteen-line check passes, and fails by name on a loosened copy; a command job is added, started, cancelled and removed by Overnight's own `kirocrew` commands under the new rules; `kiro-cli settings` answers inside the Kiro CLI profile | 0 | **Pending** |
+| P2 | Spike 11, `p2`: one one-line Kiro CLI chat inside its profile; one one-line Kiro Crew agent job that writes one file | about 0.5 | **Pending** |
+| P3 | Two rehearsal builds without publishing, on a scratch folder: one with Kiro Crew on the throwaway gateway, one with Kiro CLI. Both end "delivered"; `built/<id>` is there and `workspaces/<id>` is gone; the ledger has a measured row and an estimated row, and `status` shows both; a run with the ceiling set to 1 is refused before any agent starts; `build`, `deliver` and `build-now` are refused on that folder | 4 to 8 | **Pending** |
+| P4 | Spike 10, `run`: the real job templates under real launchd with throwaway names. A look at the clock each minute, one first-look record, exactly one start at the set minute, silence after. Then spike 10, `sitting`, with Henry: the power plug pulled and the lid closed across the build's time, and one late start a minute or two after the Mac is awake again. Then, by hand, the battery hold, which spike 10 does not look at. Overnight's sleep watch is not in spike 10's run either (both below the questions) | 0 | **Pending** |
+| P5 | A clean clone: `npm ci`, typecheck, lint, tests; the tests again under an empty made-up home folder; the README's commands as written; the two odd spellings of a real folder refused by `rehearse new`; the detector's evaluation once, with a scratch `OVERNIGHT_DATA_DIR` on the command | about 1 | **Pending** |
+
+Questions these steps are there to answer, none of them answered yet:
+- Do Overnight's own `kirocrew` commands, a Kiro Crew agent and a Kiro CLI chat work under the socket rule, the port rule, and (Kiro CLI) the process-list and app-list rules? Only version questions and one settings read have been tried.
+- Does Kiro Crew accept the longer check command?
+- Does Kiro Crew write usage lines for a run that was cancelled or timed out, and are they still there after the job is removed? Without them such a try is estimated from its time.
+- How regularly does macOS start a 60-second job, how soon after a wake, and does it start one in the brief wakes a sleeping Mac makes by itself? (The last part shows only if such a wake happens during the sitting.)
+- Is a real sleep seen by the sleep watch the way a frozen process was? (Not by spike 10 itself: see below.)
+- Does `caffeinate -i -s` keep this Mac awake on battery with the lid open? (Not by spike 10 itself: see below.)
+- Does `npm test` pass on a Mac with no Kiro, no GitHub CLI and no test browser?
+
+**What spike 10's sitting needs, and what it does not measure.** Found by the last check on Oct 12, by reading the script and this Mac's power settings. Nothing here has been run.
+- **The power plug has to be pulled before the lid is closed.** Plugged in, the running listener keeps this Mac awake with the lid closed: the first real night ran that way. With the plug in nothing would sleep, the build would start on time, and the sitting would end "NOT AS EXPECTED" as an ordinary run. The script's on-screen steps said only "close the lid" until Oct 12; they were changed that day to say what follows. For Henry, one step at a time:
+  1. Leave the Mac plugged in and wait until the window shows two lines "the build job looked at the clock".
+  2. Pull out the power plug and close the lid at once, before the time the window names. (Unplugged with the lid open, this Mac sleeps by itself after one idle minute, so the plug comes out only at that moment.)
+  3. Open the lid any time after the second time the window names, log in, and put the plug back.
+  4. Leave it open for five minutes. The Wi-Fi has to be back within about a minute of opening, or the line "within three minutes" can say NO for no deeper reason.
+- **It does not run Overnight's sleep watch.** The spike's build finds nothing approved and ends in under a second, so no run is going when the lid is closed. What the sitting shows is its line "(this script was frozen for N seconds: the Mac slept)": a timer inside a program comes late after a real sleep, which is the same sign the sleep watch goes by. That is as far as it goes. The watch itself on a real sleep stays to be shown.
+- **It does not hold the Mac awake or look at the battery.** That is a look of its own, by hand, with Henry: pull the plug, leave the lid open, run `/usr/bin/caffeinate -i -s /bin/sleep 300`, keep hands off for five minutes, then read `pmset -g log | grep -E " (Sleep|Wake|DarkWake) " | tail -5`. It passes when those five minutes hold no "Sleep" line. It only counts if `pmset -g assertions` shows no other program holding the Mac awake at the same time; the Claude app does that while a session is working.
+
+**The switch-over of the live system. Pending.** The live night jobs run Milestone 2's code on macOS's calendar, and the live listener keeps the Mac awake on mains power only. The plan, for a daytime with the Mac plugged in and no build or delivery running, only after P1 to P5:
+
+1. Merge into the live working copy. No `npm install` is needed: tried on a scratch copy without the link for the new dashboard package, where `status`, the demo, the typecheck and the dashboard's and core's tests all ran.
+2. `npx overnight status`. The first open with the new code adds the ledger table. The Night clock row should say both jobs are still on macOS's calendar.
+3. `scripts/install-agents.sh restart listen`. The listener's log should then say "keeping the Mac awake while this runs"; the old line was "keeping the Mac awake while plugged in".
+4. `scripts/install-agents.sh install crew`: the gateway's new copy of the sandbox rules.
+5. `scripts/install-agents.sh install build`, then `install deliver`. Not within a minute of either job's time.
+6. `npx overnight preflight`: thirteen ticks.
+7. `npx overnight status`: "Next build" shows tonight's time, and the Night clock row says both jobs check the time every minute.
+
+What is known about the hours between steps 1 and 5, from scratch copies with stand-ins: the old calendar jobs run the new code as plain `build` and `deliver`. That worked: two builds were made, sealed and counted, and nothing was written to the night clock. `preflight` in that state gives eleven ticks and two crosses (the jobs are still on the calendar; the gateway is behind another copy of the rules). And from the moment of the merge, Overnight's own `kirocrew` commands and the Kiro CLI builder run under the new sandbox rules, whatever the gateway job was installed with.
+
+**The first night on Overnight's own clock. Pending.** To read the next morning: one "night clock: starting" line with 0 minutes late in `build.log`, the same in `deliver.log`, and "Last build … on time" in `status`.
+
+**The dashboard on the real data folder, beside the running listener, with Henry at the screen. Pending.**
+
+### Backing out of Milestone 3
+
+Written from trials on scratch copies with the old code and the new side by side. It has not been needed on the real system. Do it in the daytime, with no build or delivery running, and do every step.
+
+1. **Move finished builds back to where the old code looks.** Move every folder in `<data>/built/` that is named exactly after an idea back to `<data>/workspaces/`. Do not move the folders named `<id>.old-<time>`, a folder named `<id>.sealing` (it is only there if a move was killed half-way), or the file `.overnight-probe-marker`. The reason, measured: with the old code, two good sealed builds both became `publish_failed` with "The app's folder does not exist.", and the wearer would have been told twice that an app could not be finished. After the folders were moved back, the old code delivered both. An idea whose publish failed and whose folder is in `built/` needs the same before the old `build-now` can publish it again (same code path; read, not run).
+2. **Check out the previous version of the code** in the live working copy.
+3. **Straight away, with the old installer:** `install build`, `install deliver`, `install crew`, `restart listen`. This must follow at once. Measured with only the code rolled back: the new job files start the old code with the if-due switch every minute, which it does not understand. Each start ends with exit code 2 and writes 52 lines (about 4 KB) to the job's `*.launchd.log`, about 12 MB a day for the two jobs, and nothing is built or delivered. The old code gives no warning: its `status` says the night jobs are installed and that an approved idea "will be built at the next build".
+4. **Check.** `scripts/install-agents.sh status build` shows "runs at: 01:00", and the last lines of `logs/build.launchd.log` are no longer the command's help text. Then `npx overnight preflight` (twelve checks in the old code).
+5. **Remember what the old code brings back.** The night jobs are on macOS's calendar again, which goes by the zone the Mac had when it last restarted: if the zone has changed since, restart the Mac once. The listener keeps the Mac awake on mains power only. `install crew` puts the Milestone 2 sandbox rules back in the gateway's copy.
+
+What can stay as it is: the ledger table, the night clock's stored values, and the `built/` and `sandbox/` folders. The old code ignores them (measured: it opened, read and wrote a version 4 file, built and delivered on it, and left the version at 4).
 
 ## Decisions that came out of the spikes
 
 1. **How the nightly Kiro Crew job is allowed to work** (finding 2). **Decided on Oct 9:** build jobs get `--approval-mode auto`, Crew's documented setting for unattended jobs. (The plan to also raise Crew's sandbox to `strict` was overtaken by decision 2.) (The alternative, leaving every Crew setting alone and having Crew only start our own `kiro-cli` builder, was the weaker Kiro Crew story and no safer.)
 2. **Keeping logins away from the builder** (finding 3). **Decided on Oct 10**, after experiments A and B above: the whole Kiro Crew gateway runs inside Overnight's own sandbox, Crew's own sandbox setting is switched off because the two can't be stacked, and a probe before each night's builds must show the GitHub login, the Bee login and the transcripts are unreachable or nothing is built. The build agent is only ever given `brief.md`, with no quote and no facts.
-3. **Keeping the Mac awake at 1:00 a.m.** It's a MacBook that sleeps after a minute of idle. **Agreed on Oct 9:** Henry keeps it plugged in with the lid open on build nights, and the background jobs hold it awake while they run.
+3. **Keeping the Mac awake at 1:00 a.m.** It's a MacBook that sleeps after a minute of idle. **Agreed on Oct 9:** Henry keeps it plugged in with the lid open on build nights, and the background jobs hold it awake while they run. (Widened on Oct 11, decision 9 below.)
 4. **Kiro content sharing. Decided on Oct 9: switched off.** By default Kiro may use prompts from individual accounts to improve its service, and the detector will send transcript text. Both settings (`codeWhisperer.shareCodeWhispererContentWithAWS` and `telemetry.enabled`) are now `false` on this Mac, in the default settings folder and in the detector's own `KIRO_HOME`. Any new `KIRO_HOME` we create needs the same two settings before real text goes through it.
 
 Four more came out of the Milestone 2 fix rounds, all decided on Oct 10 while planning the last round:
 
 5. **A stopped build gets one more try.** A build that was stopped or cut off (not one that failed) is built once more by the next nightly run. The wearer is told "couldn't finish" only when that second start also ends badly. The rule is in one place, `packages/core/src/build-retry.ts`.
 6. **Pushed but not seen live still counts as published.** If the push to GitHub went through but the page was not seen serving the new app within the 10-minute wait, the idea is recorded as published and announced as usual, with a note saying it was not confirmed. (The page is not looked at again later; that is a known gap.)
-7. **The build sandboxes refuse reading by default.** Not only writing: nothing in the home folder can be read or run except a short list, and build jobs get a temporary folder of their own. One exception is built in for Kiro Crew, because it will not start an agent otherwise: a job can list the names directly inside the home folder (F-042). Whether to keep that, or to make Kiro CLI the first builder instead, is still open.
+7. **The build sandboxes refuse reading by default.** Not only writing: nothing in the home folder can be read or run except a short list, and build jobs get a temporary folder of their own. One exception is built in for Kiro Crew, because it will not start an agent otherwise: a job can list the names directly inside the home folder (F-042). That was accepted on Oct 10, and Kiro Crew stays the first builder (SPEC §9, limit 5).
 8. **Rehearsals are a real command.** `overnight rehearse` tries the night and the morning on an invented idea. It can never reach Bee, and it refuses the real data folder.
+
+Four more are Henry's, made on Oct 11 while Milestone 3 was being designed. The reasons, and the design decisions that followed, are in "Milestone 3" above:
+
+9. **On battery, with the lid open, Overnight keeps the Mac awake**, so that it keeps listening and can build at night. (So there is no "builds only on mains power" rule, and a run the Mac sleeps through is stopped; a build on its first start is then tried once more.)
+10. **A late app buzzes when it is ready, never between 11 p.m. and 7 a.m.** This is the alarm rule Milestone 2 already had; nothing was changed.
+11. **The monthly ceiling on build credits is 400.** It is silent on the wrist; `overnight status` says why nothing is built.
+12. **The dashboard** opens from a link with a key that is new at each start. The lines Bee heard are never shown, in any mode. An idea's quote is shown by default and hidden by `--filming`.

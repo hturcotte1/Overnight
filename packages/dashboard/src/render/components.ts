@@ -270,6 +270,8 @@ export function stateTime(idea: DashIdea): string {
 export function buildSeconds(idea: DashIdea, facts: BuildFacts | undefined): number | null {
   const logged = facts?.finished?.seconds;
   if (typeof logged === "number" && Number.isFinite(logged) && logged >= 0) return logged;
+  // The Mac slept during this build: the time between its start and its end is mostly sleep.
+  if (facts !== undefined && facts.slept !== null) return null;
   if (idea.buildStartedAt === null || idea.builtAt === null) return null;
   const ms = Date.parse(idea.builtAt) - Date.parse(idea.buildStartedAt);
   return Number.isFinite(ms) && ms >= 0 ? ms / 1000 : null;

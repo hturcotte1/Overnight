@@ -631,3 +631,51 @@ Severity scale: **low** (cosmetic or a few minutes lost), **medium** (needed a w
 - **Severity:** low for us, medium for anyone sandboxing a fresh install.
 - **Workaround:** Run one Kiro command outside the sandbox first (`kiro-cli settings telemetry.enabled`), which creates both files.
 - **Suggestion:** Open the lock file read-only when only reading, or keep it somewhere meant for run-time files rather than beside the settings.
+
+## F-053: Kiro Crew asks macOS for its jobs' process groups, so the list of running programs cannot be hidden from its jobs
+
+- **Tool:** Kiro Crew 0.8.0
+- **Date:** 2026-10-11
+- **Task:** Hide the list of running programs (the name and number of everything running on the Mac) from a build job, the way our morning sandbox already does.
+- **Steps:** Tried the rule that hides it, `(deny sysctl-read (sysctl-name-prefix "kern.proc."))`, in throwaway sandboxes around macOS's own tools, and then in our Kiro CLI build profile on a made-up home folder. Then read how Kiro Crew's installed code finds the processes of its jobs (names of its functions only).
+- **Expected:** The rule hides other programs, and leaves a program free to ask about itself and about what it started.
+- **Actual:** Half of that. With the rule, a program's own child is still answered when asked for by its number, but the program's own process *group* is refused. Kiro Crew's code asks macOS for the members of a process group to look after its jobs, and ends jobs by process group. So the rule could not go into the profile the whole gateway runs in. We left it out on the strength of that reading: we did not start a gateway under the rule to see what breaks.
+- **Severity:** medium. One line of "what a build job can still reach" stays open with Kiro Crew for this reason alone.
+- **Workaround:** The rule is in the Kiro CLI builder's profile only. With Kiro Crew a job can still see which programs are running (never their command lines), and SPEC §9 says so.
+- **Suggestion:** Have the gateway follow its jobs by the process numbers it was handed when it started them, without asking the system-wide process table. Or write down exactly which questions the gateway asks of macOS, so that an outer sandbox can allow those and nothing else.
+
+## F-054: Kiro Crew's usage file sits where its own jobs can write it
+
+- **Tool:** Kiro Crew 0.8.0
+- **Date:** 2026-10-11
+- **Task:** Count what each build cost from Kiro Crew's own record, and stop building for the month at a ceiling.
+- **Steps:** After each run we read that job's credits from `<Kiro Crew's home>/usage/tokens/<day>.jsonl`. Then, from inside the sandbox a job runs in (our gateway profile, on a made-up home folder), a stand-in "job" added one line to that file.
+- **Expected:** A record of spend that the thing being measured cannot change.
+- **Actual:** The line was added without complaint. The usage file is inside Kiro Crew's own home folder, and a job has to be able to write there. One added line saying 100,000 credits was read back as that job's cost and closed our month; a line with a minus figure cancelled a real figure down to 0. We run Kiro Crew with its own sandbox off (F-034), so this was measured under ours. Under Kiro Crew's own sandbox a job could write anywhere in the home folder when we measured that (F-033), so we expect the same there, but did not try it. Also not known yet: whether Kiro Crew writes usage lines at all for a run that was cancelled or ran out of time.
+- **Severity:** medium for anything that budgets or bills from that file.
+- **Workaround:** We believe Kiro Crew's figure only when the try could have used it: at most 10 credits for each minute the agent ran, and never a minus figure. Otherwise we count our own estimate of 2 credits a minute, with a warning in the log. A job can still make the count too low; our limit of two builds a night bounds what is really spent.
+- **Suggestion:** Keep usage records where jobs cannot write, or have the gateway hold them and hand them out through its local web address. A `kirocrew usage --job <id> --json` command would save every caller from reading the files.
+
+## F-055: Playwright's `page.waitForFunction("...")` fails on a page with a strict content-security policy
+
+- **Tool:** Playwright 1.64.0, used as a library from our test runner
+- **Date:** 2026-10-11
+- **Task:** Test our dashboard's own page script in the headless browser. The dashboard's pages are served with a policy that forbids running text as code (`script-src 'self'`, no `unsafe-eval`).
+- **Steps:** `await page.waitForFunction("<a condition written as text>")` on such a page.
+- **Expected:** It works like `page.evaluate("<the same text>")`, which does work under that policy.
+- **Actual:** As soon as it has to try a second time it fails with an `EvalError` that names `unsafe-eval`: the text is run with `eval` inside the page.
+- **Severity:** low. A few minutes lost.
+- **Workaround:** Wait from the test's side instead: `expect.poll(() => page.evaluate(...))`.
+- **Suggestion:** Run a text condition the way `evaluate` runs one, or say in the docs that `waitForFunction` with text needs `unsafe-eval`.
+
+## F-056: Two socket files of Kiro's sit in the user's temporary folder, and nothing says what they are for
+
+- **Tool:** Kiro CLI 2.29.0 (the desktop app it installs, see F-015)
+- **Date:** 2026-10-11
+- **Task:** Decide which socket files a sandboxed build must be able to connect to, and which it must never reach. (A socket file is how one program on a Mac talks to another without a port.)
+- **Steps:** Listed the socket files in this account's usual temporary folder: `find "$(getconf DARWIN_USER_TEMP_DIR)" -maxdepth 3 -type s`.
+- **Expected:** None of Kiro's, or documented ones.
+- **Actual:** Two, in a folder named `kirorun`: `desktop.sock` and `remote.sock`. By the name they belong to Kiro's desktop app, which starts at login and runs outside our sandbox; we did not check which process listens on them, and we found nothing written about what they accept. Whether a headless `kiro-cli chat` or a Kiro Crew agent needs them is not known yet: under our new rule only version questions and one settings read have been tried. Before Milestone 3 nothing in our build sandbox would have stopped a build job from connecting to them, because rules about files do not cover connecting to a socket file (found on Oct 10; not tried against these two).
+- **Severity:** low so far. It becomes medium if a headless chat turns out to need one of them: a socket that a program outside the sandbox listens on is a way out of the sandbox.
+- **Workaround:** Our build sandboxes now refuse every socket file outside the folders a build may write, these two included. If a proof run shows one of them refused, we read that as the rule working, not as a path to add to the list.
+- **Suggestion:** Say in the docs what the desktop app's socket files are for and whether headless `kiro-cli` needs them. Offer a way to run headless chats that needs nothing from the desktop app.

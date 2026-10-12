@@ -13,6 +13,8 @@
 //   - A run opens at a run-start line and closes at the next run-end or run-start line.
 //   - One build runs at a time, so a sign-in or sandbox line, which names no idea, belongs to the
 //     idea whose "build started" came last and has not ended.
+//   - The line that says the Mac slept names no idea either (a run by hand's does). It is about
+//     the build that was going when it was written, and about the run.
 //   - From a line, only numbers, yes/no values, ids and a few fixed words are taken.
 import { HAND_RUN_NAMES, LOG_MESSAGES, matchLogMessage, SKIPPED_VALUES } from "../log-messages.ts";
 import { IDEA_ID } from "../types.ts";
@@ -66,7 +68,7 @@ export function readBuildLog(lines: readonly LogLine[]): { runs: BuildRun[]; byI
   let startedHere = new Set<string>();
 
   const start = (command: RunCommand, at: string): BuildRun => {
-    const run: BuildRun = { command, startedAt: at, finishedAt: null, waiting: null, taking: null, built: null, failed: null, paused: false, nothingApproved: false, sandboxCheck: null, ideaIds: [] };
+    const run: BuildRun = { command, startedAt: at, finishedAt: null, waiting: null, taking: null, built: null, failed: null, paused: false, nothingApproved: false, slept: false, sandboxCheck: null, ideaIds: [] };
     runs.push(run);
     open = run;
     current = null;
@@ -78,7 +80,7 @@ export function readBuildLog(lines: readonly LogLine[]): { runs: BuildRun[]; byI
     const run = runAt(at);
     addOnce(run.ideaIds, id);
     startedHere.add(id);
-    const facts: BuildFacts = { startedAt: at, by: run.command, signIn: null, sandboxCheck: null, agentStarted: null, fellBack: null, finished: null };
+    const facts: BuildFacts = { startedAt: at, by: run.command, signIn: null, sandboxCheck: null, agentStarted: null, fellBack: null, finished: null, slept: null, sealed: null };
     byIdea.set(id, facts);
     return facts;
   };
@@ -126,8 +128,26 @@ export function readBuildLog(lines: readonly LogLine[]): { runs: BuildRun[]; byI
   const finish = (line: LogLine, ok: boolean): void => {
     const facts = factsOf(line);
     if (facts === null) return;
-    facts.finished = { at: line.at, ok, seconds: amount(line.fields, "seconds"), credits: ok ? amount(line.fields, "credits") : null };
+    // The line's seconds run from the build's start to its end by the wall clock. For a build the
+    // Mac slept through that is mostly sleep, so it is not passed on as a build time.
+    facts.finished = { at: line.at, ok, seconds: facts.slept === null ? amount(line.fields, "seconds") : null, credits: ok ? amount(line.fields, "credits") : null };
     if (current === (ideaIdOf(line) ?? current)) current = null;
+  };
+  /**
+   * The Mac slept during the run. It is said of the run that is open, and of the build that was
+   * going, if one was. It opens no run of its own: a command that notices the sleep before it has
+   * started anything writes this line and nothing else.
+   */
+  const slept = (line: LogLine): void => {
+    const run = open;
+    if (run !== null) run.slept = true;
+    const facts = current === null ? undefined : byIdea.get(current);
+    if (facts !== undefined) facts.slept = { at: line.at };
+  };
+  /** Where a finished build was left. These lines name their idea, and come after its "build finished". */
+  const seal = (line: LogLine, ok: boolean, moved: boolean): void => {
+    const facts = factsOf(line);
+    if (facts !== null) facts.sealed = { at: line.at, ok, moved, files: moved && !ok ? amount(line.fields, "files") : null };
   };
 
   for (const line of lines) {
@@ -201,6 +221,18 @@ export function readBuildLog(lines: readonly LogLine[]): { runs: BuildRun[]; byI
       case "ideaFailed":
         finish(line, false);
         break;
+      case "sealed":
+        seal(line, true, true);
+        break;
+      case "sealedPartly":
+        seal(line, false, true);
+        break;
+      case "notSealed":
+        seal(line, false, false);
+        break;
+      case "buildSlept":
+        slept(line);
+        break;
       case "buildRunEnd": {
         const run = end("build", line);
         if (run === null) break;
@@ -241,7 +273,7 @@ export function readDeliverLog(lines: readonly LogLine[]): { runs: DeliverRun[];
   let open: DeliverRun | null = null;
 
   const start = (command: RunCommand, at: string): DeliverRun => {
-    const run: DeliverRun = { command, startedAt: at, finishedAt: null, delivered: null, failed: null, notified: null, ideaIds: [] };
+    const run: DeliverRun = { command, startedAt: at, finishedAt: null, delivered: null, failed: null, notified: null, slept: false, ideaIds: [] };
     runs.push(run);
     open = run;
     return run;
@@ -254,6 +286,14 @@ export function readDeliverLog(lines: readonly LogLine[]): { runs: DeliverRun[];
     run.finishedAt = line.at;
     open = null;
     return run;
+  };
+  /**
+   * The Mac slept during the run. Said of the run that is open, and of no idea: a delivery that
+   * was stopped leaves its idea as it was, for the next run. It opens no run of its own.
+   */
+  const slept = (): void => {
+    const run = open;
+    if (run !== null) run.slept = true;
   };
   /** The idea's ticks so far, or a new set. `afresh`: this line is the first step of a new delivery. */
   const factsOf = (line: LogLine, afresh = false): DeliverFacts | null => {
@@ -321,6 +361,9 @@ export function readDeliverLog(lines: readonly LogLine[]): { runs: DeliverRun[];
         if (facts !== null) facts.fact = { at: line.at };
         break;
       }
+      case "deliverSlept":
+        slept();
+        break;
       case "deliverRunEnd": {
         const run = end("build", line);
         if (run === null) break;

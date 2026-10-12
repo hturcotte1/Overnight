@@ -196,6 +196,7 @@ describe("public/app.css and public/icon.svg", () => {
     const delivered = sc.ideas.packing;
     const extras = fakeExtras({ report: fakeReport(), shots: { phone: true, desktop: true }, brief: { text: "a brief", cut: true }, notes: { text: "notes", cut: false } });
     const failedStory = fakeStory(sc.ideas.baleYield, { hint: "To try again, ask Claude Code.", checks: [{ key: "sandbox", label: "Sandbox check failed", status: "failed", detail: null, since: null }] });
+    const cutShortStory = fakeStory(sc.ideas.cutShort, { checks: [{ key: "agent", label: "Kiro Crew was stopped", status: "waiting", detail: "the Mac went to sleep", since: null }] });
     const pages = [
       renderDocument(renderToday(sc.s, sc.hero, sc.line, sc.lastNight, sc.queue, sc.stories, sc.c, sc.thumbs), fakeChrome({ paused: true, problem: "busy" })),
       renderDocument(renderToday(fakeSnapshot({ paused: true }), null, { over: "Today", before: "No ideas yet", title: null, after: "" }, null, { ...sc.queue, paused: true, rows: [] }, new Map(), sc.c), fakeChrome({ filming: true, running: { listener: false, build: null, deliver: null } })),
@@ -204,6 +205,7 @@ describe("public/app.css and public/icon.svg", () => {
       renderDocument(renderIdeas(sc.s, sc.stories, sc.thumbs, sc.c), fakeChrome({ current: "ideas" })),
       renderDocument(renderIdea(sc.s, delivered, fakeStory(delivered), extras, fakeEvents(delivered, ["heard", "asked"]), sc.c), fakeChrome({ current: "ideas" })),
       renderDocument(renderIdea(sc.s, sc.ideas.baleYield, failedStory, fakeExtras({ notes: "filming" }), [], fakeContext({ filming: { on: true, showQuoteFor: new Set() } })), fakeChrome({ current: "ideas" })),
+      renderDocument(renderIdea(sc.s, sc.ideas.cutShort, cutShortStory, fakeExtras(), [], sc.c), fakeChrome({ current: "ideas" })),
       renderDocument(renderIdea(sc.s, { ...delivered, quote: { shown: false, why: "filming" }, publishedUrl: "http://example.invalid/" }, fakeStory(delivered), fakeExtras(), [], sc.c), fakeChrome({ current: "ideas" })),
       renderDocument(renderNights(sc.nights, sc.stories, sc.c), fakeChrome({ current: "nights" })),
       renderDocument(renderNights([], sc.stories, sc.c), fakeChrome({ current: "nights" })),
@@ -214,6 +216,8 @@ describe("public/app.css and public/icon.svg", () => {
     expect(used.size).toBeGreaterThan(80);
     const unstyled = Array.from(used).filter((name) => !new RegExp(`\\.${name}(?![\\w-])`).test(css));
     expect(unstyled).toEqual([]);
+    // Every kind of tick and of step the story can hand over was on those pages.
+    for (const kind of ["check--done", "check--active", "check--todo", "check--failed", "check--waiting", "step--waiting"]) expect(used.has(kind), kind).toBe(true);
   });
 
   it("has a tab icon with nothing in it but two shapes", () => {

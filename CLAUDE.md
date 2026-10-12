@@ -55,7 +55,8 @@ Overnight hears app ideas through Bee (Apple Watch). It asks on the wrist whethe
 
 - TypeScript (strict), Node 22.18+ (we use Node 24 LTS), ESM, npm workspaces
 - SQLite via better-sqlite3; zod for every model output and every config value
-- Tests: vitest. Browser smoke tests: Playwright.
+- Tests: vitest. Browser smoke tests: Playwright. (The dashboard's browser tests are skipped when Playwright's headless browser is not installed.)
+- Dashboard: a small Node web server with no framework. It makes each page on the server from a read-only look at the data.
 - Detector runs through Kiro headless (`kiro-cli chat --no-interactive` with the no-tools `overnight-detector` agent). Its prompt goes in on standard input, never as a command-line argument, which other programs could read.
 - Publishing: GitHub Pages via the GitHub CLI (`gh`) login
 - Times stored in UTC, shown in America/Boise
@@ -65,26 +66,39 @@ Overnight hears app ideas through Bee (Apple Watch). It asks on the wrist whethe
 Built and working (Milestones 0 and 1):
 
 - `npm install` · `npm test` · `npm run typecheck` · `npm run lint`
-- `npm run eval:detector`: detector golden set (precision ≥ 0.85, recall ≥ 0.7). Uses about 1 Kiro credit.
-- `npx overnight listen`: the always-on listener (one per data folder)
+- `npm run eval:detector`: detector golden set (precision ≥ 0.85, recall ≥ 0.7). Uses about 1 Kiro credit. It uses the data folder `.env` names. With no `.env` and no `OVERNIGHT_DATA_DIR` on the command it uses `~/.overnight`, and nothing refuses that.
+- `npx overnight listen`: the always-on listener (one per data folder). Since Milestone 3 it asks macOS to keep the Mac awake on battery too, while the lid is open. (Not yet tried on battery, and the live listener only does it once it has been restarted with this code.)
 - `npx overnight status [--json] [--check]` · `npx overnight ideas [--json] [--all]`
 - `npx overnight pause|resume`: Overnight starts paused (quiet mode); `resume` turns asking on
 - `npx overnight queue --approved --json`: the approved ideas waiting for a build (the nightly build reads the database itself)
 - `node packages/bee/src/smoke.ts`: read-only check that Bee is reachable and logged in
-- `node spikes/<name>.ts`: the spikes (see `docs/spikes.md`)
+- `node spikes/<name>.ts`: the spikes (see `docs/spikes.md`). Spikes 10 and 11 take a mode and a scratch folder; `node spikes/12-sqlite-read-only.ts` needs no Bee, no Kiro and no data folder.
 
-Built in Milestone 2. Tests pass; the rehearsal and the first real night are still pending (SPEC.md §10):
+Built in Milestone 2 and hardened in Milestone 3. The rehearsal (Oct 10) and the first real night (Oct 10 to 11) worked. What Milestone 3 changed passes its tests; its proofs on the real tools, and moving the live jobs over to it, are still pending (SPEC.md §10):
 
-- `npx overnight build`: tonight's builds. The `build` job runs it at `BUILD_TIME`.
-- `npx overnight deliver`: the morning: test each build in the sandbox, publish, tell the wearer. The `deliver` job runs it 30 minutes before `DELIVER_TIME`.
+- `npx overnight build [--if-due]`: tonight's builds, now. With `--if-due` it asks Overnight's own clock first and does nothing unless a build is due. The `build` job runs it that way every minute, so the build starts at `BUILD_TIME`, at most once a day. Nothing is built while paused, or once the month's `MAX_BUILD_CREDITS_PER_MONTH` is used up.
+- `npx overnight deliver [--if-due]`: the morning, now: test each build in the sandbox, publish, tell the wearer. The `deliver` job runs it with `--if-due` every minute; the morning starts 30 minutes before `DELIVER_TIME`.
+- `npx overnight build --from-now` · `npx overnight deliver --from-now`: start that job's clock from now, so nothing that was due before now is run. The installer uses these; there is seldom a reason to run one by hand.
 - `npx overnight build-now <ideaId>`: build and deliver one approved idea right away. It uses the real Bee: in the daytime the wrist buzzes two minutes later.
-- `npx overnight preflight`: twelve checks of what tonight needs, each with its fix. Exit code 0 only if all pass. Changes nothing.
-- `OVERNIGHT_DATA_DIR=<scratch folder> npx overnight rehearse new "<title>" "<pitch>"`, then `... rehearse run <ideaId> [--no-publish]`: try the night and the morning on an invented idea. Bee is always a stand-in, and the real data folder is refused. This is the way to test the pipeline; never point a test at `~/.overnight`.
+- `npx overnight preflight`: thirteen checks of what tonight needs, each with its fix. Exit code 0 only if all pass. Changes nothing.
+- `OVERNIGHT_DATA_DIR=<scratch folder> npx overnight rehearse new "<title>" "<pitch>"`, then `... rehearse run <ideaId> [--no-publish]`: try the night and the morning on an invented idea. Bee is always a stand-in, and the real data folder is refused, however it is spelled. This is the way to test the pipeline; never point a test at `~/.overnight`. In turn `listen`, `build`, `deliver` and `build-now` refuse a data folder that holds a rehearsal idea.
 - `scripts/install-agents.sh install|uninstall|restart|status [listen|crew|build|deliver]`: the four launchd background jobs (`crew` is the Kiro Crew gateway). **Always name the job.** With none named, `install` and `restart` act on all four, which restarts the live listener.
 
-Planned, not built yet:
+Before touching the night jobs, know these four things:
 
-- `npm run dashboard` → http://localhost:4321
+- **Installing a night job starts its clock from now.** `install build` and `install deliver` count today's time as handled, so a run that was still due is skipped and the first run is at the job's next time. (`restart` leaves the clock alone.) Run both after changing `TZ`, `BUILD_TIME` or `DELIVER_TIME`.
+- **Never install one within a minute of the build time or the deliver time** (30 minutes before `DELIVER_TIME`): that night's run could be skipped or cut off. Both refuse while that job is at work.
+- **If `preflight` says a night job has not checked the time, wait two minutes and run `preflight` again before reinstalling anything.** A Mac that has only just woken shows exactly that for a minute or two, and reinstalling would skip a run that is still due.
+- **The night jobs run the code in the working copy the installer was run from**, and on Henry's Mac that is this repo's main working copy. So build new work in a second working copy (a git worktree), prove it there, and merge. In the second copy, never run the installer's `install`, `uninstall` or `restart`, and put `OVERNIGHT_DATA_DIR=<scratch folder>` on every command: a new working copy has no `.env`, so a bare command would open the real `~/.overnight`.
+
+Built in Milestone 3 (tests pass; it has not yet been looked at on the real data folder, SPEC.md §8):
+
+- `npm run dashboard`: the dashboard, a web page on this Mac that only reads, on port 4321. It prints a link with a key in it (`http://127.0.0.1:4321/?key=...`); the page opens only from that link, so give Henry the link. Stop it with Ctrl-C.
+- `npm run dashboard:filming`: the same with what was said hidden (every quote, the ideas nobody approved, the build notes). `npm run dashboard -- --filming --show-quote <ideaId>` lets one idea's quote through.
+- `npm run dashboard:demo`: the same pages on invented data in a throwaway folder. Add `-- --play` to have an invented night tick through, `-- --port <n>` for another port. This is the way to try the dashboard or to work on it.
+- Options go after the two dashes (`npm run dashboard -- --filming`). Typed before them npm keeps them, and the dashboard refuses to start rather than start without them. `npm run dashboard -- --help` lists them.
+- The plain dashboard shows real quotes. In a coding session use the demo, or a scratch folder (`OVERNIGHT_DATA_DIR=<scratch folder> npm run dashboard`), unless Henry is at the screen and asked for it.
+- It only reads: outside `packages/dashboard/src/demo` nothing in that package writes a file or opens a database for writing, and `packages/dashboard/test/read-only.test.ts` fails if that changes.
 
 ## Code style
 

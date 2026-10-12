@@ -40,6 +40,14 @@ export interface RehearsalFolderFacts {
 /** Why a rehearsal is not for the real folder. Every refusal ends with it. */
 export const REHEARSAL_WHY = "a test idea left in the real database would be picked up by the real nightly jobs";
 
+/**
+ * The example in a refusal. It only shows the shape of the command: any folder that is not a real
+ * data folder is taken. A folder under /private/tmp, like this one, has not held a real build
+ * yet. Inside both build sandboxes harmless commands could read a brief and write in the
+ * workspace and in the build's temporary folder there (measured Oct 12), and that is all that is
+ * known. The rehearsals that were run for real used a folder of their own in the home folder
+ * (README, "Rehearsing"), and spikes/11-hardening-proof.ts takes no other kind.
+ */
 const EXAMPLE = "OVERNIGHT_DATA_DIR=/private/tmp/overnight-rehearsal npx overnight rehearse ...";
 
 /** "~" and "~/x" the way core's config reads them. */

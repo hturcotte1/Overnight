@@ -4,7 +4,7 @@
 // It changes nothing: every check only looks. (The one check that does more than look is the
 // sandbox probe, which is the builder's own: it adds a zero-credit Kiro Crew job, reads the
 // counts and marks that job writes, and removes the job again. It is not made while a build is
-// running on the same data folder: the two would get in each other's way, and that build made
+// running on the same data folder: the two would get in each other's way, and that build makes
 // the same check before its first Kiro Crew build.)
 //
 // A stop signal (Ctrl-C) ends it: the checks not yet made are skipped, and the sandbox probe, if
@@ -266,10 +266,11 @@ export async function preflight(deps: PreflightDeps): Promise<number> {
         if (mode === "crew") return pass("No sandbox probe in this mode (BUILD_SANDBOX=crew: Kiro Crew's own sandbox, which is not probed).");
         if (gateway.state !== "pass") return unchecked(question, "the probe is a Kiro Crew job, and the gateway is not running");
         // The probe uses one job name and one results folder. A build that is running may be using
-        // them this minute, and it made this same check before its first Kiro Crew build.
+        // them this minute, and it makes this same check before its first Kiro Crew build.
         const building = probes.buildRunning();
         if (building !== false) {
-          return unchecked(question, building === null ? "could not tell whether a build is running right now, and the check must not get in its way" : "a build is running on this data folder right now, and the check would get in its way. That build made the same check itself: see logs/build.log");
+          // "Makes", not "made": the build that is running may only just have begun, and one with nothing to build with Kiro Crew never gets that far.
+          return unchecked(question, building === null ? "could not tell whether a build is running right now, and the check must not get in its way" : "a build is running on this data folder right now, and the check would get in its way. That build makes the same check itself before it builds anything with Kiro Crew: see logs/build.log");
         }
         const result = await probes.sandboxProbe(signal);
         return result.ok
@@ -334,7 +335,7 @@ export async function preflight(deps: PreflightDeps): Promise<number> {
           return fail(`The ${said}`, `${installCommand(job)}   (that starts the ${job} clock from now)`);
         }
       }
-      // Awake means: asked the clock moments ago, or is running right now (a job that is running does not ask).
+      // Awake means: asked the clock moments ago, or its lock is held right now (a job that is running does not ask).
       const lockHeld = { build: probes.nightJobRunning("build"), deliver: probes.nightJobRunning("deliver") };
       const running = CLOCKED_JOBS.filter((job) => lockHeld[job] === true);
       const checkedAt = { build: readCheckedAt(store, "build"), deliver: readCheckedAt(store, "deliver") };
@@ -348,9 +349,11 @@ export async function preflight(deps: PreflightDeps): Promise<number> {
       if (stuck.length > 0) return fail(notStartingText(stuck, now, config), notStartingFix(stuck));
       const ownTime = `The build and deliver jobs wake every minute and go by Overnight's own clock (${config.timeZone}).`;
       if (running.length === 0) return pass(`${ownTime} Both checked the time in the last ${FRESH_MINUTES} minutes.`);
-      if (running.length === CLOCKED_JOBS.length) return pass(`${ownTime} Both are running right now.`);
+      // A held lock says that a build (or a delivery) is running on this data folder, not who
+      // started it: the job itself, a build-now or a run by hand. So that is all the line says.
+      if (running.length === CLOCKED_JOBS.length) return pass(`${ownTime} A build and a delivery are running right now.`);
       const other = CLOCKED_JOBS.find((job) => !running.includes(job));
-      return pass(`${ownTime} The ${running[0]} job is running right now, and the ${other} job checked the time in the last ${FRESH_MINUTES} minutes.`);
+      return pass(`${ownTime} ${running[0] === "build" ? "A build" : "A delivery"} is running right now, and the ${other} job checked the time in the last ${FRESH_MINUTES} minutes.`);
     });
 
     await check("Was the gateway job installed for this build sandbox?", () => {

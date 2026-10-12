@@ -20,6 +20,8 @@ const B = "idea_20261010_bbbb2222";
 const START = Date.parse("2026-10-11T07:00:00.000Z");
 const SANDBOX_PASSED = `${M.sandboxPassed.text}: the Keychain, Bee and the rest are out of reach of a job`;
 const SANDBOX_FAILED = `${M.sandboxFailed.text}: nothing will be built with Kiro Crew`;
+/** The line a command writes when it finds the Mac slept during its run: the known start, then what follows for that command (cli, sleep-watch.ts). */
+const SLEPT = { build: `${M.buildSlept.text}. A build that was on its first start is tried once more on a later night`, deliver: `${M.deliverSlept.text}. What was not delivered waits for the next run`, byHand: `${M.buildSlept.text}. Running the same command again carries on from there` };
 
 let scratch: string;
 let seconds: number;
@@ -67,7 +69,7 @@ describe("build.log", () => {
 
     const { runs, byIdea } = readBuildLog(lines("build"));
     expect(runs).toEqual([
-      { command: "build", startedAt: t(0), finishedAt: t(12), waiting: 3, taking: 2, built: 2, failed: 0, paused: false, nothingApproved: false, sandboxCheck: { at: t(4), ok: true, ms: 7100, reused: false }, ideaIds: [A, B] },
+      { command: "build", startedAt: t(0), finishedAt: t(12), waiting: 3, taking: 2, built: 2, failed: 0, paused: false, nothingApproved: false, slept: false, sandboxCheck: { at: t(4), ok: true, ms: 7100, reused: false }, ideaIds: [A, B] },
     ]);
     expect(byIdea.get(A)).toEqual({
       startedAt: t(2),
@@ -77,6 +79,8 @@ describe("build.log", () => {
       agentStarted: { at: t(5), backend: "kiro-crew" },
       fellBack: null,
       finished: { at: t(6), ok: true, seconds: 160, credits: 4.59 },
+      slept: null,
+      sealed: null,
     });
     expect(byIdea.get(B)).toEqual({
       startedAt: t(7),
@@ -86,6 +90,8 @@ describe("build.log", () => {
       agentStarted: { at: t(9), backend: "kiro-crew" },
       fellBack: null,
       finished: { at: t(10), ok: true, seconds: 160, credits: 3.09 },
+      slept: null,
+      sealed: null,
     });
   });
 
@@ -125,7 +131,7 @@ describe("build.log", () => {
     logger.info(M.nightStart.text, { approved: 1, retries: 0, limit: 2, building: 1 });
     logger.info(M.ideaStart.text, { ideaId: A, backend: "kiro-crew" });
     let read = readBuildLog(lines("build"));
-    expect(read.byIdea.get(A)).toEqual({ startedAt: t(2), by: "build", signIn: null, sandboxCheck: null, agentStarted: null, fellBack: null, finished: null });
+    expect(read.byIdea.get(A)).toEqual({ startedAt: t(2), by: "build", signIn: null, sandboxCheck: null, agentStarted: null, fellBack: null, finished: null, slept: null, sealed: null });
     expect(read.runs[0]).toMatchObject({ finishedAt: null, built: null, failed: null, ideaIds: [A] });
 
     logger.info(M.signInReady.text, { minutesLeft: null });
@@ -157,6 +163,8 @@ describe("build.log", () => {
       agentStarted: { at: t(7), backend: "kiro-cli" },
       fellBack: { at: t(5) },
       finished: { at: t(8), ok: true, seconds: 400, credits: 0.5 },
+      slept: null,
+      sealed: null,
     });
     expect(JSON.stringify(facts)).not.toContain("REASON-NOT-KEPT");
   });
@@ -241,7 +249,7 @@ describe("build.log", () => {
     logger.info(M.nightPaused.text, { failed: 0 });
     logger.info(M.buildRunEnd.text, { built: 0, failed: 0, skipped: "paused" });
     expect(readBuildLog(lines("build")).runs).toEqual([
-      { command: "build", startedAt: t(0), finishedAt: t(2), waiting: null, taking: null, built: 0, failed: 0, paused: true, nothingApproved: false, sandboxCheck: null, ideaIds: [] },
+      { command: "build", startedAt: t(0), finishedAt: t(2), waiting: null, taking: null, built: 0, failed: 0, paused: true, nothingApproved: false, slept: false, sandboxCheck: null, ideaIds: [] },
     ]);
   });
 
@@ -310,7 +318,7 @@ describe("build.log", () => {
       [t(3), null, [A]],
     ]);
     // The ticks are the latest build's, and the earlier run's sandbox check is not handed on to it.
-    expect(byIdea.get(A)).toEqual({ startedAt: t(4), by: "build", signIn: { at: t(5), status: "ready", minutesLeft: 50 }, sandboxCheck: null, agentStarted: { at: t(6), backend: "kiro-crew" }, fellBack: null, finished: null });
+    expect(byIdea.get(A)).toEqual({ startedAt: t(4), by: "build", signIn: { at: t(5), status: "ready", minutesLeft: 50 }, sandboxCheck: null, agentStarted: { at: t(6), backend: "kiro-crew" }, fellBack: null, finished: null, slept: null, sealed: null });
   });
 
   it("keeps only the latest build of an idea that was built twice", () => {
@@ -322,7 +330,7 @@ describe("build.log", () => {
     logger.info(M.buildRunEnd.text, { built: 0, failed: 1 });
     logger.info(M.buildRunStart.text, {}); // 5
     logger.info(M.ideaStart.text, { ideaId: A, backend: "kiro-crew" }); // 6
-    expect(readBuildLog(lines("build")).byIdea.get(A)).toEqual({ startedAt: t(6), by: "build", signIn: null, sandboxCheck: null, agentStarted: null, fellBack: null, finished: null });
+    expect(readBuildLog(lines("build")).byIdea.get(A)).toEqual({ startedAt: t(6), by: "build", signIn: null, sandboxCheck: null, agentStarted: null, fellBack: null, finished: null, slept: null, sealed: null });
   });
 
   it("reads the end of a log that starts in the middle of a run", () => {
@@ -343,9 +351,9 @@ describe("build.log", () => {
     const all = lines("build");
     const { runs, byIdea } = readBuildLog(all.slice(5));
     expect(runs).toEqual([
-      { command: "build", startedAt: t(5), finishedAt: t(10), waiting: null, taking: null, built: 2, failed: 0, paused: false, nothingApproved: false, sandboxCheck: null, ideaIds: [A, B] },
+      { command: "build", startedAt: t(5), finishedAt: t(10), waiting: null, taking: null, built: 2, failed: 0, paused: false, nothingApproved: false, slept: false, sandboxCheck: null, ideaIds: [A, B] },
     ]);
-    expect(byIdea.get(A)).toEqual({ startedAt: t(5), by: "build", signIn: null, sandboxCheck: null, agentStarted: { at: t(5), backend: "kiro-crew" }, fellBack: null, finished: { at: t(6), ok: true, seconds: 160, credits: 4.59 } });
+    expect(byIdea.get(A)).toEqual({ startedAt: t(5), by: "build", signIn: null, sandboxCheck: null, agentStarted: { at: t(5), backend: "kiro-crew" }, fellBack: null, finished: { at: t(6), ok: true, seconds: 160, credits: 4.59 }, slept: null, sealed: null });
     expect(byIdea.get(B)).toMatchObject({ startedAt: t(7), by: "build", finished: { ok: true, seconds: 90 } });
 
     // Only the very last line: there is no run to end.
@@ -381,10 +389,162 @@ describe("build.log", () => {
       agentStarted: null,
       fellBack: null,
       finished: { at: t(53), ok: true, seconds: null, credits: null },
+      slept: null,
+      sealed: null,
     });
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ startedAt: t(0), finishedAt: t(55), built: null, failed: 1.5, ideaIds: [A] });
     expect(JSON.stringify([runs, [...byIdea]])).not.toContain("/Users/sam");
+  });
+
+  describe("where a finished build was left", () => {
+    /** A night with one build, and the builder's line about moving it written by `after`. */
+    function sealedBy(after: (logger: Logger) => void): ReturnType<typeof readBuildLog> {
+      const logger = job("build");
+      logger.info(M.buildRunStart.text, {}); // 0
+      crewBuild(logger, A, true); // 1 to 5
+      after(logger); // 6
+      logger.info(M.nightEnd.text, { built: 1, failed: 0, leftForAnotherNight: 0 });
+      logger.info(M.buildRunEnd.text, { built: 1, failed: 0 });
+      return readBuildLog(lines("build"));
+    }
+
+    it("is out of the build jobs' reach, with every file made anew", () => {
+      const { byIdea, runs } = sealedBy((logger) => logger.info(M.sealed.text, { ideaId: A, filesMadeAnew: 1204 }));
+      expect(byIdea.get(A)?.sealed).toEqual({ at: t(6), ok: true, moved: true, files: null });
+      // The build's own facts are as they were, and the line opens no build of its own.
+      expect(byIdea.get(A)).toMatchObject({ startedAt: t(1), finished: { at: t(5), ok: true, seconds: 160, credits: 4.59 }, slept: null });
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ finishedAt: t(8), ideaIds: [A] });
+    });
+
+    it("is moved, but with files that were not made anew: how many is the only number taken", () => {
+      const { byIdea } = sealedBy((logger) => logger.error(`${M.sealedPartly.text}; any later job could still change those, through a hard link the build left; the morning still tests the app before publishing it`, { ideaId: A, files: 3, filesMadeAnew: 1201 }));
+      expect(byIdea.get(A)?.sealed).toEqual({ at: t(6), ok: false, moved: true, files: 3 });
+      expect(JSON.stringify([...byIdea])).not.toContain("1201");
+    });
+
+    it("could not be moved: the reason is not kept", () => {
+      const { byIdea } = sealedBy((logger) => logger.error(M.notSealed.text, { ideaId: A, reason: "REASON-NOT-KEPT (EACCES)", files: 9 }));
+      expect(byIdea.get(A)?.sealed).toEqual({ at: t(6), ok: false, moved: false, files: null });
+      expect(JSON.stringify([...byIdea])).not.toContain("REASON-NOT-KEPT");
+    });
+
+    it("is not known for a build whose log has no line about it, nor for an idea the line does not name", () => {
+      expect(sealedBy(() => {}).byIdea.get(A)?.sealed).toBeNull();
+      rmSync(path.join(scratch, "build.log"));
+      seconds = 0;
+      const noName = sealedBy((logger) => logger.info(M.sealed.text, { filesMadeAnew: 5 }));
+      expect(noName.byIdea.get(A)?.sealed).toBeNull();
+      rmSync(path.join(scratch, "build.log"));
+      seconds = 0;
+      const notAnId = sealedBy((logger) => logger.info(M.sealed.text, { ideaId: `${A}.sealing` }));
+      expect([...notAnId.byIdea.keys()]).toEqual([A]);
+      expect(notAnId.byIdea.get(A)?.sealed).toBeNull();
+    });
+
+    it("is forgotten when the idea is built again", () => {
+      const logger = job("build");
+      logger.info(M.buildRunStart.text, {});
+      crewBuild(logger, A, true);
+      logger.info(M.sealed.text, { ideaId: A, filesMadeAnew: 12 });
+      logger.info(M.buildRunEnd.text, { built: 1, failed: 0 });
+      logger.info(M.buildRunStart.text, {});
+      logger.info(M.ideaStart.text, { ideaId: A, backend: "kiro-crew" });
+      expect(readBuildLog(lines("build")).byIdea.get(A)).toMatchObject({ finished: null, sealed: null });
+    });
+  });
+
+  describe("a run the Mac slept through", () => {
+    it("says so of the run and of the build that was going, and does not give that build's hours as a build time", () => {
+      const logger = job("build");
+      logger.info(M.buildRunStart.text, {}); // 0
+      logger.info(M.nightStart.text, { approved: 3, retries: 0, limit: 3, building: 3 }); // 1
+      crewBuild(logger, A, true); // 2 to 6
+      logger.info(M.sealed.text, { ideaId: A, filesMadeAnew: 40 }); // 7
+      logger.info(M.ideaStart.text, { ideaId: B, backend: "kiro-crew" }); // 8
+      logger.info(M.signInReady.text, { minutesLeft: 40 }); // 9
+      logger.info(M.crewStarted.text, { ideaId: B }); // 10
+      // The lid was closed here. Six hours later the Mac wakes, and the command's watch sees the gap:
+      logger.warn(SLEPT.build, { gapSeconds: 21_600 }); // 11
+      logger.warn("told to stop: ending the build in progress and starting nothing new"); // 12
+      logger.info("the Mac slept during a kiro crew build; that time is not counted as the agent's", { ideaId: B, sleptSeconds: 21_600, agentSeconds: 125 }); // 13
+      logger.info("build try counted", { ideaId: B, backend: "kiro-crew", credits: 4.2, measured: false }); // 14
+      logger.warn(M.ideaFailed.text, { ideaId: B, backend: "kiro-crew", seconds: 21_731, reason: "the build was stopped" }); // 15
+      logger.info("build night stopped: this process was told to stop", { built: 1, failed: 1 }); // 16
+      logger.info(M.buildRunEnd.text, { built: 1, failed: 1, skipped: "stopped", stoppedBySleep: true }); // 17
+
+      const { runs, byIdea } = readBuildLog(lines("build"));
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ command: "build", startedAt: t(0), finishedAt: t(17), slept: true, built: 1, failed: 1, ideaIds: [A, B] });
+      // The build before the sleep is as any other.
+      expect(byIdea.get(A)).toMatchObject({ slept: null, finished: { ok: true, seconds: 160 }, sealed: { ok: true } });
+      // The one that was going: slept through, not built, and no "after 6 h 2 min".
+      expect(byIdea.get(B)).toMatchObject({ slept: { at: t(11) }, agentStarted: { backend: "kiro-crew" }, finished: { at: t(15), ok: false, seconds: null, credits: null }, sealed: null });
+      // Nothing of the sentence, the gap or the builder's own reckoning is kept.
+      expect(JSON.stringify([runs, [...byIdea]])).not.toMatch(/21600|21731|125|4\.2|tried once more/);
+    });
+
+    it("marks only the run when no build was going", () => {
+      const logger = job("build");
+      logger.info(M.buildRunStart.text, {});
+      crewBuild(logger, A, true); // 1 to 5
+      logger.warn(SLEPT.build, { gapSeconds: 900 }); // 6: between two builds
+      logger.info(M.buildRunEnd.text, { built: 1, failed: 0, stoppedBySleep: true });
+      const { runs, byIdea } = readBuildLog(lines("build"));
+      expect(runs[0]?.slept).toBe(true);
+      expect(byIdea.get(A)).toMatchObject({ slept: null, finished: { ok: true, seconds: 160 } });
+    });
+
+    it("opens no run for a command that noticed the sleep before it had started anything", () => {
+      const logger = job("build");
+      logger.warn(SLEPT.build, { gapSeconds: 4000 });
+      expect(readBuildLog(lines("build"))).toEqual({ runs: [], byIdea: new Map() });
+      // And the night after it is a run like any other.
+      logger.info(M.buildRunStart.text, {});
+      logger.info(M.buildRunEnd.text, { built: 0, failed: 0, skipped: "nothing approved" });
+      expect(readBuildLog(lines("build")).runs).toMatchObject([{ slept: false, nothingApproved: true }]);
+    });
+
+    it("is read the same from a run by hand, whose line names its idea", () => {
+      const logger = job("build");
+      logger.info(`${HAND_RUN_NAMES["build-now"]}${M.handRunStart.text}`, { ideaId: A }); // 0
+      logger.info(M.ideaStart.text, { ideaId: A, backend: "kiro-cli" }); // 1
+      logger.info(M.cliStarted.text, { ideaId: A }); // 2
+      logger.warn(SLEPT.byHand, { ideaId: A, gapSeconds: 7200 }); // 3
+      logger.warn(M.ideaFailed.text, { ideaId: A, backend: "kiro-cli", seconds: 7260, reason: "the build was stopped" }); // 4
+      logger.info(`${HAND_RUN_NAMES["build-now"]}${M.handRunEnd.text}`, { ideaId: A, ok: false }); // 5
+      const { runs, byIdea } = readBuildLog(lines("build"));
+      expect(runs).toMatchObject([{ command: "build-now", slept: true, built: 0, failed: 1 }]);
+      expect(byIdea.get(A)).toMatchObject({ by: "build-now", slept: { at: t(3) }, finished: { ok: false, seconds: null } });
+    });
+
+    it("does not carry over to the next build of the same idea", () => {
+      const logger = job("build");
+      logger.info(M.buildRunStart.text, {});
+      logger.info(M.ideaStart.text, { ideaId: A, backend: "kiro-crew" });
+      logger.warn(SLEPT.build, { gapSeconds: 5000 });
+      logger.warn(M.ideaFailed.text, { ideaId: A, backend: "kiro-crew", seconds: 5100 });
+      logger.info(M.buildRunEnd.text, { built: 0, failed: 1, stoppedBySleep: true });
+      logger.info(M.buildRunStart.text, {}); // the next night
+      crewBuild(logger, A, true);
+      logger.info(M.buildRunEnd.text, { built: 1, failed: 0 });
+      const { runs, byIdea } = readBuildLog(lines("build"));
+      expect(runs.map((run) => run.slept)).toEqual([true, false]);
+      expect(byIdea.get(A)).toMatchObject({ slept: null, finished: { ok: true, seconds: 160 } });
+    });
+
+    it("only counts under the job's own name, and only when the line starts as the real one does", () => {
+      const logger = job("build");
+      logger.info(M.buildRunStart.text, {});
+      logger.info(M.ideaStart.text, { ideaId: A, backend: "kiro-crew" });
+      job("build", "preflight").warn(SLEPT.build, {});
+      logger.warn(`once ${M.buildSlept.text}`, {});
+      logger.warn(M.deliverRunEnd.text, {});
+      const { runs, byIdea } = readBuildLog(lines("build"));
+      expect(runs[0]?.slept).toBe(false);
+      expect(byIdea.get(A)?.slept).toBeNull();
+    });
   });
 });
 
@@ -408,7 +568,7 @@ describe("deliver.log", () => {
     logger.info(M.deliverRunEnd.text, { delivered: 1, failed: 2, notified: 3 }); // 8
 
     const { runs, byIdea } = readDeliverLog(lines("deliver"));
-    expect(runs).toEqual([{ command: "build", startedAt: t(0), finishedAt: t(8), delivered: 1, failed: 2, notified: 3, ideaIds: [A, B] }]);
+    expect(runs).toEqual([{ command: "build", startedAt: t(0), finishedAt: t(8), delivered: 1, failed: 2, notified: 3, slept: false, ideaIds: [A, B] }]);
     expect(byIdea.get(A)).toEqual({
       firstAt: t(1),
       checked: { at: t(1), ok: true, ms: 6600, files: 3, bytes: 5602, step: null },
@@ -510,8 +670,8 @@ describe("deliver.log", () => {
     logger.info(`${HAND_RUN_NAMES.rehearse}: the rehearsal run is over`, { ideaId: B, exitCode: 1, state: "publish_failed" });
 
     expect(readDeliverLog(lines("deliver")).runs).toEqual([
-      { command: "build-now", startedAt: t(0), finishedAt: t(6), delivered: 1, failed: 0, notified: null, ideaIds: [A] },
-      { command: "rehearse", startedAt: t(7), finishedAt: t(9), delivered: 0, failed: 1, notified: null, ideaIds: [B] },
+      { command: "build-now", startedAt: t(0), finishedAt: t(6), delivered: 1, failed: 0, notified: null, slept: false, ideaIds: [A] },
+      { command: "rehearse", startedAt: t(7), finishedAt: t(9), delivered: 0, failed: 1, notified: null, slept: false, ideaIds: [B] },
     ]);
   });
 
@@ -528,7 +688,36 @@ describe("deliver.log", () => {
     const { runs, byIdea } = readDeliverLog(lines("deliver"));
     expect([...byIdea.keys()]).toEqual([A]);
     expect(byIdea.get(A)).toEqual({ firstAt: t(1), checked: null, pushed: { at: t(1) }, live: null, told: null, fact: null });
-    expect(runs).toEqual([{ command: "build", startedAt: t(1), finishedAt: t(5), delivered: 1, failed: 0, notified: 0, ideaIds: [A] }]);
+    expect(runs).toEqual([{ command: "build", startedAt: t(1), finishedAt: t(5), delivered: 1, failed: 0, notified: 0, slept: false, ideaIds: [A] }]);
+  });
+
+  it("says of a morning's run that the Mac slept through it, and leaves its ideas' ticks as they were", () => {
+    const logger = job("deliver");
+    logger.info(M.deliverRunStart.text, {}); // 0
+    logger.child({ ideaId: A }).info(M.verified.text, { files: 3, bytes: 100, ms: 5000 }); // 1
+    logger.warn(SLEPT.deliver, { gapSeconds: 9000 }); // 2
+    logger.warn("stopped before a built app was published; the next run picks it up", { ideaId: A, during: "publish, once the push had started" }); // 3
+    logger.info(M.deliverRunEnd.text, { delivered: 0, failed: 0, notified: 0, notSeenLive: 0, stoppedBySleep: true }); // 4
+    // The next run, awake:
+    logger.info(M.deliverRunStart.text, {}); // 5
+    delivery(logger, A); // 6 to 10
+    logger.info(M.deliverRunEnd.text, { delivered: 1, failed: 0, notified: 0 }); // 11
+
+    const { runs, byIdea } = readDeliverLog(lines("deliver"));
+    expect(runs.map((run) => [run.startedAt, run.finishedAt, run.slept, run.delivered])).toEqual([
+      [t(0), t(4), true, 0],
+      [t(5), t(11), false, 1],
+    ]);
+    expect(byIdea.get(A)).toMatchObject({ firstAt: t(6), checked: { ok: true }, told: { what: "built" } });
+    // A line like it with no run open opens none, and the build's line is not one of this log's.
+    rmSync(path.join(scratch, "deliver.log"));
+    job("deliver").warn(SLEPT.deliver, {});
+    expect(readDeliverLog(lines("deliver"))).toEqual({ runs: [], byIdea: new Map() });
+    // In the morning's log by a run by hand, the same start is known too.
+    const byHand = job("deliver");
+    byHand.info(`${HAND_RUN_NAMES.rehearse}${M.handDeliverStart.text}`, { ideaId: B });
+    byHand.warn(SLEPT.byHand, { ideaId: B, gapSeconds: 100 });
+    expect(readDeliverLog(lines("deliver")).runs).toMatchObject([{ command: "rehearse", slept: true, finishedAt: null }]);
   });
 
   it("has nothing to say about a log with nothing in it", () => {

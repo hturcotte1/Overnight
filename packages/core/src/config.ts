@@ -92,7 +92,8 @@ export interface Config {
 }
 
 /**
- * The dashboard's port on this Mac (http://localhost:4321). Not a setting: both build sandboxes
+ * The dashboard's port on this Mac (http://127.0.0.1:4321: it listens on that address only, and
+ * its link is never written with the name "localhost"). Not a setting: both build sandboxes
  * refuse this port by number, so a build job can never reach the dashboard.
  */
 export const DASHBOARD_PORT = 4321;

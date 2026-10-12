@@ -15,7 +15,7 @@ import { isSlug, slugFor } from "@overnight/builder";
 import { backendLabel } from "../render/format.ts";
 import { IDEA_ID } from "../types.ts";
 import { DemoFolderError, isFileInside, isFolderInside, NOT_A_DEMO_FOLDER, seededDemoFolder } from "./folder.ts";
-import { accentFor, checkDemoFolders, demoBuildNotes, hasWorkspaceFile, openDemoLogs, passedChecks, reportFor, sealWorkspace, setWorkspaceAside, WORKSPACE_FILES, writeBriefs, writeBuildStatus, writeReport, writeScreenshots, writeWorkspaceFile } from "./night-files.ts";
+import { accentFor, checkDemoFolders, DEMO_FILES_MADE_ANEW, demoBuildNotes, hasWorkspaceFile, openDemoLogs, passedChecks, reportFor, sealWorkspace, setWorkspaceAside, WORKSPACE_FILES, writeBriefs, writeBuildStatus, writeReport, writeScreenshots, writeWorkspaceFile } from "./night-files.ts";
 import type { DemoLogs, Measured, WorkspaceFile } from "./night-files.ts";
 
 /** The invented night's builder. The scene it carries on from is built with Kiro Crew too. */
@@ -209,6 +209,7 @@ export function demoNightSteps(dir: string, ideaId: string, config: Config, cloc
       sealWorkspace(root, idea.id);
       store.transitionIdea(idea.id, "built", { builtAt: at.toISOString(), buildBackend: BUILDER, failureReason: null, note: `built with ${backendLabel(BUILDER)} in ${seconds} s` }, at.toISOString());
       logs.line("ideaBuilt", at, { ideaId: idea.id, backend: BUILDER, seconds, credits: APP.credits });
+      logs.line("sealed", at, { ideaId: idea.id, filesMadeAnew: DEMO_FILES_MADE_ANEW });
       if (place.closesBuildRun !== undefined) {
         // The run's last two lines (builder, night.ts and cli, commands/build.ts): what it built, and what it left for another night.
         const left = store.listIdeas({ states: ["approved"] }).length + store.listIdeas({ states: ["build_failed"] }).filter((failed) => isBuildAwaitingRetry(failed, store.countBuildStarts(failed.id))).length;

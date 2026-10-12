@@ -17,8 +17,11 @@ import {
   listenLockFile,
   REHEARSAL_CONVERSATION_KEY as CLI_REHEARSAL_CONVERSATION_KEY,
   REHEARSE_NAME,
+  SLEPT_LINE,
+  sleptLine,
 } from "@overnight/cli";
 import { describe, expect, it } from "vitest";
+import { TAILS } from "../src/demo/night-files.ts";
 import {
   DELIVER_LEAD_MINUTES,
   HAND_RUN_NAMES,
@@ -76,6 +79,9 @@ const FIELDS_LOGGED_WITH: Partial<Record<LogMessageKey, readonly LogField[]>> = 
   fallback: ["ideaId"],
   ideaBuilt: ["ideaId", "backend", "seconds", "credits"],
   ideaFailed: ["ideaId", "seconds"],
+  sealed: ["ideaId"],
+  sealedPartly: ["ideaId", "files"],
+  notSealed: ["ideaId"],
   deliverRunEnd: ["delivered", "failed", "notified"],
   handDeliverStart: ["ideaId"],
   handDeliverEnd: ["ideaId", "ok"],
@@ -207,9 +213,57 @@ describe("matchLogMessage", () => {
   });
 
   it("gives null for a line it does not know, so new log lines break nothing", () => {
-    expect(matchLogMessage("build", "the Mac went to sleep during the run; what was in progress was stopped and will be tried again")).toBeNull();
+    // Lines Overnight really writes today and the dashboard leaves alone (src/log-messages.ts says why).
+    // Each is looked up in the file that logs it, so this list cannot go stale without saying so.
+    const leftAlone = [
+      ["build", "build try counted", "packages/builder/src/night.ts"],
+      ["build", "build night stopped early: the month's ceiling on build credits is reached", "packages/builder/src/night.ts"],
+      ["build", "build-now refused: the month's ceiling on build credits is reached", "packages/builder/src/night.ts"],
+      ["build", "told to stop: ending the build in progress and starting nothing new", "packages/builder/src/night.ts"],
+      ["build", "the Mac slept during a kiro crew build; that time is not counted as the agent's", "packages/builder/src/kiro-crew.ts"],
+      ["build", "the Mac slept during a kiro cli build; that time is not counted as the agent's", "packages/builder/src/kiro-cli.ts"],
+      ["deliver", "stopped before a built app was published; the next run picks it up", "packages/deliver/src/deliver.ts"],
+    ] as const;
+    for (const [log, text, source] of leftAlone) {
+      expect(readSource(source), text).toContain(`"${text}"`);
+      expect(matchLogMessage(log, text), text).toBeNull();
+    }
     expect(matchLogMessage("build", "")).toBeNull();
     expect(matchLogMessage("deliver", "toString")).toBeNull();
+  });
+
+  it("knows the line a command writes when the Mac slept through part of its run, whichever command wrote it", () => {
+    // The sentence as the cli makes it today (sleep-watch.ts): a start every command shares, then what follows for that kind of work.
+    expect(LOG_MESSAGES.buildSlept.text).toBe(SLEPT_LINE);
+    expect(LOG_MESSAGES.deliverSlept.text).toBe(SLEPT_LINE);
+    for (const work of ["build", "deliver", "byHand"] as const) expect(sleptLine(work).startsWith(`${SLEPT_LINE}. `), work).toBe(true);
+    // The nightly build and the morning's run each write it into their own log; a run by hand into the log of the step it was on.
+    expect(matchLogMessage("build", sleptLine("build"))).toBe("buildSlept");
+    expect(matchLogMessage("build", sleptLine("byHand"))).toBe("buildSlept");
+    expect(matchLogMessage("deliver", sleptLine("deliver"))).toBe("deliverSlept");
+    expect(matchLogMessage("deliver", sleptLine("byHand"))).toBe("deliverSlept");
+    // And it is through that function that the three commands log it.
+    expect(readSource("packages/cli/src/commands/build.ts")).toContain('logger.warn(sleptLine("build")');
+    expect(readSource("packages/cli/src/commands/deliver.ts")).toContain('logger.warn(sleptLine("deliver")');
+    expect(readSource("packages/cli/src/commands/build-now.ts")).toContain('stepLogger.warn(sleptLine("byHand")');
+    // The sentence from before the review round promised every stopped build a second try. Nothing writes it any more.
+    expect(sleptLine("build")).not.toContain("and will be tried again");
+  });
+
+  it("tells the three lines about where a finished build was left apart", () => {
+    expect(matchLogMessage("build", "finished build moved out of the builders' reach")).toBe("sealed");
+    // The second goes on after its known start. However that part is worded, it is the same line.
+    const partly = "a finished build was moved out of the builders' reach, but some of its files could not be made anew";
+    expect(LOG_MESSAGES.sealedPartly).toMatchObject({ text: partly, match: "starts" });
+    // Its `files` is the count of files that were NOT made anew: the number the page says a build job could still change.
+    expect(readSource(LOG_MESSAGES.sealedPartly.source)).toMatch(/"a finished build was moved out of the builders' reach, but some of its files could not be made anew[^"]*", \{[^}]*\bfiles: sealed\.notMadeAnew\b/);
+    expect(matchLogMessage("build", `${partly}; any later job could still change those, through a hard link the build left; the morning still tests the app before publishing it`)).toBe("sealedPartly");
+    expect(matchLogMessage("build", `${partly}; its own build could still change those`)).toBe("sealedPartly");
+    expect(matchLogMessage("build", `a note: ${partly}`)).toBeNull();
+    expect(matchLogMessage("build", "a finished build could not be moved out of the builders' reach; the morning uses it where it is")).toBe("notSealed");
+    // Not a line of the morning's log, and not the line about an older build that could not be moved aside.
+    expect(matchLogMessage("deliver", "finished build moved out of the builders' reach")).toBeNull();
+    expect(matchLogMessage("build", "could not move an older finished build aside, so the build was not started")).toBeNull();
   });
 });
 
@@ -253,6 +307,12 @@ describe("the other copied values", () => {
     expect(SKIPPED_PAUSED).toBe("paused");
     expect(SKIPPED_NOTHING_APPROVED).toBe("nothing approved");
     expect(SKIPPED_VALUES).toEqual({ paused: SKIPPED_PAUSED, nothingApproved: SKIPPED_NOTHING_APPROVED });
+  });
+
+  it("ends the demo's two sandbox lines the way the builder ends the real ones", () => {
+    // The demo writes these lines whole (src/demo/night-files.ts); the dashboard itself only goes by how they start.
+    const probe = readSource("packages/builder/src/probe.ts");
+    for (const key of ["sandboxPassed", "sandboxFailed"] as const) expect(probe, key).toContain(`"${LOG_MESSAGES[key].text}${TAILS[key] ?? "(no ending)"}"`);
   });
 
   it("has the builder's grace time for a build that looks cut off", () => {

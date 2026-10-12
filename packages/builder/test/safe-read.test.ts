@@ -1,6 +1,7 @@
 // All text in this file is made up for the tests. None of it is Bee data.
 // Reading a file that an agent may have written: never a link, never a pipe, never too much.
 import { spawn, spawnSync } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { appendFileSync, mkdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -11,6 +12,21 @@ import { leaveBuild, tempDir } from "./helpers.ts";
 
 function mkfifo(file: string): void {
   expect(spawnSync("/usr/bin/mkfifo", [file]).status).toBe(0);
+}
+
+/**
+ * End a helper program and wait until it is really gone. A test that returns while its helper is
+ * still renaming files races with its own clean-up: the helper can put a file back into the
+ * test's folder while that folder is being removed, and the removal then fails ("ENOTEMPTY").
+ */
+function ended(helper: ChildProcess): Promise<void> {
+  return new Promise((resolve) => {
+    // Gone already, or never started: nothing to wait for.
+    if (helper.pid === undefined || helper.exitCode !== null || helper.signalCode !== null) return resolve();
+    helper.once("exit", () => resolve());
+    helper.once("error", () => resolve());
+    helper.kill("SIGKILL");
+  });
 }
 
 describe("readSmallFile", () => {
@@ -75,7 +91,7 @@ describe("readSmallFile", () => {
     }
   });
 
-  it("never waits when the file is swapped for a pipe between two reads", () => {
+  it("never waits when the file is swapped for a pipe between two reads", async () => {
     // The swap the review found: a process an agent left running flips the name between a file
     // and a pipe. Whatever each read sees, it answers at once.
     const dir = tempDir();
@@ -95,7 +111,7 @@ describe("readSmallFile", () => {
       // It got through thousands of reads without sticking; what it saw depends on timing.
       for (const kind of seen) expect(["file", "missing", "not-a-file"]).toContain(kind);
     } finally {
-      swapper.kill("SIGKILL");
+      await ended(swapper);
     }
   });
 
@@ -126,7 +142,7 @@ describe("readSmallFile", () => {
     expect(swapFor((file) => writeFileSync(file, '{"status":"built"}'))).toMatchObject({ ok: true, text: '{"status":"built"}', size: 18 });
   });
 
-  it("never follows a link, even when the file is swapped for one between the look and the open", () => {
+  it("never follows a link, even when the file is swapped for one between the look and the open", async () => {
     // The same swap with a link instead of a pipe: the name flips between a plain file and a
     // link to a file somewhere else. Whatever each read sees, it never returns the other file.
     const dir = tempDir();
@@ -153,7 +169,7 @@ describe("readSmallFile", () => {
       expect(reads).toBeGreaterThan(100);
       expect(plain).toBeGreaterThan(0);
     } finally {
-      swapper.kill("SIGKILL");
+      await ended(swapper);
     }
   });
 

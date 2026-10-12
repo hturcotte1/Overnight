@@ -896,7 +896,7 @@ describe("the demo's scene", () => {
   it("writes every line of the two logs with core's logger, oldest first, and only words the dashboard's table knows", () => {
     const known = (log: "build" | "deliver"): LogMessageKey[] => (Object.keys(LOG_MESSAGES) as LogMessageKey[]).filter((key) => LOG_MESSAGES[key].log === log);
     // The lines of nights that went wrong in ways this scene does not tell.
-    const notInTheScene: LogMessageKey[] = ["nightPaused", "signInWaiting", "signedOut", "signInUnknown", "sandboxFailed", "notSeenLive"];
+    const notInTheScene: LogMessageKey[] = ["nightPaused", "signInWaiting", "signedOut", "signInUnknown", "sandboxFailed", "sealedPartly", "notSealed", "buildSlept", "deliverSlept", "notSeenLive"];
     for (const log of ["build", "deliver"] as const) {
       const lines = logLines(scene.dir, log);
       expect(lines[0], log).toEqual({ at: lines[0]?.at, level: "info", name: "demo", message: LOG_MARK });
@@ -938,7 +938,7 @@ describe("the demo's scene", () => {
     const about = (lines: typeof build, key: DemoIdeaKey) => lines.filter((line) => line.ideaId === scene.ids[key]).map((line) => matchLogMessage(line.name === "build" ? "build" : "deliver", line.message));
     expect(build.find((line) => line.message === "build finished" && line.ideaId === scene.ids.packingChecklist)).toMatchObject({ backend: "kiro-crew", seconds: 160, credits: 4.59 });
     expect(about(build, "baleYieldCalculator")).toEqual(["ideaStart", "crewStarted", "fallback", "cliStarted", "ideaFailed"]);
-    expect(about(build, "readingLog")).toEqual(["ideaStart", "crewStarted", "fallback", "cliStarted", "ideaBuilt"]);
+    expect(about(build, "readingLog")).toEqual(["ideaStart", "crewStarted", "fallback", "cliStarted", "ideaBuilt", "sealed"]);
     // The second builder gives no credits figure, so its line has none.
     expect(build.find((line) => line.message === "build finished" && line.ideaId === scene.ids.readingLog)).not.toHaveProperty("credits");
     expect(about(build, "recipeDoubler")).toEqual(["handRunStart", "ideaStart", "crewStarted", "ideaFailed", "handRunEnd"]);
@@ -953,6 +953,25 @@ describe("the demo's scene", () => {
     expect(build.find((line) => line.message === "build finished" && line.ideaId === scene.ids.packingChecklist)?.at).toBe(scene.ideas.packingChecklist.builtAt);
     expect(deliver.find((line) => line.message === "told the wearer about a built app" && line.ideaId === scene.ids.packingChecklist)?.at).toBe(scene.ideas.packingChecklist.deliveredAt);
     expect(deliver.find((line) => line.message === "the new version is live" && line.ideaId === scene.ids.readingLog)?.at).toBe(scene.ideas.readingLog.publishedAt);
+  });
+
+  it("says of every finished build that it was moved out of the build jobs' reach, right after it was built", () => {
+    // The builder's own two lines, in its order (builder, night.ts): "build finished", then where the build was put.
+    const build = logLines(scene.dir, "build");
+    const moved = "finished build moved out of the builders' reach";
+    expect(matchLogMessage("build", moved)).toBe("sealed");
+    const finished = build.filter((line) => line.message === "build finished");
+    expect(finished.length).toBeGreaterThanOrEqual(5);
+    for (const line of finished) {
+      const next = build[build.indexOf(line) + 1];
+      expect(next, String(line.ideaId)).toMatchObject({ level: "info", name: "build", message: moved, ideaId: line.ideaId, at: line.at });
+      expect(next?.filesMadeAnew, String(line.ideaId)).toBeGreaterThan(0);
+      // And the folder is where the line says: among the finished builds, under the idea's own id.
+      expect(finishedBuildDir(dataPaths(scene.dir), String(line.ideaId))).toBe(path.join(scene.dir, "built", String(line.ideaId)));
+    }
+    // A build that did not finish was moved nowhere, and no line says it was.
+    expect(build.filter((line) => line.message === moved)).toHaveLength(finished.length);
+    for (const key of ["baleYieldCalculator", "recipeDoubler", "choreWheel"] as const) expect(existsSync(path.join(scene.dir, "built", scene.ids[key])), key).toBe(false);
   });
 
   it("is the same scene every time, apart from the ids", () => {

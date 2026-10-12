@@ -31,7 +31,11 @@
 //             handled; exactly one "Tonight's build: 0 built, 0 failed; nothing approved." at the
 //             set minute, on time; then nothing more for `--after` minutes (3).
 //   sitting   The same, with the Mac put to sleep across the build's time. It needs a person:
-//             close the lid when this script says so, and open it again after the time it names.
+//             pull out the power plug and close the lid at once when this script says so, open
+//             it again after the time it names, and put the plug back. (On mains power this Mac
+//             does not sleep with the lid closed: the live listener holds it awake. On battery
+//             with the lid open it falls asleep by itself after an idle minute, so the plug comes
+//             out only at the moment the lid is closed.)
 //             Expected: the build starts once, a minute or two after the Mac is awake again,
 //             and is marked late.
 //   cleanup   Takes the two throwaway jobs out of macOS's list, if a run that was killed left
@@ -553,6 +557,30 @@ function clockTime(iso: string | Date): string {
   return new Date(iso).toLocaleTimeString("en-GB", { hour12: false });
 }
 
+/**
+ * A sitting's steps for the person at the Mac, one line each. The plug comes out because on mains
+ * power this Mac stays awake with the lid closed (the live listener holds it awake), and only at
+ * the moment of closing because on battery with the lid open it falls asleep after an idle minute.
+ */
+export function sittingSteps(buildAt: Date, clock: (at: Date) => string = clockTime): string[] {
+  return [
+    `1. Leave the power plug in. Wait until this window shows two lines saying "the build job looked at the clock".`,
+    `2. Then pull out the power plug and close the lid at once, before ${clock(new Date(buildAt.getTime() - 30_000))}. (With the plug in, this Mac stays awake with the lid closed.)`,
+    `3. Open the lid again any time after ${clock(new Date(buildAt.getTime() + 120_000))}, log in, and put the power plug back.`,
+    "4. Leave it open for five minutes. This window then says what happened.",
+  ];
+}
+
+/**
+ * A sitting whose Mac was not asleep across the build's time: what most likely happened, in words
+ * for the person who sat. `sleptAtAll`: this script found itself frozen at some other time.
+ */
+export function notAsleepReason(sleptAtAll: boolean): string {
+  return sleptAtAll
+    ? "the Mac slept, but not across the build's time (the lid was closed too late or opened too early), so this was an ordinary run"
+    : "the Mac never slept, so this was an ordinary run. Most likely it was still on mains power: with the plug in, this Mac stays awake with the lid closed. Pull out the power plug, then close the lid at once";
+}
+
 /** The seconds between each look at the clock and the next. */
 function gapsOf(looks: readonly string[]): number[] {
   return looks.slice(1).map((at, index) => Math.round((Date.parse(at) - Date.parse(looks[index] ?? at)) / 1000));
@@ -651,8 +679,8 @@ interface RunOptions {
   starter: Starter;
 }
 
-/** `run`, `sitting` and `dry`: load the two throwaway jobs, watch, take them out again. */
-async function measure(options: RunOptions): Promise<boolean> {
+/** `run`, `sitting` and `dry`: load the two throwaway jobs, watch, take them out again. `likelyCause`: of a sitting whose Mac was not asleep at the build's time. */
+async function measure(options: RunOptions): Promise<{ ok: boolean; likelyCause: string | null }> {
   const { starter } = options;
   if (process.platform !== "darwin") throw new Refused("launchd is macOS's. This script only runs on a Mac.");
   const facts = realFacts();
@@ -711,6 +739,7 @@ async function measure(options: RunOptions): Promise<boolean> {
     results.push(ok);
     say(label, `${ok ? "yes" : "NO"}${detail === "" ? "" : `   ${detail}`}`);
   };
+  let likelyCause: string | null = null;
   let left: ClockedJob[];
   try {
     const loadedAt = new Date();
@@ -720,10 +749,8 @@ async function measure(options: RunOptions): Promise<boolean> {
     console.log(`\nLoaded at ${clockTime(loadedAt)}. Watching until ${options.sitting ? "the build has run after the sleep" : `${options.minutesAfter} ${options.minutesAfter === 1 ? "minute" : "minutes"} after the build's time`}. Ctrl-C stops and cleans up.`);
     if (options.sitting) {
       console.log("\n  FOR THE PERSON AT THE MAC, one step at a time:");
-      console.log(`    1. Wait until this window shows two lines saying "the build job looked at the clock".`);
-      console.log(`    2. Then close the lid, before ${clockTime(new Date(times.buildAt.getTime() - 30_000))}.`);
-      console.log(`    3. Open it again any time after ${clockTime(new Date(times.buildAt.getTime() + 120_000))}, and log in.`);
-      console.log("    4. Leave it open for five minutes. This window then says what happened.\n");
+      for (const step of sittingSteps(times.buildAt)) console.log(`    ${step}`);
+      console.log("");
     }
 
     const startsSeen = (): number => clockLines(places, "build", STARTING_MESSAGE).length;
@@ -770,7 +797,8 @@ async function measure(options: RunOptions): Promise<boolean> {
       say("the build started", `${clockTime(start.at)}, ${lateSeconds} seconds after its time; the log says lateMinutes ${start.lateMinutes ?? "?"}`);
       if (options.sitting) {
         const slept = watched.frozen.find((gap) => gap.from.getTime() < times.buildAt.getTime() && gap.to.getTime() > times.buildAt.getTime());
-        expect("the Mac was asleep across the build's time", slept !== undefined, slept === undefined ? "the lid was not closed in time, so this was an ordinary run" : `this script was frozen ${clockTime(slept.from)} to ${clockTime(slept.to)}`);
+        if (slept === undefined) likelyCause = notAsleepReason(watched.frozen.length > 0);
+        expect("the Mac was asleep across the build's time", slept !== undefined, slept === undefined ? (likelyCause ?? "") : `this script was frozen ${clockTime(slept.from)} to ${clockTime(slept.to)}`);
         if (slept !== undefined) {
           const afterWake = Math.round((Date.parse(start.at) - slept.to.getTime()) / 1000);
           expect("the build started after the Mac was awake again, within three minutes", afterWake >= 0 && afterWake <= 180, `${afterWake} seconds after waking`);
@@ -801,7 +829,7 @@ async function measure(options: RunOptions): Promise<boolean> {
   expect(starter === launchd ? "both throwaway jobs are out of macOS's list again" : "both stand-in jobs are stopped", left.length === 0, left.length === 0 ? "" : `still listed: ${left.join(", ")}. Run: node spikes/10-night-clock.ts cleanup`);
   say("the scratch folder is left for a look; remove it when done", shown(dataDir));
   say("the build's own log", shown(path.join(dataDir, "logs", "build.log")));
-  return results.every(Boolean);
+  return { ok: results.every(Boolean), likelyCause };
 }
 
 /** The time zone named with `--zone`, or the default one. */
@@ -838,9 +866,11 @@ async function main(): Promise<number> {
     const dry = mode === "dry";
     const minutesAfter = numberAfter("--after", dry ? 1 : 3);
     if (minutesAfter < 1 || minutesAfter > 30) throw new Refused("--after must be from 1 to 30 minutes.");
-    const ok = await measure({ minutesAhead: numberAfter("--minutes", sitting ? 5 : dry ? 2 : 3), minutesAfter, sitting, starter: dry ? standIn() : launchd });
+    const { ok, likelyCause } = await measure({ minutesAhead: numberAfter("--minutes", sitting ? 5 : dry ? 2 : 3), minutesAfter, sitting, starter: dry ? standIn() : launchd });
     const never = `No Kiro credits were used, nothing was published, Bee was not used.${dry ? " No job was loaded: this tried the script itself and says nothing about macOS." : ""}`;
-    console.log(ok ? `\nDone: everything was as expected. ${never}` : `\nNOT AS EXPECTED: see the lines marked NO. ${never}`);
+    // A sitting on mains power fails for a reason that has nothing to do with the night clock: say so in the last line too.
+    const why = likelyCause === null ? "" : ` What happened: ${likelyCause}.`;
+    console.log(ok ? `\nDone: everything was as expected. ${never}` : `\nNOT AS EXPECTED: see the lines marked NO.${why} ${never}`);
     return ok ? 0 : 1;
   }
   throw new Refused("Say what to do: check, dry, run, sitting or cleanup. The top of this file says what each one does.");

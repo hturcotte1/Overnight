@@ -104,6 +104,9 @@ a.hero__title:hover { text-decoration: underline; text-decoration-thickness: 2px
    has that much room on each side, taken back from its margin so the lines break where they did. */
 .step__detail { margin: 4px -.6em 0; padding: 0 .6em; font-size: 13px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .step--active .step__detail, .step--failed .step__detail, .step--waiting .step__detail { color: var(--ink); font-weight: 600; }
+/* What a waiting step says is a sentence of ours about what happens next ("Cut short. It will be built once
+   more at the next nightly build."), and nothing else on the page repeats it: it is given room to be read whole. */
+.step--waiting .step__detail { -webkit-line-clamp: 7; }
 .step__detail.step__hidden { font-style: italic; }
 .pop .step__dot, .check.pop { animation: pop .5s cubic-bezier(.2, 1.6, .4, 1); }
 /* A step that has just become the active one pops once, then goes on pulsing. */
@@ -119,6 +122,7 @@ a.hero__title:hover { text-decoration: underline; text-decoration-thickness: 2px
 .check--active .check__mark { border-color: var(--accent); border-top-color: transparent; animation: spin .9s linear infinite; }
 .check--failed .check__mark { border: 0; background: var(--bad); }
 .check--todo { background: transparent; border: 1px dashed var(--line); color: var(--muted); }
+.check--waiting .check__mark { border-color: var(--warn); border-style: dashed; }
 /* The small ticks: which files a build in progress has made so far. */
 .check--small { gap: 6px; padding: 3px 10px; font-size: 12px; }
 .check--small .check__mark { width: 14px; height: 14px; }

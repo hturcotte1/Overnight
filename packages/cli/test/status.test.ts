@@ -19,11 +19,14 @@ import {
 } from "@overnight/core";
 import type { ClockedJob, NightRun, NightWait } from "@overnight/core";
 import type { JobTrigger, ListenerState, NightJobsState } from "../src/background.ts";
+import { nightTick } from "../src/commands/night-tick.ts";
+import type { NightRunMarks } from "../src/commands/night-tick.ts";
 import { REHEARSAL_CONVERSATION_KEY } from "../src/commands/rehearse.ts";
 import { clockMinus, collectStatus, dayWords, nightClockWords, status, tonightWords, whenWords } from "../src/commands/status.ts";
 import type { StatusDeps, StatusReport } from "../src/commands/status.ts";
 import type { PowerSource } from "../src/power.ts";
 import { addIdea, at, capture, fixedNow, moveIdea, plain, SAMPLE_IDEAS, testConfig } from "./helpers.ts";
+import { collectingLogger } from "./night-fakes.ts";
 
 const config = testConfig();
 const SPOKEN = ["someone should build a tiny app for whose turn it is", "yeah that would settle it", "anyway what time is the game"];
@@ -172,10 +175,11 @@ describe("overnight status", () => {
       rehearsalIdeas: 0,
       // Neither night job has ever asked the clock on this data folder. scripts/install-agents.sh
       // reads nightClock.build.checkedAt and nightClock.deliver.checkedAt.
+      // (No lockHeld here: this caller gave status no way to look at the locks. The command line always does.)
       nightClock: {
         tickSeconds: 60,
-        build: { slotAt: "2026-10-09T07:00:00.000Z", slotDay: "2026-10-09", state: "no-record", waiting: null, nextSlotAt: "2026-10-10T07:00:00.000Z", checkedAt: null, lastRun: null, recordAhead: null, fresh: false, nextStartAt: "2026-10-10T07:00:00.000Z", lockHeld: null, notStarting: false },
-        deliver: { slotAt: "2026-10-09T12:30:00.000Z", slotDay: "2026-10-09", state: "no-record", waiting: null, nextSlotAt: "2026-10-10T12:30:00.000Z", checkedAt: null, lastRun: null, recordAhead: null, fresh: false, nextStartAt: "2026-10-10T12:30:00.000Z", lockHeld: null, notStarting: false },
+        build: { slotAt: "2026-10-09T07:00:00.000Z", slotDay: "2026-10-09", state: "no-record", waiting: null, nextSlotAt: "2026-10-10T07:00:00.000Z", checkedAt: null, lastRun: null, recordAhead: null, fresh: false, nextStartAt: "2026-10-10T07:00:00.000Z", notStarting: false, mayBeStarting: false },
+        deliver: { slotAt: "2026-10-09T12:30:00.000Z", slotDay: "2026-10-09", state: "no-record", waiting: null, nextSlotAt: "2026-10-10T12:30:00.000Z", checkedAt: null, lastRun: null, recordAhead: null, fresh: false, nextStartAt: "2026-10-10T12:30:00.000Z", notStarting: false, mayBeStarting: false },
       },
     });
   });
@@ -851,8 +855,261 @@ describe("overnight status: the last night and the next, by the night clock", ()
     writeNightRun(morning, "deliver", nightRecord("deliver", "2026-10-13T12:30:05.000Z"), new Date("2026-10-13T12:30:05.000Z"));
     shown = await rows(morning, clockDeps, "2026-10-13T12:59:30.000Z");
     expect(shown.get("Next deliver")).toBe("the deliver job is awake and tries every minute, but the delivery does not start (the reason is in logs/deliver.log): the Oct 13, 6:30 AM deliver has not run yet");
+    // Now something holds the deliver lock, over a record that stands as a try left it. That is a
+    // delivery by hand, or the job's own next try at this very second: status cannot tell, and says both.
     shown = await rows(morning, { ...clockDeps, jobRunning: (job) => job === "deliver" }, "2026-10-13T12:59:30.000Z");
-    expect(shown.get("Next deliver")).toBe("waiting for the delivery that is going on this data folder right now (a build-now, or one started by hand): the Oct 13, 6:30 AM deliver has not run yet");
+    expect(shown.get("Next deliver")).toBe(
+      "starting now, or waiting for the delivery that is going on this data folder right now (a build-now, or one started by hand): the Oct 13, 6:30 AM deliver has not run yet",
+    );
+  });
+
+  describe("a run that is due while something holds the job's lock", () => {
+    const HELD_UP = "waiting for the build that is going on this data folder right now (a build-now, or one started by hand)";
+    const NOT_YET = "the Oct 13, 1:00 AM build has not run yet (kiro-crew first)";
+    const BUILD_LOCK = "/made-up/data/build.lock";
+
+    /**
+     * The real every-minute check (`nightTick`) on a real database, with a made-up clock and
+     * made-up locks, and `status` looking at the same database and the same locks. Both jobs last
+     * asked the clock at 12:59 am on Oct 13. `work` stands in for `overnight build`: it is handed
+     * the marks, and may look at status whenever it likes.
+     */
+    function night() {
+      const store = onTheClock("2026-10-13T06:59:00.000Z");
+      /** The made-up clock, and whether the made-up internet answers. */
+      const at = { clock: Date.parse("2026-10-13T06:59:30.000Z"), online: true };
+      /** Lock files held right now: by the job's own check, or (put here by a test) by a run by hand. */
+      const held = new Set<string>();
+      const errors: string[] = [];
+      const deps = (): Partial<StatusDeps> => ({ ...clockDeps, jobRunning: (job) => held.has(`/made-up/data/${job}.lock`) });
+      return {
+        at,
+        held,
+        errors,
+        /** The rows status prints at this moment. */
+        look: (): Promise<Map<string, string>> => rows(store, deps(), new Date(at.clock).toISOString()),
+        /** What status finds about the build job's night at this moment. */
+        view: (): StatusReport["nightClock"]["build"] => collectStatus({ store, config, now: () => new Date(at.clock), ...deps() }).nightClock.build,
+        /** One check of the build job's clock at `time`. Resolves with its exit code. */
+        check: (time: string, work: (marks: NightRunMarks) => Promise<number>): Promise<number> => {
+          at.clock = Date.parse(time);
+          return nightTick({
+            job: "build",
+            store,
+            config,
+            paths: { root: "/made-up/data" },
+            now: () => new Date(at.clock),
+            logger: () => collectingLogger("build").logger,
+            takeLock: (file) => {
+              if (held.has(file)) return null;
+              held.add(file);
+              return () => void held.delete(file);
+            },
+            lockHeld: (file) => held.has(file),
+            isOnline: async () => at.online,
+            sleep: async () => {},
+            writeError: (line) => void errors.push(line),
+            run: ({ marks }) => work(marks),
+          });
+        },
+      };
+    }
+
+    it("says the run is starting in the second or so between the job's own check taking the lock and the work writing its start", async () => {
+      const t = night();
+      const seen: { loading?: Map<string, string>; view?: StatusReport["nightClock"]["build"]; building?: Map<string, string> } = {};
+      const code = await t.check("2026-10-13T07:00:00.000Z", async (marks) => {
+        // The builder is loading. The job's check holds the build lock, and the record says "due, not started".
+        t.at.clock += 1_500;
+        seen.loading = await t.look();
+        seen.view = t.view();
+        marks.started();
+        t.at.clock += 60_000;
+        seen.building = await t.look();
+        marks.ended("finished");
+        return 0;
+      });
+      expect(code).toBe(0);
+      // It is this very run, about to begin. Nothing by hand is going on, and the row must not say only that.
+      expect(seen.loading?.get("Next build")).toBe(`starting now, or ${HELD_UP}: ${NOT_YET}`);
+      expect(seen.loading?.get("Night clock")).toBe("build and deliver check the time every minute, in America/Boise");
+      expect(seen.loading?.has("Last build")).toBe(false);
+      expect(seen.view).toMatchObject({ state: "due", waiting: null, lockHeld: true, notStarting: false, mayBeStarting: true });
+      // A moment later the start is written, and the row says what it always said.
+      expect(seen.building?.get("Next build")).toBe("running now, since Oct 13, 1:00 AM");
+      expect(seen.building?.get("Last build")).toBe("Oct 13, 1:00 AM, on time, still running");
+      t.at.clock += 30_000;
+      expect((await t.look()).get("Next build")).toBe("Oct 14, 1:00 AM (kiro-crew first)");
+      expect(t.view()).toMatchObject({ state: "done", lockHeld: false, mayBeStarting: false });
+      expect(t.errors).toEqual([]);
+    });
+
+    it("says the same when the run starts after a wait for the internet", async () => {
+      const t = night();
+      t.at.online = false;
+      const mustNotStart = async (): Promise<number> => {
+        throw new Error("made-up: nothing may start without the internet");
+      };
+      for (const time of ["2026-10-13T07:00:00.000Z", "2026-10-13T07:01:00.000Z", "2026-10-13T07:02:00.000Z"]) expect(await t.check(time, mustNotStart)).toBe(0);
+      t.at.clock += 30_000;
+      expect((await t.look()).get("Next build")).toBe(`waiting for the internet: ${NOT_YET}`);
+      // The internet is back at 1:03 am. The record was first noticed at 1:00 am, three checks ago.
+      t.at.online = true;
+      let loading: Map<string, string> | undefined;
+      const code = await t.check("2026-10-13T07:03:00.000Z", async (marks) => {
+        t.at.clock += 1_500;
+        loading = await t.look();
+        marks.started();
+        marks.ended("finished");
+        return 0;
+      });
+      expect(code).toBe(0);
+      expect(loading?.get("Next build")).toBe(`starting now, or ${HELD_UP}: ${NOT_YET}`);
+      expect(t.errors).toEqual([]);
+    });
+
+    it("says both when a build by hand follows a try that ended before the work began: the two cannot be told apart", async () => {
+      const t = night();
+      // The builder would not load: the work gives up before it marks a start. The slot stays due.
+      const givesUp = async (): Promise<number> => 1;
+      expect(await t.check("2026-10-13T07:00:00.000Z", givesUp)).toBe(1);
+      t.at.clock += 20_000;
+      expect((await t.look()).get("Next build")).toBe(`as soon as the Mac has been awake for a minute or two: ${NOT_YET}`);
+      // Someone starts a build-now in that same minute, before the job has checked the time again.
+      t.held.add(BUILD_LOCK);
+      expect((await t.look()).get("Next build")).toBe(`starting now, or ${HELD_UP}: ${NOT_YET}`);
+      // The job's next checks find the lock busy and leave the record alone.
+      for (const time of ["2026-10-13T07:01:00.000Z", "2026-10-13T07:02:00.000Z", "2026-10-13T07:03:00.000Z", "2026-10-13T07:04:00.000Z"]) expect(await t.check(time, givesUp)).toBe(0);
+      t.at.clock += 30_000;
+      expect((await t.look()).get("Next build")).toBe(`starting now, or ${HELD_UP}: ${NOT_YET}`);
+      expect(t.view()).toMatchObject({ state: "due", lockHeld: true, notStarting: false, mayBeStarting: true });
+      // The build-now ends. Nothing holds the lock, and the record has stood like this for over three minutes.
+      t.held.delete(BUILD_LOCK);
+      expect((await t.look()).get("Next build")).toBe(`the build job is awake and tries every minute, but the build does not start (the reason is in logs/build.log): ${NOT_YET}`);
+      expect(t.view()).toMatchObject({ lockHeld: false, notStarting: true, mayBeStarting: false });
+    });
+
+    it("keeps every other state's words: only a record that stands as a handover leaves it can be this run starting", async () => {
+      // A build by hand has the lock before the job ever gets to its slot. The job's check writes nothing, so it is not this run.
+      const t = night();
+      t.held.add(BUILD_LOCK);
+      const mustNotStart = async (): Promise<number> => {
+        throw new Error("made-up: the lock is busy, so nothing may start");
+      };
+      expect(await t.check("2026-10-13T07:00:00.000Z", mustNotStart)).toBe(0);
+      t.at.clock += 30_000;
+      expect((await t.look()).get("Next build")).toBe(`${HELD_UP}: ${NOT_YET}`);
+      expect(t.view()).toMatchObject({ state: "due", lockHeld: true, mayBeStarting: false });
+
+      const NOW = "2026-10-13T07:05:30.000Z";
+      const withRecord = (record: NightRun): Store => {
+        const store = onTheClock("2026-10-13T07:05:00.000Z");
+        writeNightRun(store, "build", record, new Date("2026-10-13T07:00:05.000Z"));
+        return store;
+      };
+      const next = async (store: Store, running: boolean | null, now: string = NOW) => (await rows(store, { ...clockDeps, jobRunning: (job) => (job === "build" ? running : false) }, now)).get("Next build");
+      // A run that is waiting for something it stored, with the lock held: a run by hand is in its way.
+      expect(await next(withRecord(nightRecord("build", "2026-10-13T07:00:05.000Z", { waiting: "offline" })), true)).toBe(`${HELD_UP}: ${NOT_YET}`);
+      // A run that has written its start is running. One that is closed is over, and the lock is another build's.
+      const started = withRecord(nightRecord("build", "2026-10-13T07:00:05.000Z", { startedAt: "2026-10-13T07:00:06.000Z" }));
+      const closed = withRecord(nightRecord("build", "2026-10-13T07:00:05.000Z", { startedAt: "2026-10-13T07:00:06.000Z", closedAs: "done", closedAt: "2026-10-13T07:04:00.000Z" }));
+      expect(await next(started, true)).toBe("running now, since Oct 13, 1:00 AM");
+      expect(await next(closed, true)).toBe("Oct 14, 1:00 AM (kiro-crew first)");
+      const viewOf = (store: Store) => collectStatus({ store, config, now: fixedNow(NOW), ...clockDeps, jobRunning: () => true }).nightClock.build;
+      expect(viewOf(started)).toMatchObject({ state: "running", lockHeld: true, mayBeStarting: false });
+      expect(viewOf(closed)).toMatchObject({ state: "done", lockHeld: true, mayBeStarting: false });
+      // So is a slot that was handled without a run (the job's clock was started from now, by an install).
+      const handled = withRecord(nightRecord("build", "2026-10-13T07:00:05.000Z", { closedAs: "first-check" }));
+      expect(await next(handled, true)).toBe("Oct 14, 1:00 AM (kiro-crew first)");
+      expect(viewOf(handled)).toMatchObject({ state: "done", lockHeld: true, mayBeStarting: false });
+      // The record a handover leaves, with the lock free or not known to be held: the words there always were.
+      const handedOver = withRecord(nightRecord("build", "2026-10-13T07:00:05.000Z"));
+      for (const running of [false, null]) {
+        expect(await next(handedOver, running), String(running)).toBe(`the build job is awake and tries every minute, but the build does not start (the reason is in logs/build.log): ${NOT_YET}`);
+      }
+      expect(await next(handedOver, true)).toBe(`starting now, or ${HELD_UP}: ${NOT_YET}`);
+      // A job that does not go by this clock is never said to be due at all.
+      expect((await rows(handedOver, { ...clockDeps, jobRunning: () => true, jobTriggers: () => ({ build: "calendar", deliver: "calendar" }) }, NOW)).get("Next build")).toBe("Oct 14, 1:00 AM (kiro-crew first)");
+      // The same record a day later, with the lock held. The job's check would have written that day's own record before handing over, so this is a run by hand.
+      expect(await next(onTheClockWith(handedOver, "2026-10-14T07:05:00.000Z"), true, "2026-10-14T07:05:30.000Z")).toBe(`${HELD_UP}: the Oct 14, 1:00 AM build has not run yet (kiro-crew first)`);
+    });
+  });
+
+  it("does not promise a start when it could not even look at the job's lock: it says so, and that the job needs that lock", async () => {
+    // 1:09 am on Oct 13. The build's time came at 1:00 am and its job checks every minute, but
+    // build.lock cannot be used: every check ends there, before anything is stored, and the only
+    // line about it is in the job's launchd log.
+    const NOW = "2026-10-13T07:09:30.000Z";
+    const store = onTheClock("2026-10-13T07:09:00.000Z");
+    const unusable = (...jobs: ClockedJob[]): Partial<StatusDeps> => ({ ...clockDeps, jobRunning: (job) => (jobs.includes(job) ? null : false) });
+    const CANNOT_TELL = "could not tell whether a build is going on this data folder right now (build.lock in the data folder could not be used, and the build job needs it to start)";
+    let shown = await rows(store, unusable("build"), NOW);
+    expect(shown.get("Next build")).toBe(`${CANNOT_TELL}: the Oct 13, 1:00 AM build has not run yet (kiro-crew first)`);
+    // The delivery's lock could be looked at, and is free: its row is the ordinary one.
+    expect(shown.get("Next deliver")).toBe("as soon as the Mac has been awake for a minute or two: the Oct 12, 6:30 AM deliver has not run yet");
+    expect(shown.get("Night clock")).toBe("build and deliver check the time every minute, in America/Boise");
+    expect(collectStatus({ store, config, now: fixedNow(NOW), ...unusable("build") }).nightClock.build).toMatchObject({ state: "due", lockHeld: null, fresh: true, notStarting: false, mayBeStarting: false });
+    shown = await rows(store, unusable("deliver"), NOW);
+    expect(shown.get("Next deliver")).toBe(
+      "could not tell whether a delivery is going on this data folder right now (deliver.lock in the data folder could not be used, and the deliver job needs it to start): the Oct 12, 6:30 AM deliver has not run yet",
+    );
+
+    // What the job stored itself, or what its record shows, is still said first.
+    writeNightRun(store, "build", nightRecord("build", "2026-10-13T07:00:05.000Z", { waiting: "offline" }), new Date("2026-10-13T07:00:05.000Z"));
+    expect((await rows(store, unusable("build"), NOW)).get("Next build")).toBe("waiting for the internet: the Oct 13, 1:00 AM build has not run yet (kiro-crew first)");
+    writeNightRun(store, "build", nightRecord("build", "2026-10-13T07:00:05.000Z"), new Date("2026-10-13T07:00:05.000Z"));
+    expect((await rows(store, unusable("build"), NOW)).get("Next build")).toMatch(/^the build job is awake and tries every minute, but the build does not start/);
+    // A run that is not due is not held up by anything: its next time, as always.
+    writeNightRun(store, "build", nightRecord("build", "2026-10-13T07:00:05.000Z", { closedAs: "first-check" }), new Date("2026-10-13T07:00:05.000Z"));
+    expect((await rows(store, unusable("build"), NOW)).get("Next build")).toBe("Oct 14, 1:00 AM (kiro-crew first)");
+
+    // A caller that was given no way to look at the locks says nothing about them, and its report has no lockHeld.
+    const blind = onTheClock("2026-10-13T07:09:00.000Z");
+    expect((await rows(blind, { nightJobs: () => ALL_JOBS, jobTriggers: () => ON_TIMER }, NOW)).get("Next build")).toBe("as soon as the Mac has been awake for a minute or two: the Oct 13, 1:00 AM build has not run yet (kiro-crew first)");
+    expect("lockHeld" in collectStatus({ store: blind, config, now: fixedNow(NOW) }).nightClock.build).toBe(false);
+    expect(collectStatus({ store: blind, config, now: fixedNow(NOW), ...clockDeps }).nightClock.build.lockHeld).toBe(false);
+  });
+
+  it("counts what the build takes against today while the build the row names is today's: one that is due, or one that is going", async () => {
+    const approve = (store: Store, sample: (typeof SAMPLE_IDEAS)[keyof typeof SAMPLE_IDEAS], minute: number) => moveIdea(store, addIdea(store, sample, `2026-10-12T20:0${minute}:00.000Z`), ["asked", "approved"], `2026-10-12T20:1${minute}:00.000Z`);
+    const start = (store: Store, id: string, startedAt: string) => store.transitionIdea(id, "building", { buildStartedAt: startedAt, buildBackend: "kiro-crew" }, startedAt);
+    const tonight = (store: Store, deps: Partial<StatusDeps>, now: string) => {
+      const report = collectStatus({ store, config, now: fixedNow(now), ...deps });
+      return { buildsToday: report.buildsToday, waitingToBuild: report.waitingToBuild, nextBuildTakes: report.nextBuildTakes, words: tonightWords(report) };
+    };
+
+    // Due. The Mac slept through 1:00 am on Oct 13. Two builds were started by hand at 0:30 am, the
+    // day's limit, and one more idea is approved. At 9:00 am the 1:00 am build is still to run. It
+    // runs today, and will find no room.
+    const due = onTheClock("2026-10-13T14:59:30.000Z");
+    for (const [index, sample] of [SAMPLE_IDEAS.turns, SAMPLE_IDEAS.plants].entries()) {
+      const idea = approve(due, sample, index + 1);
+      start(due, idea.id, "2026-10-13T06:30:00.000Z");
+      due.transitionIdea(idea.id, "built", { builtAt: "2026-10-13T06:40:00.000Z" }, "2026-10-13T06:40:00.000Z");
+    }
+    approve(due, SAMPLE_IDEAS.chores, 3);
+    const NINE = "2026-10-13T15:00:00.000Z";
+    expect((await rows(due, clockDeps, NINE)).get("Next build")).toBe("as soon as the Mac has been awake for a minute or two: the Oct 13, 1:00 AM build has not run yet (kiro-crew first)");
+    expect(tonight(due, clockDeps, NINE)).toEqual({ buildsToday: 2, waitingToBuild: 1, nextBuildTakes: 0, words: "nothing more will be built that day: its limit of 2 is used up. 1 approved idea waits for the night after" });
+    // A job that does not go by this clock is not due: its next build is tomorrow's, a day with no builds yet.
+    expect(tonight(due, { ...clockDeps, jobTriggers: () => ({ build: "calendar", deliver: "calendar" }) }, NINE)).toMatchObject({ nextBuildTakes: 1, words: "1 approved idea will be built at the next build" });
+
+    // Going. Three ideas were approved, the limit is two, and the night's build began at 1:00 am.
+    // At 1:10 am it is on its first: one of the two still waiting is built in this run, the other waits.
+    const going = onTheClock("2026-10-13T06:59:00.000Z");
+    const first = approve(going, SAMPLE_IDEAS.turns, 1);
+    approve(going, SAMPLE_IDEAS.plants, 2);
+    approve(going, SAMPLE_IDEAS.chores, 3);
+    writeNightRun(going, "build", nightRecord("build", "2026-10-13T07:00:05.000Z", { startedAt: "2026-10-13T07:00:06.000Z" }), new Date("2026-10-13T07:00:06.000Z"));
+    start(going, first.id, "2026-10-13T07:01:00.000Z");
+    const building: Partial<StatusDeps> = { ...clockDeps, jobRunning: (job) => job === "build" };
+    const TEN_PAST = "2026-10-13T07:10:00.000Z";
+    expect((await rows(going, building, TEN_PAST)).get("Next build")).toBe("running now, since Oct 13, 1:00 AM");
+    expect(tonight(going, building, TEN_PAST)).toEqual({ buildsToday: 1, waitingToBuild: 2, nextBuildTakes: 1, words: "1 approved idea will be built at the next build, 1 more waits for another night" });
+    // That run was stopped after its first build. Once it is closed, the next build is tomorrow's again, with a whole day's room.
+    going.transitionIdea(first.id, "built", { builtAt: "2026-10-13T07:12:00.000Z" }, "2026-10-13T07:12:00.000Z");
+    writeNightRun(going, "build", nightRecord("build", "2026-10-13T07:00:05.000Z", { startedAt: "2026-10-13T07:00:06.000Z", closedAs: "cut-short", closedAt: "2026-10-13T07:13:00.000Z" }), new Date("2026-10-13T07:13:00.000Z"));
+    expect(tonight(onTheClockWith(going, "2026-10-13T07:14:00.000Z"), clockDeps, "2026-10-13T07:14:30.000Z")).toMatchObject({ buildsToday: 1, waitingToBuild: 2, nextBuildTakes: 2, words: "2 approved ideas will be built at the next build" });
   });
 });
 

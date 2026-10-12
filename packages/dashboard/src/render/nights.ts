@@ -3,7 +3,7 @@
 // the build and the morning's work ran (while the logs still have them), and one row per idea.
 import type { BuildRun, DeliverRun, Night, RenderContext, Story, View } from "../types.ts";
 import { count, dotted, ideaHref, live, miniStory, rehearsalTag } from "./components.ts";
-import { backendLabel, clockTime, duration, plural, STATE_LABELS } from "./format.ts";
+import { backendLabel, clockTime, duration, MAC_SLEPT, plural, STATE_LABELS } from "./format.ts";
 import { html } from "./html.ts";
 import type { SafeHtml } from "./html.ts";
 
@@ -27,9 +27,14 @@ function sandboxWords(run: BuildRun): string | null {
   return run.sandboxCheck.ms === null ? "sandbox check passed" : `sandbox check passed in ${duration(run.sandboxCheck.ms)}`;
 }
 
+/** A run that spans hours because the Mac slept in the middle of it says so beside its times. */
+function sleptWords(run: BuildRun | DeliverRun): string | null {
+  return run.slept ? `cut short: ${MAC_SLEPT}` : null;
+}
+
 function runs(night: Night, timeZone: string): SafeHtml | null {
-  const build = night.buildRun === null ? null : html`<div><dt>Build</dt><dd>${dotted([runTimes(night.buildRun, timeZone), sandboxWords(night.buildRun)])}</dd></div>`;
-  const morning = night.deliverRun === null ? null : html`<div><dt>Morning</dt><dd>${runTimes(night.deliverRun, timeZone)}</dd></div>`;
+  const build = night.buildRun === null ? null : html`<div><dt>Build</dt><dd>${dotted([runTimes(night.buildRun, timeZone), sandboxWords(night.buildRun), sleptWords(night.buildRun)])}</dd></div>`;
+  const morning = night.deliverRun === null ? null : html`<div><dt>Morning</dt><dd>${dotted([runTimes(night.deliverRun, timeZone), sleptWords(night.deliverRun)])}</dd></div>`;
   return build === null && morning === null ? null : html`<dl class="night__runs">${build}${morning}</dl>`;
 }
 

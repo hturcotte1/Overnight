@@ -180,6 +180,15 @@ describe("the night's ticks", () => {
     expect(row).toMatch(/<span class="check__mark"><\/span>C <small>x · <time [^>]*>since 1:00 AM<\/time><\/small>/);
   });
 
+  it("marks a tick that is waiting as its own kind: no tick, no cross, and not a failure", () => {
+    // A build that was stopped and gets one more try (story.ts). The stylesheet draws its mark as the step's own dashed amber ring.
+    const story: Story = { ...sc.hero.story, checks: [{ key: "agent", label: "Kiro Crew was stopped", status: "waiting", detail: "the Mac went to sleep", since: null }, { key: "built", label: "Not built yet", status: "waiting", detail: null, since: null }] };
+    const row = checksRow(story, K)?.text ?? "";
+    expect(row).toContain('<li class="check check--waiting" data-check="agent" data-status="waiting"><span class="check__mark"></span>Kiro Crew was stopped <small>the Mac went to sleep</small></li>');
+    expect(row).toContain('<li class="check check--waiting" data-check="built" data-status="waiting"><span class="check__mark"></span>Not built yet</li>');
+    expect(row).not.toContain("check--failed");
+  });
+
   it("draws the ticks for a build's files smaller than the rest", () => {
     const story: Story = { ...sc.hero.story, checks: [{ key: "mark-project", label: "Project written", status: "done", detail: null, since: null }, { key: "built", label: "Built", status: "todo", detail: null, since: null }] };
     const row = checksRow(story, K)?.text ?? "";
@@ -246,12 +255,15 @@ describe("small helpers", () => {
 
   it("takes the build time from the log when it has it, else from the idea's two times", () => {
     const idea = fakeIdea({ buildStartedAt: boise(10, 1, 0, 40), builtAt: boise(10, 1, 3, 20) });
-    const facts = { startedAt: "", by: "build" as const, signIn: null, sandboxCheck: null, agentStarted: null, fellBack: null, finished: { at: "", ok: true, seconds: 139, credits: null } };
+    const facts = { startedAt: "", by: "build" as const, signIn: null, sandboxCheck: null, agentStarted: null, fellBack: null, finished: { at: "", ok: true, seconds: 139, credits: null }, slept: null, sealed: null };
     expect(buildSeconds(idea, facts)).toBe(139);
     expect(buildSeconds(idea, undefined)).toBe(160);
     expect(buildSeconds(idea, { ...facts, finished: null })).toBe(160);
     expect(buildSeconds(fakeIdea({ buildStartedAt: boise(10, 1), builtAt: null }), undefined)).toBeNull();
     expect(buildSeconds(fakeIdea({ buildStartedAt: boise(10, 2), builtAt: boise(10, 1) }), undefined)).toBeNull(); // a second try began after the first finished
+    // The Mac slept during the build: the log gives no seconds for it, and the idea's own two times are mostly sleep.
+    const slept = { ...facts, slept: { at: boise(10, 7) }, finished: { at: "", ok: true, seconds: null, credits: null } };
+    expect(buildSeconds(fakeIdea({ buildStartedAt: boise(10, 1), builtAt: boise(10, 7, 0, 5) }), slept)).toBeNull();
   });
 
   it("picks the time that goes with an idea's state", () => {
@@ -337,7 +349,7 @@ describe("the idea card", () => {
   });
 
   it("shows no build time for a build that failed, even when the log says how long it ran", () => {
-    const facts = { startedAt: "", by: "build" as const, signIn: null, sandboxCheck: null, agentStarted: null, fellBack: null, finished: { at: "", ok: false, seconds: 2700, credits: null } };
+    const facts = { startedAt: "", by: "build" as const, signIn: null, sandboxCheck: null, agentStarted: null, fellBack: null, finished: { at: "", ok: false, seconds: 2700, credits: null }, slept: null, sealed: null };
     const card = ideaCard(sc.ideas.baleYield, { ...options, facts }).text;
     expect(card).toContain("Kiro Crew · the build ran past its time limit of 45 minutes</p>");
     expect(card).not.toContain("45 min<");
@@ -936,7 +948,7 @@ describe("one idea's page", () => {
   });
 
   it("says when the second builder made it, how often it was tried, and why it failed", () => {
-    const fellBack = new Map([[sc.ideas.readingLog.id, { startedAt: "", by: "build" as const, signIn: null, sandboxCheck: null, agentStarted: null, fellBack: { at: boise(9, 1, 3) }, finished: null }]]);
+    const fellBack = new Map([[sc.ideas.readingLog.id, { startedAt: "", by: "build" as const, signIn: null, sandboxCheck: null, agentStarted: null, fellBack: { at: boise(9, 1, 3) }, finished: null, slept: null, sealed: null }]]);
     expect(region(renderIdea(fakeSnapshot({ build: fellBack }), sc.ideas.readingLog, fakeStory(sc.ideas.readingLog), fakeExtras(), [], sc.c).main.text, "facts")).toContain("<dt>Builder</dt><dd>Kiro CLI, after the first builder failed</dd>");
     const failed = region(page(sc.ideas.baleYield, fakeExtras()), "facts");
     expect(failed).toContain("<dt>Build tries</dt><dd>2</dd>");
@@ -944,7 +956,7 @@ describe("one idea's page", () => {
     expect(failed).not.toContain("Build time");
     expect(failed).not.toContain("Ran for");
     // When the log says how long a failed build ran, that is not called its build time.
-    const ran = new Map([[sc.ideas.baleYield.id, { startedAt: "", by: "build" as const, signIn: null, sandboxCheck: null, agentStarted: null, fellBack: null, finished: { at: "", ok: false, seconds: 2700, credits: 1.5 } }]]);
+    const ran = new Map([[sc.ideas.baleYield.id, { startedAt: "", by: "build" as const, signIn: null, sandboxCheck: null, agentStarted: null, fellBack: null, finished: { at: "", ok: false, seconds: 2700, credits: 1.5 }, slept: null, sealed: null }]]);
     const failedWithLog = region(renderIdea(fakeSnapshot({ build: ran }), sc.ideas.baleYield, fakeStory(sc.ideas.baleYield), fakeExtras(), [], sc.c).main.text, "facts");
     expect(failedWithLog).toContain("<dt>Ran for</dt><dd>45 min</dd>");
     expect(failedWithLog).toContain("<dt>Kiro credits</dt><dd>1.5 credits</dd>");
@@ -1022,6 +1034,20 @@ describe("Nights", () => {
     const failedText = renderNights([failed], sc.stories, sc.c).main.text;
     expect(failedText).toContain("<small>Could not build · Kiro Crew · 3 min 37 s</small></li>");
     expect(failedText).not.toContain("cut short");
+  });
+
+  it("says beside a run's times that the Mac went to sleep during it", () => {
+    // The lid was closed at 1:04 AM and opened at 7:10 AM: without these words the build would read as a six-hour one.
+    const base = sc.nights[1]!;
+    const slept: Night = { ...base, buildRun: { ...base.buildRun!, finishedAt: boise(10, 7, 10), slept: true }, deliverRun: { ...base.deliverRun!, slept: true } };
+    const text = renderNights([slept], sc.stories, sc.c).main.text;
+    expect(text).toContain("<div><dt>Build</dt><dd>1:00 AM to 7:10 AM · sandbox check passed in 7.1 s · cut short: the Mac went to sleep</dd></div>");
+    expect(text).toContain("<div><dt>Morning</dt><dd>6:30 AM to 6:31 AM · cut short: the Mac went to sleep</dd></div>");
+    // A night nobody slept through says nothing of the kind.
+    expect(main).not.toContain("went to sleep");
+    // The row of the build that was cut short has no build time made of sleep (story.ts hands over none).
+    const row = { idea: sc.ideas.cutShort, outcome: "build_failed" as const, buildSeconds: null, credits: null, by: "build" as const, cutShort: true };
+    expect(renderNights([{ ...slept, ideas: [row], failed: 0, cutShort: 1, credits: null }], sc.stories, sc.c).main.text).toContain("<small>Cut short · Kiro Crew</small></li>");
   });
 
   it("says when the build and the morning ran, and whether the sandbox check passed", () => {

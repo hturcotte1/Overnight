@@ -42,9 +42,10 @@
 # `install crew` does four more things:
 #   - It makes the folders the gateway must find in place, if they are missing: the build jobs'
 #     own temporary folder, <data folder>/tmp/build (private to you; the job's TMPDIR), and, when
-#     the gateway runs inside Overnight's sandbox, ~/workplace/kirocrew-workspace, ~/.kiro/sessions
-#     and ~/.npm. Inside the sandbox the gateway may write in those three, but it may not create
-#     them: the folders they sit in are not writable there.
+#     the gateway runs inside Overnight's sandbox, seven more: ~/workplace/kirocrew-workspace,
+#     four of Kiro's own under ~/.kiro (agents, sessions, settings, crew-auth-staging) and npm's
+#     two, ~/.npm/_cacache and ~/.npm/_logs. Inside the sandbox the gateway may write in those
+#     seven, but it may not create them: the folders they sit in are not writable there.
 #   - It installs the build skill: crew/build-skill.md is copied to
 #     ~/.kiro/crew/skills/overnight-build/SKILL.md. A different file already there is kept beside
 #     it as SKILL.md.bak-<time>. It never writes through a symbolic link.

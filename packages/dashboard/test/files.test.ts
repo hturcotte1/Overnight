@@ -3,10 +3,12 @@
 // Reading the files the idea page shows. Some of them were written by a build agent, so each
 // kind of trap (a link, a named pipe, a folder, a huge file) is put where a file is expected.
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { dataPaths } from "@overnight/core";
+import { fileURLToPath } from "node:url";
+import { prepareWorkspace, retireSealed, sealWorkspace } from "@overnight/builder";
+import { dataPaths, finishedBuildDir } from "@overnight/core";
 import type { DataPaths } from "@overnight/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hasScreenshot, readBrief, readBuildNotes, readReport, readScreenshot, workspaceMarks } from "../src/data/files.ts";
@@ -18,6 +20,13 @@ const ID = "idea_20261009_aa11bb22";
 const HOME = "/Users/sam";
 const PNG_START = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const NOT_FILMING: FilmingPolicy = { on: false, showQuoteFor: new Set() };
+/** An invented idea as the pages see it. */
+const IDEA: DashIdea = {
+  id: ID, state: "built", title: "Packing Checklist", pitch: "Tick off what to pack.", quote: { shown: false, why: "none" }, hidden: false, confidence: 0.9,
+  createdAt: "2026-10-09T18:00:00.000Z", updatedAt: "2026-10-10T13:00:00.000Z", askedAt: null, askExpiresAt: null, answeredAt: null, note: null, slug: null,
+  buildBackend: null, buildStartedAt: null, builtAt: null, publishedUrl: null, publishedAt: null, deliveredAt: null, failureReason: null, failureNotifiedAt: null,
+  rehearsal: false, buildStarts: 1, awaitingRetry: false, hasMorningTodo: false, hasFact: false,
+};
 
 let scratch: string;
 let paths: DataPaths;
@@ -351,6 +360,150 @@ describe("the marks of a build in progress", () => {
 
   it("are nothing when there is no workspace", () => {
     expect(workspaceMarks(paths, ID)).toBeNull();
+  });
+});
+
+// The builder keeps more in <data>/built than finished builds (builder, seal.ts and probe.ts):
+//   .overnight-probe-marker   a file of the sandbox check's, so the folder is never empty
+//   <id>.old-<time>           an older finished build of an idea, moved aside before it was built again
+//   <id>.sealing              a folder of half-made copies, left only by a move that was killed midway
+// None of them is an idea, and none of them is ever read for one. The folders here are made by the
+// builder's own functions, so the names are the real ones.
+describe("what else the builder keeps among the finished builds", () => {
+  const MARKER = ".overnight-probe-marker";
+  const FIRST = new Date("2026-10-10T07:03:20.000Z");
+  const AGAIN = new Date("2026-10-11T07:00:40.000Z");
+  const ALL_MARKS = { started: true, projectWritten: true, packagesInstalled: true, appBuilt: true, notesWritten: true };
+  const NO_MARKS = { started: false, projectWritten: false, packagesInstalled: false, appBuilt: false, notesWritten: false };
+
+  /** A whole invented build in the workspace: every file the marks look for, and notes that say which build it is. */
+  function buildIn(workspace: string, which: string): void {
+    put(path.join(workspace, "BUILD_STATUS.json"), '{"status":"built"}');
+    put(path.join(workspace, "package.json"), "{}");
+    mkdirSync(path.join(workspace, "node_modules"));
+    put(path.join(workspace, "dist", "index.html"), "<!doctype html>");
+    put(path.join(workspace, "BUILD_NOTES.md"), `the notes of ${which}`);
+  }
+
+  /** The first build of the idea, finished and moved out of the build jobs' reach by the builder itself. */
+  function firstBuildSealed(): void {
+    const prepared = prepareWorkspace({ paths, ideaId: ID, brief: "the brief", now: FIRST });
+    buildIn(prepared.workspace, "the first build");
+    expect(sealWorkspace({ paths, ideaId: ID, now: FIRST })).toMatchObject({ ok: true, movedAside: null, notMadeAnew: 0 });
+    // What the sandbox check leaves beside it.
+    put(path.join(paths.built, MARKER), "Overnight keeps this file here for its build sandbox check. It is safe to delete.\n");
+  }
+
+  /** The name the builder gave the older build when it moved it aside. */
+  function asideIn(folder: string): string {
+    const names = readdirSync(folder).filter((name) => name.startsWith(`${ID}.old-`));
+    expect(names).toHaveLength(1);
+    return names[0] ?? "";
+  }
+
+  it("has the sandbox check's file under the name the builder gives it", () => {
+    const probe = readFileSync(fileURLToPath(new URL("../../builder/src/probe.ts", import.meta.url)), "utf8");
+    expect(probe).toContain(`BUILT_MARKER_FILE = "${MARKER}"`);
+    const seal = readFileSync(fileURLToPath(new URL("../../builder/src/seal.ts", import.meta.url)), "utf8");
+    expect(seal).toContain("`${ideaId}.sealing`");
+  });
+
+  it("reads a finished build from its own folder, with the sandbox check's file lying beside it", () => {
+    firstBuildSealed();
+    expect(readdirSync(paths.built).sort()).toEqual([MARKER, ID].sort());
+    expect(finishedBuildDir(paths, ID)).toBe(path.join(paths.built, ID));
+    expect(readBuildNotes(paths, ID, HOME)).toEqual({ text: "the notes of the first build", cut: false });
+    expect(workspaceMarks(paths, ID)).toEqual(ALL_MARKS);
+  });
+
+  it("never reads the older build that was moved aside: an idea being built again shows the new build, from its first file on", () => {
+    firstBuildSealed();
+    // Built again: the builder moves the finished build aside, then makes an empty workspace.
+    expect(retireSealed({ paths, ideaId: ID, now: AGAIN })).toMatchObject({ ok: true });
+    const aside = asideIn(paths.built);
+    expect(aside).toMatch(/^idea_20261009_aa11bb22\.old-\d{8}T\d{6}Z$/);
+    expect(existsSync(path.join(paths.built, aside, "BUILD_NOTES.md"))).toBe(true);
+    // Between the two steps there is no build folder at all: nothing is shown, and nothing is taken from the folder moved aside.
+    expect(readBuildNotes(paths, ID, HOME)).toBeNull();
+    expect(workspaceMarks(paths, ID)).toBeNull();
+
+    const prepared = prepareWorkspace({ paths, ideaId: ID, brief: "the brief", now: AGAIN });
+    expect(workspaceMarks(paths, ID)).toEqual(NO_MARKS);
+    expect(readBuildNotes(paths, ID, HOME)).toBeNull();
+    put(path.join(prepared.workspace, "BUILD_STATUS.json"), '{"status":"building"}');
+    expect(workspaceMarks(paths, ID)).toEqual({ ...NO_MARKS, started: true });
+    put(path.join(prepared.workspace, "BUILD_NOTES.md"), "the notes of the second build");
+    expect(readBuildNotes(paths, ID, HOME)?.text).toBe("the notes of the second build");
+    expect(collectIdeaExtras(paths, { ...IDEA, state: "building" }, HOME, NOT_FILMING)).toMatchObject({ notes: { text: "the notes of the second build" }, marks: { started: true, projectWritten: false, notesWritten: true } });
+
+    // The second build is finished and moved in its turn. Both older things are still there, and neither is read.
+    buildIn(prepared.workspace, "the second build");
+    expect(sealWorkspace({ paths, ideaId: ID, now: AGAIN })).toMatchObject({ ok: true });
+    expect(readdirSync(paths.built).sort()).toEqual([MARKER, ID, aside].sort());
+    expect(readBuildNotes(paths, ID, HOME)?.text).toBe("the notes of the second build");
+  });
+
+  it("does not take a second try's folder that was moved aside in the workspaces for the build either", () => {
+    // The first builder failed and the other one started afresh: the builder moves the first try's folder aside there too.
+    const first = prepareWorkspace({ paths, ideaId: ID, brief: "the brief", now: FIRST });
+    buildIn(first.workspace, "the first try");
+    const second = prepareWorkspace({ paths, ideaId: ID, brief: "the brief", now: AGAIN });
+    expect(second.movedAside).not.toBeNull();
+    expect(asideIn(paths.workspaces)).toMatch(/\.old-/);
+    expect(readBuildNotes(paths, ID, HOME)).toBeNull();
+    expect(workspaceMarks(paths, ID)).toEqual(NO_MARKS);
+  });
+
+  it("reads a finished build as usual when a move that was killed midway left its folder of half-made copies behind", () => {
+    firstBuildSealed();
+    // What such a move leaves: the build in its place, every file whole, and beside it a folder with a copy or two in it.
+    put(path.join(paths.built, `${ID}.sealing`, "1"), "half of a copy of the notes");
+    put(path.join(paths.built, `${ID}.sealing`, "BUILD_NOTES.md"), "not the notes: a copy that was never put in place");
+    expect(readBuildNotes(paths, ID, HOME)?.text).toBe("the notes of the first build");
+    expect(workspaceMarks(paths, ID)).toEqual(ALL_MARKS);
+    expect(JSON.stringify(collectIdeaExtras(paths, { ...IDEA, state: "built" }, HOME, NOT_FILMING))).not.toContain("never put in place");
+    // And when the build itself has been moved aside since, the copies are still not taken for it.
+    expect(retireSealed({ paths, ideaId: ID, now: AGAIN })).toMatchObject({ ok: true });
+    expect(readBuildNotes(paths, ID, HOME)).toBeNull();
+    expect(workspaceMarks(paths, ID)).toBeNull();
+  });
+
+  it("builds no path from any of those names, however they are asked for", () => {
+    firstBuildSealed();
+    retireSealed({ paths, ideaId: ID, now: AGAIN });
+    const aside = asideIn(paths.built);
+    put(path.join(paths.built, `${ID}.sealing`, "BUILD_NOTES.md"), "a copy");
+    // Reports, briefs and pictures under the same names, in case anything ever went looking for them.
+    for (const name of [aside, `${ID}.sealing`, MARKER]) {
+      put(path.join(paths.ideas, name, "brief.md"), "a brief under a name that is no idea's");
+      put(path.join(paths.reports, `${name}.json`), JSON.stringify({ ideaId: name, confirmedLive: true }));
+      put(path.join(paths.screenshots, `${name}.png`), Buffer.concat([PNG_START, Buffer.from("a picture")]));
+    }
+    for (const name of [aside, `${ID}.sealing`, MARKER, `${ID}.old-20261011T070040Z-2`, `built/${ID}`, `../built/${ID}`]) {
+      expect(readBuildNotes(paths, name, HOME), name).toBeNull();
+      expect(workspaceMarks(paths, name), name).toBeNull();
+      expect(readBrief(paths, name, HOME), name).toBeNull();
+      expect(readReport(paths, name), name).toBeNull();
+      expect(readScreenshot(paths, name, "phone"), name).toBeNull();
+      expect(hasScreenshot(paths, name, "phone"), name).toBe(false);
+      expect(collectIdeaExtras(paths, { ...IDEA, id: name, state: "delivered" }, HOME, NOT_FILMING), name).toEqual({ report: null, brief: null, notes: null, shots: { phone: false, desktop: false }, marks: null });
+    }
+  });
+
+  it("falls back to the workspace, and reads nothing through it, when a file or a link stands where a finished build should be", () => {
+    // Not something the builder does (no build job can write in built/): whoever did, the page is not broken by it.
+    put(path.join(paths.workspaces, ID, "BUILD_NOTES.md"), "the workspace's notes");
+    put(path.join(paths.built, ID), "a file under a build's name");
+    expect(readBuildNotes(paths, ID, HOME)?.text).toBe("the workspace's notes");
+    rmSync(path.join(paths.built, ID));
+    put(path.join(scratch, "elsewhere", "BUILD_NOTES.md"), "another folder's notes");
+    symlinkSync(path.join(scratch, "elsewhere"), path.join(paths.built, ID));
+    expect(readBuildNotes(paths, ID, HOME)?.text).toBe("the workspace's notes");
+    // The sandbox check's file as a folder, a pipe or a link changes nothing either.
+    rmSync(path.join(paths.built, ID));
+    pipeAt(path.join(paths.built, MARKER));
+    expect(atOnce(() => readBuildNotes(paths, ID, HOME))?.text).toBe("the workspace's notes");
+    expect(atOnce(() => workspaceMarks(paths, ID))).toEqual({ ...NO_MARKS, notesWritten: true });
   });
 });
 

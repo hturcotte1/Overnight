@@ -47,14 +47,18 @@ const LEVELS: Partial<Record<LogMessageKey, LogLevel>> = {
   sandboxFailed: "error",
   fallback: "warn",
   ideaFailed: "warn",
+  sealedPartly: "error",
+  notSealed: "error",
+  buildSlept: "warn",
+  deliverSlept: "warn",
   notVerified: "warn",
   notSeenLive: "warn",
 };
 
 /** How the two lines that go on after their known start are finished (builder, probe.ts). */
-const TAILS: Partial<Record<LogMessageKey, string>> = {
+export const TAILS: Partial<Record<LogMessageKey, string>> = {
   sandboxPassed:
-    ": the Keychain, Bee, the transcript database, the folders in the home folder and other programs' command lines are out of reach of a job, and it cannot write where our programs are",
+    ": the Keychain, Bee, the transcript database, the folders in the home folder, the finished builds and other programs' command lines are out of reach of a job, and it cannot write where our programs are",
   sandboxFailed: ": nothing will be built with Kiro Crew",
 };
 
@@ -172,6 +176,13 @@ export function sealWorkspace(root: string, ideaId: string): void {
   const id = checked(ideaId);
   moveInside(root, ["workspaces", id], ["built", id]);
 }
+
+/**
+ * What the builder's line about that move says it made anew (its `filesMadeAnew`): every plain
+ * file of the build, its installed packages included. Invented: a small app has about this many.
+ * No page shows the number.
+ */
+export const DEMO_FILES_MADE_ANEW = 1412;
 
 /** Build notes for an invented app. The first lines say nobody built anything. */
 export function demoBuildNotes(title: string, body: readonly string[]): string {

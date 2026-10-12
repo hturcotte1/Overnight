@@ -100,6 +100,8 @@ const BUILD_TICKS: BuildFacts = {
   agentStarted: { at: local("11 01:00", 10), backend: "kiro-crew" },
   fellBack: null,
   finished: null,
+  slept: null,
+  sealed: null,
 };
 const BUILT_TICKS: BuildFacts = { ...BUILD_TICKS, finished: { at: T.built, ok: true, seconds: 160, credits: 4.59 } };
 const DELIVER_TICKS: DeliverFacts = {
@@ -531,6 +533,69 @@ describe("the night's ticks", () => {
     expect(checkOf(failed, "built")).toMatchObject({ label: "Not built", status: "failed", detail: "after 45 min" });
   });
 
+  it("say where the finished build was left, right after 'Built'", () => {
+    const sealedAt = local("11 01:02", 41);
+    const ticksWith = (sealed: BuildFacts["sealed"]) => tell(scene("delivered", { hasFact: true }), { now: local("11 08:00"), build: { ...BUILT_TICKS, sealed }, deliver: DELIVER_TICKS, report: REPORT });
+    // Moved, and every file in it made anew: one more tick of the night, between the build and the morning's check.
+    const moved = ticksWith({ at: sealedAt, ok: true, moved: true, files: null });
+    expect(moved.checks.map((check) => check.key)).toEqual(["sign-in", "sandbox", "agent", "built", "sealed", "checked", "pushed", "live", "told", "fact"]);
+    expect(checkOf(moved, "sealed")).toEqual({ key: "sealed", label: "Moved out of build jobs' reach", status: "done", detail: null, since: null });
+    // Moved, but some of its files were not made anew, so a build job could still change them: not a green tick, and how many files.
+    expect(checkOf(ticksWith({ at: sealedAt, ok: false, moved: true, files: 3 }), "sealed")).toEqual({ key: "sealed", label: "Not fully out of build jobs' reach", status: "failed", detail: "a build job could still change 3 files", since: null });
+    expect(checkOf(ticksWith({ at: sealedAt, ok: false, moved: true, files: 1 }), "sealed")?.detail).toBe("a build job could still change 1 file");
+    expect(checkOf(ticksWith({ at: sealedAt, ok: false, moved: true, files: null }), "sealed")?.detail).toBe("a build job could still change some of its files");
+    // Not moved at all: the morning uses it where every build job can reach it.
+    expect(checkOf(ticksWith({ at: sealedAt, ok: false, moved: false, files: null }), "sealed")).toEqual({ key: "sealed", label: "Still within build jobs' reach", status: "failed", detail: "it could not be moved", since: null });
+    // A log with no line about it (a night from before finished builds were moved) says nothing either way.
+    expect(checkOf(ticksWith(null), "sealed")).toBeUndefined();
+    // It is a tick only: the seven steps are the database's, and stay as they were.
+    expect(statuses(ticksWith({ at: sealedAt, ok: false, moved: false, files: null }))).toBe("done done done done done done done");
+    // Shown as soon as the build is, before the morning.
+    const built = tell(scene("built"), { build: { ...BUILT_TICKS, sealed: { at: sealedAt, ok: true, moved: true, files: null } } });
+    expect(built.checks.map((check) => `${check.key}:${check.status}`)).toEqual(["sign-in:done", "sandbox:done", "agent:done", "built:done", "sealed:done"]);
+  });
+
+  it("say a build that was stopped was stopped, not that it failed, while it has one more try to come", () => {
+    const stopped: BuildFacts = { ...BUILD_TICKS, finished: { at: T.failed, ok: false, seconds: 217, credits: null } };
+    const cutShort = tell(scene("build_failed", { awaitingRetry: true, failureReason: BUILD_STOPPED_REASON }), { now: local("11 08:00"), build: stopped });
+    // Its step is "Not built yet", in the colour of waiting. The two ticks under it used to be red crosses.
+    expect(stepOf(cutShort, "built")).toMatchObject({ label: "Not built yet", status: "waiting" });
+    expect(checkOf(cutShort, "agent")).toEqual({ key: "agent", label: "Kiro Crew was stopped", status: "waiting", detail: null, since: null });
+    expect(checkOf(cutShort, "built")).toEqual({ key: "built", label: "Not built yet", status: "waiting", detail: "after 3 min 37 s", since: null });
+    expect(cutShort.checks.some((check) => check.status === "failed")).toBe(false);
+    // The same log lines for a build that failed for good (its second start, or any other reason) stay a failure.
+    const forGood = tell(scene("build_failed", { awaitingRetry: false, failureReason: BUILD_STOPPED_REASON, buildStarts: 2 }), { now: local("11 08:00"), build: stopped });
+    expect(checkOf(forGood, "agent")).toMatchObject({ label: "Kiro Crew did not finish", status: "failed", detail: null });
+    expect(checkOf(forGood, "built")).toMatchObject({ label: "Not built", status: "failed", detail: "after 3 min 37 s" });
+    // Being built again, it is a build like any other: the retry's own ticks, none of them "waiting".
+    const again = tell(scene("building", { awaitingRetry: false, buildStarts: 2 }), { running: { build: true }, build: BUILD_TICKS });
+    expect(again.checks.map((check) => check.status)).toEqual(["done", "done", "active", "todo"]);
+  });
+
+  it("say the Mac went to sleep, and give no build time, for a build the Mac slept through", () => {
+    // What the log reader hands over for such a build: when the sleep was noticed, and no seconds (they would be the night's hours).
+    const slept: BuildFacts = { ...BUILD_TICKS, slept: { at: local("11 07:10") }, finished: { at: local("11 07:10", 5), ok: false, seconds: null, credits: null } };
+    const way: Array<[IdeaState, string]> = [...WAY_TO.building, ["build_failed", local("11 07:10", 5)]];
+    const first = tell(scene("build_failed", { awaitingRetry: true, failureReason: BUILD_STOPPED_REASON }, way), { now: local("11 08:00"), build: slept });
+    expect(checkOf(first, "agent")).toEqual({ key: "agent", label: "Kiro Crew was stopped", status: "waiting", detail: "the Mac went to sleep", since: null });
+    expect(checkOf(first, "built")).toEqual({ key: "built", label: "Not built yet", status: "waiting", detail: null, since: null });
+    expect(stepOf(first, "built")?.detail).toBe("Cut short. It will be built once more at the next nightly build.");
+    expect(JSON.stringify(first)).not.toMatch(/6 h|370 min/);
+    // On its second start that counts as failed: still stopped by the sleep, and said so.
+    const second = tell(scene("build_failed", { awaitingRetry: false, failureReason: BUILD_STOPPED_REASON, buildStarts: 2 }, way), { now: local("11 08:00"), build: slept });
+    expect(checkOf(second, "agent")).toEqual({ key: "agent", label: "Kiro Crew was stopped", status: "failed", detail: "the Mac went to sleep", since: null });
+    expect(checkOf(second, "built")).toEqual({ key: "built", label: "Not built", status: "failed", detail: null, since: null });
+    // With the second builder: both things are said.
+    const fellBack = tell(scene("build_failed", { awaitingRetry: true, failureReason: BUILD_STOPPED_REASON }, way), { now: local("11 08:00"), build: { ...slept, agentStarted: { at: local("11 01:20"), backend: "kiro-cli" }, fellBack: { at: local("11 01:19") } } });
+    expect(checkOf(fellBack, "agent")).toMatchObject({ label: "Kiro CLI was stopped", detail: "the Mac went to sleep · second builder, after the first could not build it" });
+    // A build that had finished all the same keeps its result, and still has no time made of sleep.
+    const builtWay: Array<[IdeaState, string]> = [...WAY_TO.building, ["built", local("11 07:10", 5)]];
+    const builtAnyway = tell(scene("built", {}, builtWay), { now: local("11 07:11"), build: { ...slept, finished: { at: local("11 07:10", 5), ok: true, seconds: null, credits: 3.2 } } });
+    expect(checkOf(builtAnyway, "agent")).toMatchObject({ label: "Kiro Crew finished", status: "done" });
+    expect(checkOf(builtAnyway, "built")).toMatchObject({ label: "Built", status: "done", detail: "3.2 Kiro credits" });
+    expect(stepOf(builtAnyway, "built")?.detail).toBe("Kiro Crew · 3.2 Kiro credits");
+  });
+
   it("say that the wrist was told an app could not be finished", () => {
     const story = tell(scene("build_failed", { failureNotifiedAt: local("11 06:31") }), { now: local("11 08:00"), deliver: { firstAt: local("11 06:31"), checked: null, pushed: null, live: null, told: { at: local("11 06:31"), what: "could-not-finish" }, fact: null } });
     expect(story.checks).toEqual([{ key: "told", label: "Told the wrist it could not be finished", status: "done", detail: null, since: null }]);
@@ -898,7 +963,7 @@ describe("tonight's queue", () => {
   it("does not take a build started by hand in the small hours for tonight's run either, when the build log says whose run it is", () => {
     const approved = [titled("approved", "One", { answeredAt: local("10 10:00") }), titled("approved", "Two", { answeredAt: local("10 11:00") }), titled("approved", "Three", { answeredAt: local("10 12:00") })];
     const byHand = titled("building", "By hand", {}, [["heard", T.heard], ["asked", T.asked], ["approved", T.approved], ["building", local("11 09:00")]]);
-    const run = (command: BuildRun["command"], finishedAt: string | null): BuildRun => ({ command, startedAt: local("11 09:00"), finishedAt, waiting: null, taking: null, built: null, failed: null, paused: false, nothingApproved: false, sandboxCheck: null, ideaIds: [byHand.idea.id] });
+    const run = (command: BuildRun["command"], finishedAt: string | null): BuildRun => ({ command, startedAt: local("11 09:00"), finishedAt, waiting: null, taking: null, built: null, failed: null, paused: false, nothingApproved: false, slept: false, sandboxCheck: null, ideaIds: [byHand.idea.id] });
     const morning = { at: local("11 09:02"), nextBuildAt: local("12 01:00"), running: { listener: true, build: true, deliver: false } };
     // 9:02 AM, after tonight's build time and before noon. The log's open run is `build-now`: the next nightly build has all its room.
     expect(rows(snapshot([...approved, byHand], { ...morning, buildRuns: [run("build-now", null)] }))).toEqual(["By hand: building", "One: tonight", "Two: tonight", "Three: later"]);
@@ -1248,8 +1313,8 @@ describe("where the day on the Today page starts", () => {
 });
 
 describe("nights", () => {
-  const BUILD_RUN: BuildRun = { command: "build", startedAt: local("11 01:00"), finishedAt: local("11 01:03"), waiting: 1, taking: 1, built: 1, failed: 0, paused: false, nothingApproved: false, sandboxCheck: { at: local("11 01:00", 9), ok: true, ms: 7100, reused: false }, ideaIds: [] };
-  const DELIVER_RUN: DeliverRun = { command: "build", startedAt: local("11 06:30"), finishedAt: local("11 06:32"), delivered: 1, failed: 0, notified: 0, ideaIds: [] };
+  const BUILD_RUN: BuildRun = { command: "build", startedAt: local("11 01:00"), finishedAt: local("11 01:03"), waiting: 1, taking: 1, built: 1, failed: 0, paused: false, nothingApproved: false, slept: false, sandboxCheck: { at: local("11 01:00", 9), ok: true, ms: 7100, reused: false }, ideaIds: [] };
+  const DELIVER_RUN: DeliverRun = { command: "build", startedAt: local("11 06:30"), finishedAt: local("11 06:32"), delivered: 1, failed: 0, notified: 0, slept: false, ideaIds: [] };
   const titled = (state: IdeaState, title: string, more: Partial<DashIdea> = {}, way?: Array<[IdeaState, string]>) => scene(state, { title, ...more }, way);
   const headline = (given: Array<{ idea: DashIdea; events: IdeaEvent[] }>, look: Partial<Snapshot> = {}): string | undefined => groupNights(snapshot(given, look), CONFIG)[0]?.headline;
 
@@ -1271,6 +1336,30 @@ describe("nights", () => {
         deliverRun: DELIVER_RUN,
       },
     ]);
+  });
+
+  it("gives no build time to the build a run was on when the Mac went to sleep, and keeps the times of what it built before", () => {
+    // 1:00 AM: built in three minutes. 1:04 AM: the next build starts, the lid is closed, and the Mac wakes at 7:10 AM.
+    const before = titled("built", "Built before the sleep", {}, [...WAY_TO.approved, ["building", local("11 01:00")], ["built", local("11 01:03")]]);
+    const during = titled("build_failed", "Slept through", { awaitingRetry: true, failureReason: BUILD_STOPPED_REASON }, [...WAY_TO.approved, ["building", local("11 01:04")], ["build_failed", local("11 07:10")]]);
+    const sleptRun: BuildRun = { ...BUILD_RUN, finishedAt: local("11 07:10", 2), built: 1, failed: 1, slept: true };
+    const night = (look: Partial<Snapshot>) => groupNights(snapshot([before, during], { at: local("11 08:00"), ...look }), CONFIG)[0];
+    const rows = (look: Partial<Snapshot>) => night(look)?.ideas.map((row) => [row.idea.title, row.buildSeconds, row.cutShort]);
+
+    // The run's own line is enough, whatever the log still holds about the idea.
+    expect(rows({ buildRuns: [sleptRun] })).toEqual([["Built before the sleep", 180, false], ["Slept through", null, true]]);
+    expect(night({ buildRuns: [sleptRun] })).toMatchObject({ built: 1, failed: 0, cutShort: 1, buildRun: { slept: true } });
+    // So is the idea's own tick, when the run's line has scrolled out of the part of the log that is read.
+    const sleptTicks: BuildFacts = { ...BUILD_TICKS, startedAt: local("11 01:04", 1), slept: { at: local("11 07:10") }, finished: { at: local("11 07:10"), ok: false, seconds: null, credits: null } };
+    expect(rows({ build: new Map([[during.idea.id, sleptTicks]]) })).toEqual([["Built before the sleep", 180, false], ["Slept through", null, true]]);
+    // With neither, all there is to go by is the timeline, as before: six hours.
+    expect(rows({})).toEqual([["Built before the sleep", 180, false], ["Slept through", 21_960, true]]);
+    // A run that slept on another night says nothing about this one.
+    const otherNight: BuildRun = { ...sleptRun, startedAt: local("10 01:00"), finishedAt: local("10 07:00") };
+    expect(rows({ buildRuns: [otherNight] })?.[1]).toEqual(["Slept through", 21_960, true]);
+    // Nor does one that began after this build did.
+    const later: BuildRun = { ...sleptRun, startedAt: local("11 02:00") };
+    expect(rows({ buildRuns: [later] })?.[1]).toEqual(["Slept through", 21_960, true]);
   });
 
   it("works from the timeline alone when there is no log", () => {
@@ -1376,7 +1465,7 @@ describe("nights", () => {
       // Whether a deliver is running cannot be told: the usual line.
       expect(headline([titled("built", "A")], { ...morning, running: { listener: true, build: false, deliver: null } })).toBe("Built. Checks start at 6:30 AM.");
       // A deliver started by hand takes only its own idea: the app built last night still waits for the morning.
-      const byHand: DeliverRun = { command: "build-now", startedAt: local("11 06:31"), finishedAt: null, delivered: null, failed: null, notified: null, ideaIds: [] };
+      const byHand: DeliverRun = { command: "build-now", startedAt: local("11 06:31"), finishedAt: null, delivered: null, failed: null, notified: null, slept: false, ideaIds: [] };
       expect(headline([titled("built", "A")], { ...morning, deliverRuns: [byHand] })).toBe("Built. Checks start at 6:30 AM.");
       expect(headline([titled("built", "A")], { ...morning, deliverRuns: [{ ...byHand, command: "build" }] })).toBe("Built. The morning's checks are running now.");
       // Nothing is promised for a night long past, whatever is running now.

@@ -12,7 +12,7 @@
 import { budgetReachedText, describeNight, LATE_AFTER_MS, localDateKey, localDayBounds, parseHhMm, previousLocalTime } from "@overnight/core";
 import type { ClockedJob, Config, IdeaEvent, IdeaState, NightWait } from "@overnight/core";
 import { DELIVER_LEAD_MINUTES, INTERRUPTED_GRACE_MINUTES } from "./log-messages.ts";
-import { backendLabel, clockTime, dateTime, duration, minusMinutes, plural } from "./render/format.ts";
+import { backendLabel, clockTime, dateTime, duration, MAC_SLEPT, minusMinutes, plural } from "./render/format.ts";
 import type { BuildFacts, BuildHold, BuildRun, Check, ChecksHold, DashIdea, DeliverFacts, DeliverRun, IdeaExtras, Night, NightOutlook, Running, RunCommand, Snapshot, StepKey, StepStatus, Story, StoryStep, TonightQueue } from "./types.ts";
 
 const MINUTE_MS = 60_000;
@@ -243,6 +243,8 @@ export function storyOf(
   const builder = backendLabel(idea.buildBackend);
   const builtSeconds = (): number | null => {
     if (ticks?.finished?.ok === true && ticks.finished.seconds !== null) return ticks.finished.seconds;
+    // The Mac slept during this build: the time between its two events is mostly sleep.
+    if (ticks !== null && ticks.slept !== null) return null;
     const from = tryStartMs;
     const to = toMs(lastInto(events, "built")) ?? toMs(idea.builtAt);
     return from !== null && to !== null && to >= from ? Math.round((to - from) / 1000) : null;
@@ -371,6 +373,8 @@ export function storyOf(
     checks.push({ key, label, status, detail, since });
   };
   const buildingNow = idea.state === "building" && runningSince !== null;
+  // A build that was stopped and gets one more try has not failed. Its ticks say so, as its step and its pill do.
+  const oneMoreTry = idea.state === "build_failed" && idea.awaitingRetry;
 
   if (ticks !== null) {
     const signIn = ticks.signIn;
@@ -390,8 +394,12 @@ export function storyOf(
     if (agent !== null) {
       const name = backendLabel(agent.backend);
       const secondTry = ticks.fellBack === null ? null : "second builder, after the first could not build it";
-      if (finished !== null) tick("agent", finished.ok ? `${name} finished` : `${name} did not finish`, finished.ok ? "done" : "failed", secondTry);
-      else if (buildingNow) tick("agent", `${name} is building`, "active", secondTry, agent.at);
+      if (finished !== null && finished.ok) tick("agent", `${name} finished`, "done", secondTry);
+      else if (finished !== null) {
+        // Stopped is not the builder's doing: the Mac slept, or the run was told to stop (the one reason a build gets one more try).
+        const slept = ticks.slept !== null;
+        tick("agent", slept || oneMoreTry ? `${name} was stopped` : `${name} did not finish`, oneMoreTry ? "waiting" : "failed", joined([slept ? MAC_SLEPT : null, secondTry]));
+      } else if (buildingNow) tick("agent", `${name} is building`, "active", secondTry, agent.at);
       // No line says how it ended (the build was cut off, or the log's end is not there): that it started is all we know.
       else tick("agent", `${name} started`, "done", secondTry);
     }
@@ -408,9 +416,18 @@ export function storyOf(
   if (ticks !== null) {
     const finished = ticks.finished;
     if (finished !== null) {
+      const after = finished.seconds === null ? null : `after ${duration(finished.seconds * 1000)}`;
       if (finished.ok) tick("built", "Built", "done", joined([finished.seconds === null ? null : duration(finished.seconds * 1000), finished.credits === null ? null : plural(finished.credits, "Kiro credit")]));
-      else tick("built", "Not built", "failed", finished.seconds === null ? null : `after ${duration(finished.seconds * 1000)}`);
+      else if (oneMoreTry) tick("built", "Not built yet", "waiting", after);
+      else tick("built", "Not built", "failed", after);
     } else if (idea.state === "building") tick("built", "Built", "todo");
+    // Where the finished build was left: out of the reach of every later build job, or not (builder, seal.ts).
+    const sealed = ticks.sealed;
+    if (sealed !== null) {
+      if (sealed.ok) tick("sealed", "Moved out of build jobs' reach", "done");
+      else if (sealed.moved) tick("sealed", "Not fully out of build jobs' reach", "failed", `a build job could still change ${sealed.files === null ? "some of its files" : plural(sealed.files, "file")}`);
+      else tick("sealed", "Still within build jobs' reach", "failed", "it could not be moved");
+    }
   }
   if (checkedFact !== null) {
     if (checkedFact.ok) tick("checked", "Checked in the sandbox", "done", checkedDetail());
@@ -726,12 +743,22 @@ export function groupNights(s: Snapshot, config: Config): Night[] {
     .slice(0, MAX_NIGHTS)
     .map(([key, night]): Night => {
       const gathered = [...night.rows.values()].sort((a, b) => a.firstMs - b.firstMs);
+      // A run the Mac slept through stopped the build it was on when the Mac woke: the time from that
+      // build's start to its end is mostly sleep, and is not shown as a build time. (Whatever the
+      // run built before the sleep ended in "built", and keeps its time.)
+      const sleptRuns = night.buildRuns.filter((run) => run.slept);
+      const sleptThrough = (row: { builtHere: boolean; buildingMs: number | null }): boolean => {
+        const began = row.buildingMs;
+        if (row.builtHere || began === null) return false;
+        return sleptRuns.some((run) => (toMs(run.startedAt) ?? Infinity) <= began && (run.finishedAt === null || began <= (toMs(run.finishedAt) ?? -Infinity)));
+      };
       const ideas = gathered.map((row): NightRow => {
         // The log's ticks are about an idea's latest build. They are this night's only if that build began in it.
         const ticks = s.build.get(row.idea.id);
         const mine = ticks !== undefined && toMs(ticks.startedAt) !== null && nightKey(ticks.startedAt, zone) === key ? ticks : null;
         const fromEvents = row.buildingMs !== null && row.endMs !== null && row.endMs >= row.buildingMs ? Math.round((row.endMs - row.buildingMs) / 1000) : null;
-        return { idea: row.idea, outcome: row.outcome, buildSeconds: mine?.finished?.seconds ?? fromEvents, credits: mine?.finished?.credits ?? null, by: mine?.by ?? null, cutShort: resultOf(row) === "retry" };
+        const slept = (mine !== null && mine.slept !== null) || sleptThrough(row);
+        return { idea: row.idea, outcome: row.outcome, buildSeconds: slept ? null : (mine?.finished?.seconds ?? fromEvents), credits: mine?.finished?.credits ?? null, by: mine?.by ?? null, cutShort: resultOf(row) === "retry" };
       });
       const results = ideas.map(resultOf);
       const buildRun = mainRun(night.buildRuns);

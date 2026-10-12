@@ -377,9 +377,12 @@ async function buildIdea(listed: Idea, deps: BuildDeps, now: () => Date, stop: A
     // Kiro Crew job could otherwise reach a Kiro CLI build too.
     const sealed = sealWorkspace({ paths: deps.paths, ideaId: idea.id, now: now() });
     if (!sealed.ok) logger.error("a finished build could not be moved out of the builders' reach; the morning uses it where it is", { ideaId: idea.id, reason: sealed.reason });
-    // Moved, but not every file in it is a new one: what its build kept open, or linked from a
-    // folder jobs may write, still leads to those (seal.ts). A person should look before trusting it.
-    else if ((sealed.notMadeAnew ?? 0) > 0) logger.error("a finished build was moved out of the builders' reach, but some of its files could not be made anew; its own build could still change those", { ideaId: idea.id, files: sealed.notMadeAnew, filesMadeAnew: sealed.madeAnew });
+    // Moved, but not every file in it is a new one. A hard link its build left in a folder jobs
+    // may write still leads to those, for ANY later job (measured: a later job changed a sealed
+    // file that way), and so does a file a program of the build still has open (seal.ts). Nothing
+    // else changes: the idea stays built and the morning tests the app before publishing it, as
+    // it does every app. A person should look before trusting this one.
+    else if ((sealed.notMadeAnew ?? 0) > 0) logger.error("a finished build was moved out of the builders' reach, but some of its files could not be made anew; any later job could still change those, through a hard link the build left; the morning still tests the app before publishing it", { ideaId: idea.id, files: sealed.notMadeAnew, filesMadeAnew: sealed.madeAnew });
     else logger.info("finished build moved out of the builders' reach", { ideaId: idea.id, filesMadeAnew: sealed.madeAnew });
   }
   return outcome.ok ? { ...outcome, ms: totalMs } : { ...outcome, ms: totalMs, reason: clip(reason) };

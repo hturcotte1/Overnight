@@ -49,7 +49,9 @@ export type SealResult =
       madeAnew?: number;
       /**
        * sealWorkspace only: how many files (and folders that could not be looked into) were NOT
-       * made anew. 0 is a whole seal. The build that made them may still be able to change these.
+       * made anew. 0 is a whole seal. Any later job could still change these, through a hard link
+       * their build left in a folder jobs may write, and so could a program that build left
+       * running with one of them open.
        */
       notMadeAnew?: number;
     }

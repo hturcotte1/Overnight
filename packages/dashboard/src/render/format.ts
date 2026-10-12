@@ -171,6 +171,9 @@ export function backendLabel(name: string | null): string {
   return Object.hasOwn(BACKEND_LABELS, name) ? (BACKEND_LABELS[name] ?? name) : name;
 }
 
+/** Why a run stopped what it was doing, when its log says so (cli, sleep-watch.ts): on a build's ticks, and beside a run's times on the Nights page. */
+export const MAC_SLEPT = "the Mac went to sleep";
+
 /** Each idea state in the words the pages use. */
 export const STATE_LABELS: Readonly<Record<IdeaState, string>> = Object.freeze({
   heard: "Heard",

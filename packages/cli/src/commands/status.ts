@@ -12,6 +12,7 @@
 import {
   buildBudget,
   CLOCKED_JOBS,
+  currentSlot,
   describeNight,
   errorSummary,
   formatLocal,
@@ -26,7 +27,7 @@ import {
   readLastNightRun,
   readNightRun,
 } from "@overnight/core";
-import type { BuildBudget, ClockedJob, Config, DetectorOutcome, IdeaState, LoginState, NightView, Store } from "@overnight/core";
+import type { BuildBudget, ClockedJob, Config, DetectorOutcome, IdeaState, LoginState, NightClockConfig, NightRun, NightView, Store } from "@overnight/core";
 import type { JobTrigger, ListenerState, NightJobsState } from "../background.ts";
 import { installCommand, installCommands, NIGHT_JOBS } from "../background.ts";
 import { oneLine, plural, toJson } from "../output.ts";
@@ -70,7 +71,7 @@ export interface StatusDeps {
    * If the check itself fails, status says it could not tell and still shows everything else.
    */
   gatewayAnswers?: () => Promise<boolean>;
-  /** Is the build, or the deliver, running on this data folder right now (is its lock held)? Null if that could not be told. Left out, status takes it as not known. */
+  /** Is the build, or the deliver, running on this data folder right now (is its lock held)? Null if that could not be told. Left out, status takes it as not known and the report has no `lockHeld`. */
   jobRunning?: (job: ClockedJob) => boolean | null;
   /** How macOS starts the build and the deliver job: every minute ("timer"), or still by its calendar. Left out, status does not mention the night clock. */
   jobTriggers?: () => Record<ClockedJob, JobTrigger | null>;
@@ -107,11 +108,48 @@ export type NightClockView = NightView & {
    * after it: the job's time, TZ or the Mac's clock was moved (night-tick.ts, `nextStartAt`).
    */
   nextStartAt: string;
-  /** Does some process hold the job's lock right now: a run of this kind is going on this data folder, however it was started? Null if that could not be told. */
-  lockHeld: boolean | null;
+  /**
+   * Does some process hold the job's lock right now: a run of this kind is going on this data
+   * folder, however it was started? Null if the look itself failed (the lock file could not be
+   * used). Only when the caller can check it.
+   */
+  lockHeld?: boolean | null;
   /** True when the job has tried for minutes to start the run that is due and the work never begins. The reason is in the job's log (night-tick.ts, `runNotStarting`). */
   notStarting: boolean;
+  /**
+   * True when the run that is due may be starting at this very moment: some process holds the
+   * job's lock, and the record is as the job's own check leaves it when it hands over to the work
+   * (`runMayBeStarting`). Either that check is about to write the start, or another run has the
+   * lock and the due one waits for it. Nothing stored says which.
+   */
+  mayBeStarting: boolean;
 };
+
+/**
+ * May the job's own check be starting the run that is due, at this moment?
+ *
+ * A check takes the job's lock, writes the slot's record open, started by nothing and waiting for
+ * nothing, and hands over to the work (night-tick.ts, `runSlot`). The work writes the start once
+ * the builder or the deliver step has loaded, a second or so later. In between the lock is held
+ * and the record shows no start: the run is starting, and nothing is holding it up.
+ *
+ * A build-now, or a run by hand, that holds the lock while a due run waits for it looks the same
+ * whenever the record already stands like that, which it does after a try that ended before the
+ * work began. Nothing stored says who holds a lock. The job's heartbeat does not settle it either:
+ * a record first noticed by the job's latest check is nearly always that check's own start, but a
+ * try that failed at once and a run by hand begun within the same minute leave exactly that.
+ * So this answers "may be", and `status` says both.
+ *
+ * False for any other record (another day's, or one that is waiting for something): the job's
+ * own check never holds the lock over such a record for longer than an instant.
+ * `lockHeld` is whether some process holds the job's lock right now (null: could not tell).
+ */
+function runMayBeStarting(input: { job: ClockedJob; now: Date; config: NightClockConfig; record: NightRun | null; lockHeld: boolean | null }): boolean {
+  const { record } = input;
+  if (input.lockHeld !== true || record === null) return false;
+  if (record.startedAt !== null || record.closedAt !== null || record.waiting !== null) return false;
+  return record.day === currentSlot(input.job, input.now, input.config).day;
+}
 
 export interface StatusReport {
   paused: boolean;
@@ -155,7 +193,11 @@ export interface StatusReport {
   nextBuildAt: string;
   /** When the deliver job next runs by the settings alone (UTC): 30 minutes before DELIVER_TIME. */
   nextDeliverAt: string;
-  /** How many of the waiting ideas the next build takes: the nightly limit, less the builds already started on the local day it runs in. */
+  /**
+   * How many of the waiting ideas the next build takes: the nightly limit, less the builds already
+   * started on the local day it runs in. The next build is the one the "Next build" row names, so
+   * while a build is going, or is due and has not started, that day is today.
+   */
   nextBuildTakes: number;
   /** Kiro credits counted against MAX_BUILD_CREDITS_PER_MONTH this calendar month (in `timeZone`), and whether the month's limit is reached. */
   buildCredits: BuildBudget;
@@ -204,8 +246,9 @@ export function collectStatus(deps: Omit<StatusDeps, "write" | "gatewayAnswers" 
       // A job that is building or delivering does not ask the clock meanwhile: its lock says it is alive.
       fresh: running === true || (checkedAt !== null && now.getTime() - Date.parse(checkedAt) <= NIGHT_CHECK_FRESH_MS),
       nextStartAt: nextStartAt(job, now, config, record).toISOString(),
-      lockHeld: running,
+      ...(deps.jobRunning === undefined ? {} : { lockHeld: running }),
       notStarting: runNotStarting({ job, now, config, record, lockHeld: running }),
+      mayBeStarting: runMayBeStarting({ job, now, config, record, lockHeld: running }),
     };
   };
   const nightClock = { tickSeconds: NIGHT_TICK_SECONDS, build: clockOf("build"), deliver: clockOf("deliver") };
@@ -217,10 +260,11 @@ export function collectStatus(deps: Omit<StatusDeps, "write" | "gatewayAnswers" 
   const waitingToBuild = (ideas.approved ?? 0) + waitingForSecondTry;
   const nextBuildAt = nextSlotAt("build", now, config);
   // The nightly limit counts the local day the build runs in, which is usually tomorrow's. That
-  // build is the one the "Next build" row names: the clock's own next start when the job goes by
-  // the clock on this data folder.
+  // build is the one the "Next build" row names. A build that is going, or that is due and has
+  // not started, runs today. Otherwise it is the clock's own next start when the job goes by the
+  // clock on this data folder, and the next time by the settings when it does not.
   const buildOnClock = goesByTheClock(jobsHere, nightClock.build.trigger);
-  const buildDay = localDayBounds(buildOnClock ? new Date(nightClock.build.nextStartAt) : nextBuildAt, config.timeZone);
+  const buildDay = localDayBounds(runIsNow(nightClock.build, buildOnClock) ? now : buildOnClock ? new Date(nightClock.build.nextStartAt) : nextBuildAt, config.timeZone);
   const startedThatDay = store.countBuildsStartedBetween(buildDay.start.toISOString(), buildDay.end.toISOString());
   return {
     paused: store.isPaused(config.pausedByDefault),
@@ -264,6 +308,14 @@ export function collectStatus(deps: Omit<StatusDeps, "write" | "gatewayAnswers" 
  */
 function goesByTheClock(jobsBelongHere: boolean | null | undefined, trigger: JobTrigger | null | undefined): boolean {
   return jobsBelongHere !== false && trigger !== null && trigger !== "calendar";
+}
+
+/**
+ * Is the run a job's "Next" row names one of right now: a run that is going, or one that is due
+ * and has not started? These are the two cases `nextRunWords` puts before the job's next time.
+ */
+function runIsNow(view: NightClockView, onClock: boolean): boolean {
+  return (view.state === "running" && view.lastRun !== null) || (view.state === "due" && onClock);
 }
 
 /** "3 (heard 1, asked 2)", or just "0". */
@@ -370,13 +422,22 @@ const WAITING_WORDS: Record<NonNullable<NightView["waiting"]>, string> = {
 
 /**
  * Why a run that is due has not started, for the front of its row. What is true right now comes
- * first (another run holds the job's lock), then the reason the job itself stored, then what the
- * record shows (tried, and the work never began).
+ * first (some process holds the job's lock: the job's own check, starting this very run, or
+ * another run that this one waits for), then the reason the job itself stored, then what the
+ * record shows (tried, and the work never began). With none of those, the run starts at one of
+ * the job's next checks, unless status could not even look at the job's lock.
  */
 function dueWords(job: ClockedJob, view: NightClockView): string {
-  if (view.lockHeld === true) return `waiting for the ${WORK_WORDS[job]} that is going on this data folder right now (a build-now, or one started by hand)`;
+  const heldUp = `waiting for the ${WORK_WORDS[job]} that is going on this data folder right now (a build-now, or one started by hand)`;
+  // The second or so between the job's check handing over and the work writing its start. Or a
+  // run by hand after a try that got nowhere. Both are said, because nothing can tell them apart.
+  if (view.mayBeStarting) return `starting now, or ${heldUp}`;
+  if (view.lockHeld === true) return heldUp;
   if (view.waiting !== null) return WAITING_WORDS[view.waiting];
   if (view.notStarting && view.fresh) return `the ${job} job is awake and tries every minute, but the ${WORK_WORDS[job]} does not start (the reason is in logs/${job}.log)`;
+  // The look at the job's lock failed: its file cannot be used. The job takes that same lock
+  // before it starts anything, so "in a minute or two" would promise more than is known.
+  if (view.lockHeld === null) return `could not tell whether a ${WORK_WORDS[job]} is going on this data folder right now (${job}.lock in the data folder could not be used, and the ${job} job needs it to start)`;
   return "as soon as the Mac has been awake for a minute or two";
 }
 

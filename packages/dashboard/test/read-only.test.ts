@@ -30,8 +30,8 @@ function imports(text: string): Array<{ from: string; names: string }> {
   return Array.from(text.matchAll(/^(?:import|export)\s+(?:type\s+)?([^;]*?)\s+from\s+"([^"]+)";/gms), (match) => ({ names: match[1] ?? "", from: match[2] ?? "" }));
 }
 
-/** The only things this half may take from the file system: looking, and reading. */
-const READING = new Set(["closeSync", "constants", "existsSync", "fstatSync", "lstatSync", "openSync", "readFileSync", "readSync", "readdirSync", "realpathSync", "statSync"]);
+/** The only things this half may take from the file system: looking, and reading. Listing a folder is not among them (see the test about it). */
+const READING = new Set(["closeSync", "constants", "existsSync", "fstatSync", "lstatSync", "openSync", "readFileSync", "readSync", "realpathSync", "statSync"]);
 
 describe("the half of the dashboard that shows real data (src/ without src/demo)", () => {
   it("is every source the package has outside the demo, and there are some", () => {
@@ -63,6 +63,14 @@ describe("the half of the dashboard that shows real data (src/ without src/demo)
     // No file is opened by a mode written as text ("w", "a", "r+"), and no flag that makes or changes a file is named.
     expect(text).not.toMatch(/openSync\([^)]*,\s*["'`]/);
     expect(text).not.toMatch(/\bO_(WRONLY|RDWR|CREAT|APPEND|TRUNC|EXCL)\b/);
+  });
+
+  // An idea is an idea because the database says so. No page is made from what happens to lie in a
+  // folder: the builder keeps older builds, half-made copies and a file of its sandbox check in
+  // <data>/built beside the finished builds, and a build job can make any name it likes in a workspace.
+  it.each(sources)("$file lists no folder: whatever it reads, it asks for by a name of its own", ({ text }) => {
+    expect(text).not.toMatch(/\b(readdir|readdirSync|opendir|opendirSync|scandir|glob|globSync)\b/);
+    expect(text).not.toMatch(/\bwithFileTypes\b/);
   });
 
   it("opens a file in one place only, read-only and never through a link", () => {
@@ -128,6 +136,7 @@ describe("the rule itself", () => {
     expect(imports('import { writeFileSync } from "node:fs";')).toEqual([{ names: "{ writeFileSync }", from: "node:fs" }]);
     expect(imports('import type {\n  A,\n  B,\n} from "./types.ts";')).toEqual([{ names: "{\n  A,\n  B,\n}", from: "./types.ts" }]);
     expect(imports('export { seedDemoData } from "./demo/seed.ts";')).toEqual([{ names: "{ seedDemoData }", from: "./demo/seed.ts" }]);
-    expect(READING.has("writeFileSync") || READING.has("mkdirSync") || READING.has("rmSync") || READING.has("renameSync")).toBe(false);
+    expect(READING.has("writeFileSync") || READING.has("mkdirSync") || READING.has("rmSync") || READING.has("renameSync") || READING.has("readdirSync")).toBe(false);
+    expect(code('import { readdirSync } from "node:fs";\nconst names = readdirSync(folder);')).toMatch(/\b(readdir|readdirSync|opendir|opendirSync|scandir|glob|globSync)\b/);
   });
 });

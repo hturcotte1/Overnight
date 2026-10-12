@@ -39,6 +39,15 @@ export const LOG_MESSAGES = {
   fallback:         { log: "build", text: "build failed; trying the other backend once", match: "exact", source: "packages/builder/src/night.ts" },   // ideaId
   ideaBuilt:        { log: "build", text: "build finished", match: "exact", source: "packages/builder/src/night.ts" },                        // ideaId, backend, seconds, credits
   ideaFailed:       { log: "build", text: "build failed", match: "exact", source: "packages/builder/src/night.ts" },                          // ideaId, seconds
+  // Where a finished build ended up: out of the build jobs' reach (builder, seal.ts), or not quite, or not at all.
+  // The middle one goes on to say who could still change the files that were not made anew, and that the morning
+  // tests the app all the same. The page takes nothing from that part: "not made anew" is all it goes by.
+  sealed:           { log: "build", text: "finished build moved out of the builders' reach", match: "exact", source: "packages/builder/src/night.ts" },   // ideaId
+  sealedPartly:     { log: "build", text: "a finished build was moved out of the builders' reach, but some of its files could not be made anew", match: "starts", source: "packages/builder/src/night.ts" },   // ideaId, files
+  notSealed:        { log: "build", text: "a finished build could not be moved out of the builders' reach; the morning uses it where it is", match: "exact", source: "packages/builder/src/night.ts" },   // ideaId
+  // The Mac slept through part of a run. The text is the start every command's line shares (SLEPT_LINE); what follows it differs by command.
+  buildSlept:       { log: "build", text: "the Mac went to sleep during the run; what was in progress was stopped", match: "starts", source: "packages/cli/src/sleep-watch.ts" },
+  deliverSlept:     { log: "deliver", text: "the Mac went to sleep during the run; what was in progress was stopped", match: "starts", source: "packages/cli/src/sleep-watch.ts" },
   deliverRunStart:  { log: "deliver", text: "overnight deliver starting", match: "exact", source: "packages/cli/src/commands/deliver.ts" },
   deliverRunEnd:    { log: "deliver", text: "overnight deliver finished", match: "exact", source: "packages/cli/src/commands/deliver.ts" },   // delivered, failed, notified
   handDeliverStart: { log: "deliver", text: ": deliver starting", match: "ends", source: "packages/cli/src/commands/build-now.ts" },
@@ -52,6 +61,17 @@ export const LOG_MESSAGES = {
   toldFailure:      { log: "deliver", text: "told the wearer an app could not be finished", match: "exact", source: "packages/deliver/src/deliver.ts" },
   fact:             { log: "deliver", text: "wrote the Bee fact", match: "exact", source: "packages/deliver/src/deliver.ts" },
 } as const satisfies Record<string, LogMessage>;
+
+// Lines left out on purpose, so nobody adds them thinking they were forgotten:
+//   - "build night stopped early: the month's ceiling on build credits is reached" and "build-now
+//     refused: …": the pages say that the month is used up from the ledger in the database, as
+//     `overnight status` does, and that stays right when a log is lost.
+//   - "build try counted" and the two warnings about a builder's credit figure: what was counted
+//     is the ledger's to say (Settings shows its sum). The credits beside a build are the
+//     builder's own figure for the try that built it, from "build finished".
+//   - "the Mac slept during a kiro crew build; …" (and "kiro cli"): the builder's own note for
+//     its cost reckoning. The run's line above says the same thing once, for either builder.
+//   - Every "… did not stop in time …" and "could not …" line: a person reads those in the log.
 
 /**
  * The only fields of a log line that are kept. Everything else is dropped when the line is read:

@@ -26,7 +26,7 @@ import { REHEARSAL_CONVERSATION_KEY } from "../log-messages.ts";
 import { backendLabel } from "../render/format.ts";
 import type { Backend } from "../types.ts";
 import { DEMO_MARKER_FILE, DEMO_MARKER_TEXT, emptyDemoFolder, plainFileOrMissing, writeInside } from "./folder.ts";
-import { ACCENTS, checkDemoFolders, demoBuildNotes, openDemoLogs, passedChecks, reportFor, sealWorkspace, setWorkspaceAside, writeBriefs, writeBuildStatus, writeReport, writeScreenshots, writeWorkspaceFile } from "./night-files.ts";
+import { ACCENTS, checkDemoFolders, DEMO_FILES_MADE_ANEW, demoBuildNotes, openDemoLogs, passedChecks, reportFor, sealWorkspace, setWorkspaceAside, writeBriefs, writeBuildStatus, writeReport, writeScreenshots, writeWorkspaceFile } from "./night-files.ts";
 import type { DemoLogs, HandRun, Measured, WorkspaceFile } from "./night-files.ts";
 import type { Rgb } from "./png.ts";
 
@@ -433,6 +433,7 @@ function build(s: Scene, key: DemoIdeaKey, start: Date, story: BuildStory): { at
       store.transitionIdea(idOf(s, key), "built", { builtAt: when.toISOString(), buildBackend: dress.text(backend), failureReason: null, note: dress.text(`built with ${backendLabel(backend)} in ${seconds} s`) }, when.toISOString());
       sealWorkspace(s.root, idOf(s, key));
       logs.line("ideaBuilt", when, { ideaId: idOf(s, key), backend, seconds, credits });
+      logs.line("sealed", when, { ideaId: idOf(s, key), filesMadeAnew: DEMO_FILES_MADE_ANEW });
     });
     return { at: when, ok: true };
   };

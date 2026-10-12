@@ -201,8 +201,11 @@ describe("overnight preflight", () => {
     const building = await broken({ buildRunning: () => true, sandboxProbe: async () => ((probed += 1), { ok: true }) });
     expect(building.code).toBe(1);
     expect(building.marked).toEqual([
-      `  ${DASH} Does the build sandbox hold? Not checked: a build is running on this data folder right now, and the check would get in its way. That build made the same check itself: see logs/build.log`,
+      `  ${DASH} Does the build sandbox hold? Not checked: a build is running on this data folder right now, and the check would get in its way. That build makes the same check itself before it builds anything with Kiro Crew: see logs/build.log`,
     ]);
+    // The build that holds the lock may have begun a second ago, or have nothing to build with
+    // Kiro Crew at all: the line must not say it has already made the check.
+    expect(building.lines.join("\n")).not.toContain("made the same check");
     // Nothing is known to be wrong, so nothing is called a failure. It is still not "ready", and the exit code says so.
     expect(building.last).toBe(`Not confirmed: 1 of 13 checks could not be made (marked ${DASH}). Everything that was checked is in place.`);
 
@@ -417,14 +420,24 @@ describe("overnight preflight", () => {
       expect(later.marked[0]).toContain("The build and deliver jobs have not checked the time since Oct 9, 11:59 AM");
     });
 
-    it("takes a job that is running right now as awake, and says so in the line", async () => {
+    it("takes a job whose lock is held right now as awake, and says only what a held lock shows: a build or a delivery is running", async () => {
+      const OWN_TIME = "The build and deliver jobs wake every minute and go by Overnight's own clock (America/Boise).";
       // The build has been going for forty minutes: it has not asked the clock since it started.
       const store = awakeStore({ build: at(-2400) });
       const building = await run({ nightJobRunning: (job) => job === "build" }, { store });
       expect(building.code).toBe(0);
-      expect(building.lines).toContain(`  ${TICK} The build and deliver jobs wake every minute and go by Overnight's own clock (America/Boise). The build job is running right now, and the deliver job checked the time in the last 3 minutes.`);
+      expect(building.lines).toContain(`  ${TICK} ${OWN_TIME} A build is running right now, and the deliver job checked the time in the last 3 minutes.`);
+      const delivering = await run({ nightJobRunning: (job) => job === "deliver" }, { store: awakeStore({ deliver: at(-600) }) });
+      expect(delivering.lines).toContain(`  ${TICK} ${OWN_TIME} A delivery is running right now, and the build job checked the time in the last 3 minutes.`);
       const both = await run({ nightJobRunning: () => true }, { store: awakeStore({ build: null, deliver: null }) });
-      expect(both.lines).toContain(`  ${TICK} The build and deliver jobs wake every minute and go by Overnight's own clock (America/Boise). Both are running right now.`);
+      expect(both.lines).toContain(`  ${TICK} ${OWN_TIME} A build and a delivery are running right now.`);
+      // A build-now, or a build started by hand, holds the same lock while the build job goes on
+      // checking the time every minute. The lock does not say who has it, so no line may say that
+      // the job itself is the one running.
+      const byHand = await run({ nightJobRunning: (job) => job === "build" });
+      expect(byHand.code).toBe(0);
+      expect(byHand.lines).toContain(`  ${TICK} ${OWN_TIME} A build is running right now, and the deliver job checked the time in the last 3 minutes.`);
+      for (const ran of [building, delivering, both, byHand]) expect(ran.text).not.toMatch(/job is running right now|Both are running/);
       // Not being able to tell is not "running".
       const unknown = await broken({ nightJobRunning: () => null }, { store });
       expect(unknown.marked[0]).toContain("The build job has not checked the time since");
@@ -484,7 +497,7 @@ describe("overnight preflight", () => {
       // While some run holds the build lock, a try may be going, or another build is: that is the "running right now" line.
       const held = await run({ nightJobRunning: (job) => job === "build" }, { store: tried("build", "2026-10-09T07:00:05.000Z"), now: NOW });
       expect(held.code).toBe(0);
-      expect(held.text).toContain("The build job is running right now");
+      expect(held.text).toContain("A build is running right now, and the deliver job checked the time in the last 3 minutes.");
       // A run that is waiting for something it has stored (the internet) is not one that does not start.
       const waiting = tried("build", "2026-10-09T07:00:05.000Z");
       const first = new Date("2026-10-09T07:00:05.000Z");

@@ -739,7 +739,7 @@ describe("a finished build is moved out of the build jobs' reach", () => {
       // Moved all the same: that is where the morning finds it.
       expect(finishedBuildDir(rig.paths, idea.id)).toBe(path.join(rig.paths.built, idea.id));
       expect(readFileSync(locked, "utf8")).toBe("made up: locked\n");
-      const errors = rig.lines.map((entry) => JSON.parse(entry) as Record<string, unknown>).filter((entry) => entry.message === "a finished build was moved out of the builders' reach, but some of its files could not be made anew; its own build could still change those");
+      const errors = rig.lines.map((entry) => JSON.parse(entry) as Record<string, unknown>).filter((entry) => entry.message === "a finished build was moved out of the builders' reach, but some of its files could not be made anew; any later job could still change those, through a hard link the build left; the morning still tests the app before publishing it");
       expect(errors).toHaveLength(1);
       expect(errors[0]).toMatchObject({ level: "error", ideaId: idea.id, files: 1, filesMadeAnew: 3 });
       expect(rig.lines.join("\n")).not.toContain('"message":"finished build moved out of the builders\' reach"');
