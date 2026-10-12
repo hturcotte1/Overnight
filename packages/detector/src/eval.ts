@@ -10,7 +10,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { createLogger, dataPaths, errorSummary, parseConfig } from "@overnight/core";
+import { createLogger, dataPaths, errorSummary, loadConfig } from "@overnight/core";
 import type { DataPaths } from "@overnight/core";
 import { createKiroDetector, DEFAULT_MODEL } from "./detector.ts";
 import { loadFixtures } from "./fixtures.ts";
@@ -105,8 +105,9 @@ async function main(): Promise<void> {
   if (fixtures.length === 0) throw new Error("No fixtures found in fixtures/detector/.");
 
   // The eval gets its own Kiro folders inside the data folder, so its saved sessions never mix
-  // with the listener's and the two can run at the same time.
-  const base = dataPaths(parseConfig(process.env).dataDir);
+  // with the listener's and the two can run at the same time. The data folder is found the way
+  // every `overnight` command finds it: the environment first, then `.env` in the repo.
+  const base = dataPaths(loadConfig(repoRoot).dataDir);
   const evalDir = path.join(base.root, "tmp", "detector-eval");
   const paths: DataPaths = { ...base, detectorKiroHome: path.join(evalDir, "kiro-home"), detectorCwd: path.join(evalDir, "cwd") };
   const logger = createLogger({ name: "detector-eval", minLevel: args.verbose ? "debug" : "warn", write: (line) => void process.stderr.write(line + "\n") });

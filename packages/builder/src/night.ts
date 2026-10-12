@@ -16,11 +16,21 @@
 // The rule is core's (isBuildAwaitingRetry): at most two starts, and never once the wearer has
 // been told. A build that failed (the agent could not make the app) is never tried again by itself.
 //
+// A finished build does not stay where it was built. As soon as its idea is recorded as "built",
+// the workspace is moved to <data>/built/<idea id>, which no build job can reach (seal.ts).
+//
+// What builds cost is counted: one row in the month's ledger for every try that started an agent,
+// with the builder's own figure when it gave one and an estimate when it did not. Before each
+// idea the month's ceiling is asked (MAX_BUILD_CREDITS_PER_MONTH, core's build-budget.ts); once it
+// is reached nothing more is started until next month. It is never asked in the middle of a
+// build. A ledger that cannot be written or read never stops a build: the ceiling fails open.
+//
 // Log lines carry ids, states, counts and our own reasons. Never a title or a pitch.
-import { errorSummary, formatLocal, isBuildAwaitingRetry, localDayBounds } from "@overnight/core";
-import type { Config, DataPaths, Idea, Logger, Store } from "@overnight/core";
+import { budgetReachedText, buildBudget, errorSummary, estimatedBuildCredits, formatLocal, HIGHEST_BUILD_CREDIT_LIMIT, isBuildAwaitingRetry, localDayBounds } from "@overnight/core";
+import type { BuildBudget, Config, DataPaths, Idea, Logger, Store } from "@overnight/core";
 import { renderBrief } from "./brief.ts";
 import { isStopping, onStopSignal } from "./run.ts";
+import { retireSealed, sealWorkspace } from "./seal.ts";
 import { isSlug, slugFor } from "./slug.ts";
 import type { RenewSignIn } from "./kiro-signin.ts";
 import { INTERRUPTED_REASON, MINUTE_MS, STOPPED_REASON } from "./types.ts";
@@ -139,9 +149,18 @@ function slugOf(idea: Idea, store: Pick<Store, "findIdeaBySlug">): string {
   });
 }
 
-/** An empty workspace with the brief in it (an earlier try's folder is moved aside), or null. */
+/**
+ * An empty workspace with the brief in it, or null. An earlier try's folder is moved aside, and
+ * so is an older finished build of the same idea: the morning must never find yesterday's app
+ * where it looks for today's.
+ */
 function freshWorkspace(idea: Idea, brief: string, deps: BuildDeps, now: () => Date): BuildJob | null {
   try {
+    const retired = retireSealed({ paths: deps.paths, ideaId: idea.id, now: now() });
+    if (!retired.ok) {
+      deps.logger.error("could not move an older finished build aside, so the build was not started", { ideaId: idea.id, reason: retired.reason });
+      return null;
+    }
     const prepared = prepareWorkspace({ paths: deps.paths, ideaId: idea.id, brief, now: now() });
     return { ideaId: idea.id, workspace: prepared.workspace, briefPath: prepared.briefPath, timeoutMs: deps.config.buildTimeoutMin * MINUTE_MS };
   } catch (error) {
@@ -174,6 +193,45 @@ function stopWatch(deps: Pick<BuildDeps, "signal" | "logger">): { signal: AbortS
   };
 }
 
+/**
+ * Count what one try cost, in the month's ledger. A try that started no agent cost nothing and
+ * gets no row. Otherwise the row holds the builder's own figure when it gave one, and an estimate
+ * from how long the agent ran when it did not. Never throws: a ledger that cannot be written is
+ * logged, and the build's result stands.
+ */
+function recordCost(outcome: BuildOutcome, ideaId: string, deps: Pick<BuildDeps, "store" | "logger">, now: () => Date): void {
+  const { credits, agentMs } = outcome;
+  if (credits === undefined && agentMs === undefined) return;
+  // The builder's figure comes from a file a build job can write. One that no build could have
+  // used is not believed, and the ledger would refuse it: the estimate is counted in its place.
+  const believed = credits !== undefined && Number.isFinite(credits) && credits >= 0 && credits <= HIGHEST_BUILD_CREDIT_LIMIT;
+  if (credits !== undefined && !believed) deps.logger.warn("a builder's own credit figure was not one a build could have used; counting an estimate instead", { ideaId, backend: outcome.backend });
+  const cost = believed ? { credits, measured: true } : agentMs === undefined ? null : { credits: estimatedBuildCredits(agentMs), measured: false };
+  if (cost === null) {
+    deps.logger.error("could not count what a build try cost: there was no figure to believe and no time to estimate from", { ideaId, backend: outcome.backend });
+    return;
+  }
+  try {
+    deps.store.recordBuildCost({ ideaId, at: now().toISOString(), backend: outcome.backend, ...cost });
+    deps.logger.info("build try counted", { ideaId, backend: outcome.backend, credits: cost.credits, measured: cost.measured });
+  } catch (error) {
+    deps.logger.error("could not record what a build try cost; the build's result stands", { ideaId, backend: outcome.backend, error: errorSummary(error) });
+  }
+}
+
+/**
+ * Where this month's build credits stand, or null when that cannot be read. Then building goes
+ * ahead: a fault in the ceiling must not cost a night.
+ */
+function readBudget(deps: Pick<BuildDeps, "store" | "config" | "logger">, now: Date): BuildBudget | null {
+  try {
+    return buildBudget(deps.store, deps.config, now);
+  } catch (error) {
+    deps.logger.error("could not read the build budget; building anyway", { error: errorSummary(error) });
+    return null;
+  }
+}
+
 /** Run one backend on a prepared workspace. Never throws. */
 async function tryBackend(backend: BuildBackend, job: BuildJob | null, deps: BuildDeps, now: () => Date, stop: AbortSignal): Promise<BuildOutcome> {
   const startedMs = now().getTime();
@@ -191,7 +249,9 @@ async function tryBackend(backend: BuildBackend, job: BuildJob | null, deps: Bui
       if (stop.aborted) return stopped(STOPPED_REASON, false);
       if (signIn !== null && !signIn.ok) return stopped(signIn.reason, true);
     }
-    return await backend.build(job, { signal: stop });
+    const outcome = await backend.build(job, { signal: stop });
+    recordCost(outcome, job.ideaId, deps, now);
+    return outcome;
   } catch (error) {
     // Backends promise not to throw. If one does anyway, the night goes on.
     deps.logger.error("a build backend threw", { ideaId: job.ideaId, backend: backend.name, error: errorSummary(error) });
@@ -287,6 +347,13 @@ async function buildIdea(listed: Idea, deps: BuildDeps, now: () => Date, stop: A
     logger.error("could not record the result of a build", { ideaId: idea.id, error: errorSummary(error) });
     return { ok: false, backend: outcome.backend, ms: totalMs, reason: "the result of the build could not be recorded", couldNotStart: false };
   }
+  if (outcome.ok) {
+    // Recorded as built first, moved second: a crash between the two leaves a built app in
+    // workspaces/, where the morning still looks. Whichever builder made it, it is moved: a later
+    // Kiro Crew job could otherwise reach a Kiro CLI build too.
+    const sealed = sealWorkspace({ paths: deps.paths, ideaId: idea.id, now: now() });
+    if (!sealed.ok) logger.error("a finished build could not be moved out of the builders' reach; the morning uses it where it is", { ideaId: idea.id, reason: sealed.reason });
+  }
   return outcome.ok ? { ...outcome, ms: totalMs } : { ...outcome, ms: totalMs, reason: clip(reason) };
 }
 
@@ -294,8 +361,9 @@ async function buildIdea(listed: Idea, deps: BuildDeps, now: () => Date, stop: A
  * `overnight build`. Starts no build while paused. Otherwise builds the waiting ideas (approved
  * ones, and builds that were stopped or cut off and are due one more try), oldest approval first,
  * up to MAX_BUILDS_PER_NIGHT minus the builds already started in the current local day; a second
- * try counts as a start like any other. One idea failing never stops the next one. Never rejects
- * on a stop (see the top of this file).
+ * try counts as a start like any other. Starts nothing more once the month's build credits are
+ * used up (`skipped` then says so, in core's words). One idea failing never stops the next one.
+ * Never rejects on a stop (see the top of this file).
  */
 export async function runBuildNight(deps: BuildDeps): Promise<BuildNightResult> {
   const stop = stopWatch(deps);
@@ -325,11 +393,20 @@ async function buildNight(deps: BuildDeps, stop: AbortSignal): Promise<BuildNigh
   const alreadyStarted = store.countBuildsStartedBetween(day.start.toISOString(), day.end.toISOString());
   const room = Math.max(0, config.maxBuildsPerNight - alreadyStarted);
   const tonight = waiting.slice(0, room);
-  logger.info("build night started", { approved: waiting.length - retries, retries, alreadyStartedToday: alreadyStarted, limit: config.maxBuildsPerNight, building: tonight.length });
+  let budget = readBudget(deps, now());
+  logger.info("build night started", {
+    approved: waiting.length - retries,
+    retries,
+    alreadyStartedToday: alreadyStarted,
+    limit: config.maxBuildsPerNight,
+    building: tonight.length,
+    creditsThisMonth: budget?.counted,
+    creditLimit: config.maxBuildCreditsPerMonth,
+  });
   /** Still waiting when its turn comes? Approved, or still due its one more try (it may have been built, or told about, since). */
   const stillWaiting: MayBuild = (idea) => idea.state === "approved" || awaitsRetry(idea, store);
 
-  for (const idea of tonight) {
+  for (const [turn, idea] of tonight.entries()) {
     // A long night: someone may have paused Overnight since the first build began.
     if (store.isPaused(config.pausedByDefault)) {
       logger.info("build night stopped early: Overnight was paused", { built: built.length, failed: failed.length });
@@ -338,6 +415,13 @@ async function buildNight(deps: BuildDeps, stop: AbortSignal): Promise<BuildNigh
     if (stop.aborted) {
       logger.info("build night stopped early: this process was told to stop", { built: built.length, failed: failed.length });
       return { built, failed, skipped: SKIPPED_STOPPED };
+    }
+    // The month's ceiling, asked before each idea and never during one. (Asked again from the
+    // second idea on: the build before it may have used the month up.)
+    if (turn > 0) budget = readBudget(deps, now());
+    if (budget?.reached === true) {
+      logger.warn("build night stopped early: the month's ceiling on build credits is reached", { built: built.length, failed: failed.length, creditsThisMonth: budget.counted, creditLimit: budget.limit });
+      return { built, failed, skipped: budgetReachedText(budget, config.timeZone) };
     }
     const outcome = await buildIdea(idea, deps, now, stop, stillWaiting);
     // Read the state back: "failed" means the idea really is build_failed now.
@@ -363,7 +447,8 @@ async function buildNight(deps: BuildDeps, stop: AbortSignal): Promise<BuildNigh
 
 /**
  * `overnight build-now <id>`: build one idea right away. Allowed when the idea is "approved" or
- * "build_failed". Ignores the nightly limit, but not the pause flag. Never throws.
+ * "build_failed". Ignores the nightly limit, but not the pause flag and not the month's ceiling
+ * on build credits. Never throws.
  */
 export async function buildOne(ideaId: string, deps: BuildDeps): Promise<BuildOutcome> {
   const { store, config, backends, logger } = deps;
@@ -375,6 +460,11 @@ export async function buildOne(ideaId: string, deps: BuildDeps): Promise<BuildOu
     // be built again here and now instead of waiting for the next nightly run.
     failInterruptedBuilds(deps, now());
     if (store.isPaused(config.pausedByDefault)) return refused("Overnight is paused (to build, run: npx overnight resume)");
+    const budget = readBudget(deps, now());
+    if (budget?.reached === true) {
+      logger.warn("build-now refused: the month's ceiling on build credits is reached", { ideaId, creditsThisMonth: budget.counted, creditLimit: budget.limit });
+      return refused(budgetReachedText(budget, config.timeZone));
+    }
     const idea = store.getIdea(ideaId);
     if (idea === null) return refused("there is no idea with that id");
     if (idea.state === "building") {

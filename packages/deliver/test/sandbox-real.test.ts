@@ -4,7 +4,7 @@
 // run inside it. They are skipped where the macOS sandbox does not exist.
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -157,6 +157,46 @@ describe.skipIf(!sandboxWorks())("the shipped sandbox profile, for real", () => 
       "write home: no",
       "write outside: no",
     ]);
+  });
+
+  it("cannot read, list, change, move or run anything among the finished builds or the build workspaces: an app being tested only ever sees our copy of itself", async () => {
+    // Since Milestone 3 a finished build is kept in <data>/built/<id>, and the app is copied from
+    // there (by us, outside the sandbox) to be tested. Another idea's finished build, published
+    // or not, must stay out of reach of the app's own scripts and tests.
+    const w = makeWorld();
+    const tool = "#!/bin/sh\necho finished-build-tool-ran\n";
+    writeTree(w.dataDir, {
+      "built/idea_0/package.json": '{"name":"made-up-other-app"}\n',
+      "built/idea_0/tool.sh": tool,
+      "workspaces/idea_2/package.json": '{"name":"made-up-app-in-progress"}\n',
+      "workspaces/idea_2/tool.sh": tool,
+    });
+    for (const folder of ["built/idea_0", "workspaces/idea_2"]) chmodSync(path.join(w.dataDir, folder, "tool.sh"), 0o755);
+    const questions = (folder: string, id: string) => `
+      echo "${folder}: read a file: $(can_read '${w.dataDir}/${folder}/${id}/package.json')"
+      echo "${folder}: list it: $(can_list '${w.dataDir}/${folder}')"
+      echo "${folder}: list one: $(can_list '${w.dataDir}/${folder}/${id}')"
+      echo "${folder}: write into one: $(can_write '${w.dataDir}/${folder}/${id}/made.txt')"
+      echo "${folder}: change a file: $(can_write '${w.dataDir}/${folder}/${id}/package.json')"
+      echo "${folder}: add one: $(can_mkdir '${w.dataDir}/${folder}/idea_9')"
+      echo "${folder}: move one: $(if /bin/mv '${w.dataDir}/${folder}/${id}' '${w.dataDir}/${folder}/${id}-moved' 2>/dev/null; then echo yes; else echo no; fi)"
+      echo "${folder}: delete a file: $(if /bin/rm '${w.dataDir}/${folder}/${id}/package.json' 2>/dev/null; then echo yes; else echo no; fi)"
+      echo "${folder}: run a file: $(runs '${w.dataDir}/${folder}/${id}/tool.sh')"`;
+    const refused = (folder: string) => ["read a file", "list it", "list one", "write into one", "change a file", "add one", "move one", "delete a file", "run a file"].map((what) => `${folder}: ${what}: no`);
+
+    // The decoys are real: outside the sandbox every one of these works.
+    expect(execFileSync("/bin/sh", ["-c", `${SHELL}\necho "$(can_read '${w.dataDir}/built/idea_0/package.json') $(can_list '${w.dataDir}/built') $(runs '${w.dataDir}/built/idea_0/tool.sh')"`], { encoding: "utf8" }).trim()).toBe("yes yes finished-build-tool-ran");
+
+    for (const step of [w.buildStep, w.contractStep]) {
+      expect(await w.ask(step, `${SHELL}${questions("built", "idea_0")}${questions("workspaces", "idea_2")}`)).toEqual([...refused("built"), ...refused("workspaces")]);
+    }
+
+    // And nothing was changed, whatever the answers said.
+    for (const [folder, id] of [["built", "idea_0"], ["workspaces", "idea_2"]] as const) {
+      expect(readdirSync(path.join(w.dataDir, folder))).toEqual([id]);
+      expect(readdirSync(path.join(w.dataDir, folder, id)).sort()).toEqual(["package.json", "tool.sh"]);
+    }
+    expect(readFileSync(path.join(w.dataDir, "built/idea_0/package.json"), "utf8")).toBe('{"name":"made-up-other-app"}\n');
   });
 
   it("of the Node install only node and npm can be read or run: the Bee program next to them cannot", async () => {

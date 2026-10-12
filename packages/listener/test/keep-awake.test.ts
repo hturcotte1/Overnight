@@ -1,5 +1,5 @@
 // Nothing here starts a real program: the spawn function is a fake.
-import { createLogger } from "@overnight/core";
+import { createLogger, startKeepAwake as coreStartKeepAwake } from "@overnight/core";
 import { describe, expect, it } from "vitest";
 import { startKeepAwake } from "../src/keep-awake.ts";
 import type { KeepAwakeChild } from "../src/keep-awake.ts";
@@ -27,6 +27,11 @@ function collectingLogger() {
 }
 
 describe("keeping the Mac awake", () => {
+  it("is the one in @overnight/core, not a copy of it", () => {
+    // The night runs hold the Mac awake with the same code. Two copies would drift apart.
+    expect(startKeepAwake).toBe(coreStartKeepAwake);
+  });
+
   it("runs caffeinate tied to our own process, and kills it on stop", () => {
     const { child, kills } = fakeChild();
     const calls: Array<{ command: string; args: string[] }> = [];

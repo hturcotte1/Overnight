@@ -3,11 +3,13 @@
 import { EventEmitter } from "node:events";
 import { createLogger } from "@overnight/core";
 import type { BeeGateway, Config, Logger } from "@overnight/core";
-import type { BuildFactories, BuildNightResult, BuildOutcome, BuildRunDeps } from "../src/commands/build.ts";
+import type { BuildFactories, BuildNightResult, BuildOutcome, BuildRunDeps, KeepAwakeHold } from "../src/commands/build.ts";
 import type { DeliverFactories, DeliverOutcome, DeliverResult, DeliverRunDeps } from "../src/commands/deliver.ts";
+import type { NightRunMarks } from "../src/commands/night-tick.ts";
 import { FAULT_KINDS, watchLastResort } from "../src/last-resort.ts";
 import type { FaultKind, WatchLastResort } from "../src/last-resort.ts";
 import type { ReleaseLock } from "../src/single-instance.ts";
+import type { SleepWatchOptions, WatchForSleep } from "../src/sleep-watch.ts";
 import { STOP_SIGNAL_NAMES, watchStopSignals } from "../src/stop-signals.ts";
 import type { StopSignalName, WatchStopSignals } from "../src/stop-signals.ts";
 
@@ -201,4 +203,70 @@ export function fakeLastResort() {
     /** How many handlers are in place right now. None may be left when a command returns. */
     handlers: () => FAULT_KINDS.reduce((count, kind) => count + source.listenerCount(kind), 0),
   };
+}
+
+/**
+ * A made-up watch for the Mac having slept. No timer is set: the test says when the Mac "slept"
+ * by calling `fire`, which is what the real watch's timer would do on its first late tick.
+ */
+export function fakeSleepWatch() {
+  const watches: Array<{ options: SleepWatchOptions; stopped: boolean }> = [];
+  const watch: WatchForSleep = (options) => {
+    const one = { options, stopped: false };
+    watches.push(one);
+    return { stop: () => void (one.stopped = true) };
+  };
+  return {
+    watch,
+    /** How many watches were ever started. */
+    started: () => watches.length,
+    /** How many are still looking. None may be left when a command returns. */
+    watching: () => watches.filter((one) => !one.stopped).length,
+    /** The Mac slept for `gapMs` (default two hours) and has just woken. Like the real watch, it fires once and is done. */
+    fire: (gapMs = 2 * 3_600_000) => {
+      for (const one of watches) {
+        if (one.stopped) continue;
+        one.stopped = true;
+        one.options.onSleep(gapMs);
+      }
+    },
+  };
+}
+
+/** A made-up hold on the Mac's sleep. Nothing is started: taking and letting go are noted in `order`. */
+export function fakeKeepAwake(order: string[] = []) {
+  const loggers: Logger[] = [];
+  let held = 0;
+  const keepAwake: KeepAwakeHold = (logger) => {
+    loggers.push(logger);
+    held += 1;
+    order.push("keep awake");
+    let stopped = false;
+    return {
+      stop: () => {
+        if (stopped) return;
+        stopped = true;
+        held -= 1;
+        order.push("let sleep");
+      },
+    };
+  };
+  return { keepAwake, order, loggers, /** Holds not let go of yet. None may be left when a command returns. */ held: () => held };
+}
+
+/** The night clock's marks, as `--if-due` hands them over. Each call is noted in `order`. */
+export function fakeMarks(order: string[] = []) {
+  const ended: Array<"finished" | "cut-short"> = [];
+  let started = 0;
+  const marks: NightRunMarks = {
+    started: () => {
+      started += 1;
+      order.push("mark started");
+    },
+    ended: (how) => {
+      ended.push(how);
+      order.push(`mark ended ${how}`);
+    },
+  };
+  return { marks, order, started: () => started, ended };
 }

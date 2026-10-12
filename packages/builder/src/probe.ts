@@ -10,10 +10,16 @@
 //               the sandbox, for as long as the check runs;
 //   writing  6. a new file in each place our own programs are run from, or started from, outside
 //               the sandbox: the home folder, this repo, the folder node is in, the folder
-//               Kiro Crew's program is in, and the folder macOS reads background jobs from.
+//               Kiro Crew's program is in, and the folder macOS reads background jobs from;
+//   and      7. listing, and 8. making a new file in, the folder finished builds are kept in
+//               (<data>/built), which is where the morning takes the apps it publishes from.
 // The job writes only byte counts, line counts and 0/1 marks into <data>/tmp/build-probe/. Every
 // count must be 0 (or empty) and every mark 0. If anything is reachable, or the check cannot be
 // completed within 3 minutes, no Crew build runs.
+//
+// For the writes the job's own marks are not the last word. When the job is over, our own code
+// looks, from outside the sandbox, for the files the job tried to make: one that is there was
+// written, whatever the job said (see takeMadeFiles for why it can say otherwise).
 //
 // What it does not try: listing the home folder itself. Kiro Crew will not start an agent unless
 // it can open every folder above its own, so the names directly inside the home folder can be
@@ -24,13 +30,14 @@
 // variables or command substitution, and the forms below are the ones the experiments ran.
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { DataPaths, Logger } from "@overnight/core";
 import { NEVER_DUE_CRON, PROBE_JOB_NAME } from "./crew-client.ts";
 import type { CrewClient } from "./crew-client.ts";
 import { REPO_ROOT } from "./crew-files.ts";
 import { readSmallText } from "./safe-read.ts";
+import { privateDir } from "./workspace.ts";
 
 export const PROBE_TIMEOUT_MS = 3 * 60_000;
 export const SANDBOX_CHECK_FAILED = "the build sandbox check failed";
@@ -68,6 +75,20 @@ export const WRITE_TESTS = [
   { key: "launchAgents", file: "write-launch-agents.txt", said: "a job can write in the background-jobs folder" },
 ] as const;
 export type WriteTestKey = (typeof WRITE_TESTS)[number]["key"];
+/**
+ * Two result files for the folder finished builds are kept in (<data>/built): a job must be able
+ * neither to list it nor to make a file in it.
+ */
+export const BUILT_TESTS = [
+  { key: "list", file: "list-built.txt", said: "a job can list the finished builds" },
+  { key: "write", file: "write-built.txt", said: "a job can write among the finished builds" },
+] as const;
+/**
+ * A file of our own that is kept in <data>/built. With it there the folder is never empty, so
+ * "0 names listed" can only mean the job was refused, not that there was nothing to list.
+ */
+export const BUILT_MARKER_FILE = ".overnight-probe-marker";
+const BUILT_MARKER_TEXT = "Overnight keeps this file here for its build sandbox check (packages/builder/src/probe.ts). It is safe to delete.\n";
 
 /** The folders our own unsandboxed programs are run from. `launchAgents` is worked out from `home`. */
 export interface ProtectedDirs {
@@ -111,6 +132,51 @@ export function writeTestTargets(dirs: ProtectedDirs): Record<WriteTestKey, stri
   };
 }
 
+/** A file a write test tries to make, and what it means when a job could make it. */
+export interface WriteTry {
+  file: string;
+  said: string;
+}
+
+/** Every file the job tries to make: one in each place our own programs are run from, and one among the finished builds. */
+export function writeTries(dirs: ProtectedDirs, built: string): WriteTry[] {
+  const targets = writeTestTargets(dirs);
+  return [...WRITE_TESTS.map((test) => ({ file: targets[test.key], said: test.said })), { file: path.join(built, WRITE_TEST_FILE), said: BUILT_TESTS[1].said }];
+}
+
+/** Is anything at this name? A link counts as something, wherever it points. */
+function present(file: string): boolean {
+  try {
+    lstatSync(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Our own look, from outside the sandbox, for the files the write tests try to make. Each one
+ * that is there is removed, and its sentence is returned.
+ *
+ * The job's own mark cannot be trusted alone (measured Oct 11, with a fence that lets a program
+ * write in a folder but not look at what is in it): `touch` makes the file and still ends with
+ * an error, so the job writes 0; and `rm` will not remove a file it may not look at, so the file
+ * stays. A fence opened for writing only would pass the check, and leave a file behind each night.
+ */
+export function takeMadeFiles(tries: readonly WriteTry[]): string[] {
+  const made: string[] = [];
+  for (const { file, said } of tries) {
+    if (!present(file)) continue;
+    made.push(said);
+    try {
+      rmSync(file, { force: true });
+    } catch {
+      // Still there: the next check says so before it adds its job.
+    }
+  }
+  return made;
+}
+
 /**
  * The one command line the probe job runs, or null if a path cannot be written safely.
  * - Keychain: the secret is piped straight into `wc -c`; only the count is written.
@@ -122,8 +188,10 @@ export function writeTestTargets(dirs: ProtectedDirs): Record<WriteTestKey, stri
  *   command line. Refused (or unable to ask at all) gives 0.
  * - Each write test: `touch` of a new file. 1 is written if that worked, 0 if it was refused,
  *   and the file is removed either way (it only ever exists when the sandbox is not there).
+ * - The finished builds (`built`, the folder itself): one list test and one write test, in the
+ *   same two forms.
  */
-export function probeCommand(targets: { dir: string; beeBinary: string; database: string; listTargets: Record<ListTestKey, string>; writeTargets: Record<WriteTestKey, string> }): string | null {
+export function probeCommand(targets: { dir: string; beeBinary: string; database: string; listTargets: Record<ListTestKey, string>; writeTargets: Record<WriteTestKey, string>; built: string }): string | null {
   const bee = shellWord(targets.beeBinary);
   const database = shellWord(targets.database);
   const out = (name: string) => shellWord(path.join(targets.dir, name));
@@ -143,6 +211,10 @@ export function probeCommand(targets: { dir: string; beeBinary: string; database
     if (target === null || result === null) return null;
     writes.push(`/usr/bin/touch ${target} 2>/dev/null && echo 1 > ${result} || echo 0 > ${result}`, `/bin/rm -f ${target} 2>/dev/null`);
   }
+  const built = shellWord(targets.built);
+  const builtWrite = shellWord(path.join(targets.built, WRITE_TEST_FILE));
+  const [builtListOut, builtWriteOut] = [out(BUILT_TESTS[0].file), out(BUILT_TESTS[1].file)];
+  if (built === null || builtWrite === null || builtListOut === null || builtWriteOut === null) return null;
   return [
     `/usr/bin/security find-generic-password -s gh:github.com -w 2>/dev/null | /usr/bin/wc -c > ${keychainOut}`,
     `${bee} me --json > /dev/null 2>&1 && ${bee} me --json 2>/dev/null | /usr/bin/wc -c > ${beeOut} || echo 0 > ${beeOut}`,
@@ -150,6 +222,9 @@ export function probeCommand(targets: { dir: string; beeBinary: string; database
     ...lists,
     `/usr/bin/pgrep -f '${DECOY_PATTERN}' 2>/dev/null | /usr/bin/wc -l > ${processesOut}`,
     ...writes,
+    `/bin/ls -A ${built} 2>/dev/null | /usr/bin/wc -l > ${builtListOut}`,
+    `/usr/bin/touch ${builtWrite} 2>/dev/null && echo 1 > ${builtWriteOut} || echo 0 > ${builtWriteOut}`,
+    `/bin/rm -f ${builtWrite} 2>/dev/null`,
     `echo 1 > ${finishedOut}`,
   ].join("; ");
 }
@@ -171,8 +246,12 @@ function couldNotRun(why: string): ProbeResult {
   return { ok: false, reason: `${SANDBOX_CHECK_FAILED}: it could not be run (${why})` };
 }
 
-/** Read the counts and marks the job left and decide. Exported for tests. */
-export function judgeProbe(dir: string): ProbeResult {
+/**
+ * Read the counts and marks the job left and decide. `madeAnyway` holds the sentences of the
+ * write tests whose file was there when our own code looked afterwards (takeMadeFiles): those
+ * count as written, whatever mark the job left. Exported for tests.
+ */
+export function judgeProbe(dir: string, madeAnyway: readonly string[] = []): ProbeResult {
   if (readCount(path.join(dir, PROBE_FILES.finished), false) !== 1) return couldNotRun("the check did not finish");
   const keychain = readCount(path.join(dir, PROBE_FILES.keychain), false);
   const bee = readCount(path.join(dir, PROBE_FILES.bee), false);
@@ -180,7 +259,9 @@ export function judgeProbe(dir: string): ProbeResult {
   const lists = LIST_TESTS.map((test) => ({ said: test.said, count: readCount(path.join(dir, test.file), false) }));
   const processes = readCount(path.join(dir, PROBE_FILES.processes), false);
   const writes = WRITE_TESTS.map((test) => ({ said: test.said, mark: readCount(path.join(dir, test.file), false) }));
-  if (keychain === null || bee === null || database === null || processes === null || lists.some((list) => list.count === null) || writes.some((write) => write.mark === null)) {
+  // A count of names for the first, a 0/1 mark for the second: both must be 0.
+  const built = BUILT_TESTS.map((test) => ({ said: test.said, count: readCount(path.join(dir, test.file), false) }));
+  if (keychain === null || bee === null || database === null || processes === null || lists.some((list) => list.count === null) || writes.some((write) => write.mark === null) || built.some((test) => test.count === null)) {
     return couldNotRun("its results could not be read");
   }
   const reachable = [
@@ -189,7 +270,8 @@ export function judgeProbe(dir: string): ProbeResult {
     ...(database > 0 ? ["the transcript database can be read"] : []),
     ...lists.filter((list) => list.count !== 0).map((list) => list.said),
     ...(processes > 0 ? ["a job can read the command lines of other programs"] : []),
-    ...writes.filter((write) => write.mark !== 0).map((write) => write.said),
+    ...writes.filter((write) => write.mark !== 0 || madeAnyway.includes(write.said)).map((write) => write.said),
+    ...built.filter((test) => test.count !== 0 || madeAnyway.includes(test.said)).map((test) => test.said),
   ];
   return reachable.length === 0 ? { ok: true } : { ok: false, reason: `${SANDBOX_CHECK_FAILED}: ${reachable.join(", ")}` };
 }
@@ -247,7 +329,18 @@ async function attempt(deps: ProbeDeps, dir: string, startedMs: number, added: s
   if (!lstatSync(dir).isDirectory()) return couldNotRun("its results folder is not a plain folder");
   // mkdir's mode only applies to a folder it creates; an older one may be open to others.
   chmodSync(dir, 0o700);
-  for (const name of [...Object.values(PROBE_FILES), ...LIST_TESTS.map((test) => test.file), ...WRITE_TESTS.map((test) => test.file)]) rmSync(path.join(dir, name), { force: true });
+  for (const name of [...Object.values(PROBE_FILES), ...LIST_TESTS.map((test) => test.file), ...WRITE_TESTS.map((test) => test.file), ...BUILT_TESTS.map((test) => test.file)]) rmSync(path.join(dir, name), { force: true });
+  // The folder finished builds are kept in, with one file of our own in it. An empty folder would
+  // list as "0 names" whether the sandbox is there or not, and that line would pass for the wrong
+  // reason. No job can write here, so what is found at the marker's name is ours or a person's.
+  try {
+    privateDir(paths.built);
+    const marker = path.join(paths.built, BUILT_MARKER_FILE);
+    if (!existsSync(marker)) writeFileSync(marker, BUILT_MARKER_TEXT, { mode: 0o600, flag: "wx" });
+    if (!lstatSync(marker).isFile()) return couldNotRun("the folder for finished builds could not be made ready");
+  } catch {
+    return couldNotRun("the folder for finished builds could not be made ready");
+  }
   // The sandbox lets a job run nothing in this repo, so the Bee program that is installed here
   // could not even be started from inside, and its line would pass without saying anything. The
   // check runs a copy in its own results folder instead, where a job may run programs: what it
@@ -262,8 +355,13 @@ async function attempt(deps: ProbeDeps, dir: string, startedMs: number, added: s
   } catch {
     return couldNotRun("the Bee program could not be copied for the check");
   }
-  const command = probeCommand({ dir, beeBinary: beeCopy, database: paths.database, listTargets: listTestTargets(deps.protectedDirs.home), writeTargets: writeTestTargets(deps.protectedDirs) });
+  const command = probeCommand({ dir, beeBinary: beeCopy, database: paths.database, listTargets: listTestTargets(deps.protectedDirs.home), writeTargets: writeTestTargets(deps.protectedDirs), built: paths.built });
   if (command === null) return couldNotRun("a folder name has a character that cannot be used in the check");
+  // Nothing may lie at a write test's name before the job runs: afterwards, a file there means
+  // this job made it. (One is only ever left by a check that ran behind an opened fence.)
+  const tries = writeTries(deps.protectedDirs, paths.built);
+  takeMadeFiles(tries);
+  if (tries.some((entry) => present(entry.file))) return couldNotRun("something at the name of one of its test files could not be removed");
   // Without the stand-in the "other programs" line would pass for the wrong reason too.
   const decoy = (deps.startDecoy ?? startDecoy)();
   if (decoy === null) return couldNotRun("its stand-in for another program could not be started");
@@ -286,7 +384,7 @@ async function attempt(deps: ProbeDeps, dir: string, startedMs: number, added: s
     await crew.cancel(job.id).catch(() => false);
     return couldNotRun(waited.stopped ? stopping : "it did not finish within 3 minutes");
   }
-  return judgeProbe(dir);
+  return judgeProbe(dir, takeMadeFiles(tries));
 }
 
 /** Run the check once. Never throws: anything unexpected is a failed check. */
@@ -309,9 +407,12 @@ export async function runSandboxProbe(deps: ProbeDeps): Promise<ProbeResult> {
     } catch {
       // Left for the next check, which removes it before it copies.
     }
+    // A check that was cut short may have left a test file where a job should not be able to
+    // write. (After a check that finished there is nothing left to find: it has looked already.)
+    takeMadeFiles(writeTries(deps.protectedDirs, paths.built));
   }
   const ms = now().getTime() - startedMs;
-  if (result.ok) logger.info("build sandbox check passed: the Keychain, Bee, the transcript database, the folders in the home folder and other programs' command lines are out of reach of a job, and it cannot write where our programs are", { ms });
+  if (result.ok) logger.info("build sandbox check passed: the Keychain, Bee, the transcript database, the folders in the home folder, the finished builds and other programs' command lines are out of reach of a job, and it cannot write where our programs are", { ms });
   else logger.error("build sandbox check failed: nothing will be built with Kiro Crew", { reason: result.reason, ms });
   return result;
 }

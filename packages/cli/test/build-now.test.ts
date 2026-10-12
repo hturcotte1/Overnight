@@ -5,11 +5,12 @@ import { describe, expect, it } from "vitest";
 import { failInterruptedBuilds, INTERRUPTED_REASON } from "@overnight/builder";
 import { BUILD_INTERRUPTED_REASON, isBuildAwaitingRetry } from "@overnight/core";
 import type { Idea, IdeaState, Store } from "@overnight/core";
-import { BUILD_CUT_OFF_REASON, BUILD_NOW_BUILD_BUSY, BUILD_NOW_DELIVER_BUSY, BUILD_NOW_PAUSED, buildNow } from "../src/commands/build-now.ts";
+import { BUILD_CUT_OFF_REASON, BUILD_NOW_BUILD_BUSY, BUILD_NOW_DELIVER_BUSY, BUILD_NOW_NOT_SEEN_LIVE, BUILD_NOW_PAUSED, buildNow } from "../src/commands/build-now.ts";
 import type { BuildNowDeps } from "../src/commands/build-now.ts";
 import { addIdea, at, capture, fixedNow, moveIdea, SAMPLE_IDEAS, testContext } from "./helpers.ts";
 import { LAST_RESORT_LINE } from "../src/last-resort.ts";
-import { aborted, collectingLogger, fakeBuild, fakeDeliver, fakeLastResort, fakeLocks, fakeStopSignals, never } from "./night-fakes.ts";
+import { SLEPT_LINE } from "../src/sleep-watch.ts";
+import { aborted, collectingLogger, fakeBuild, fakeDeliver, fakeKeepAwake, fakeLastResort, fakeLocks, fakeSleepWatch, fakeStopSignals, never } from "./night-fakes.ts";
 import type { BuildFakes, DeliverFakes, FakeBackend } from "./night-fakes.ts";
 
 const LINK = "https://example.invalid/apps/whose-turn-to-pay/";
@@ -54,7 +55,7 @@ function realistic(store: Store, order: string[]) {
   return { build, deliver };
 }
 
-function setUp(options: { env?: Record<string, string>; state?: IdeaState; build?: BuildFakes; deliver?: DeliverFakes; held?: string[]; buildLimitMs?: number; deliverLimitMs?: number; now?: string; stopWaitMs?: number } = {}) {
+function setUp(options: { env?: Record<string, string>; state?: IdeaState; build?: BuildFakes; deliver?: DeliverFakes; held?: string[]; buildLimitMs?: number; deliverLimitMs?: number; now?: string; stopWaitMs?: number; keepAwake?: boolean } = {}) {
   const context = testContext(options.env);
   const order: string[] = [];
   const fakes = realistic(context.store, order);
@@ -73,6 +74,10 @@ function setUp(options: { env?: Record<string, string>; state?: IdeaState; build
   const stop = fakeStopSignals({ waitMs: options.stopWaitMs });
   // The same for errors nobody caught: made up, and "ending the process" only notes the exit code.
   const lastResort = fakeLastResort();
+  // And for the Mac having slept: no timer is set, a test says when.
+  const sleep = fakeSleepWatch();
+  // A made-up hold on the Mac's sleep, noted in the same list. Only the tests that ask for it get one.
+  const awake = fakeKeepAwake(order);
   const deps: BuildNowDeps<FakeBackend> = {
     ...context,
     buildLogger: buildLog.logger,
@@ -86,10 +91,12 @@ function setUp(options: { env?: Record<string, string>; state?: IdeaState; build
     now: fixedNow(options.now),
     watchStopSignals: stop.watch,
     watchLastResort: lastResort.watch,
+    watchForSleep: sleep.watch,
+    ...(options.keepAwake ? { keepAwake: awake.keepAwake } : {}),
     buildLimitMs: options.buildLimitMs,
     deliverLimitMs: options.deliverLimitMs,
   };
-  return { context, order, build, deliver, locks, out, err, buildLog, deliverLog, idea, stop, lastResort, deps, run: (id: string = idea.id) => buildNow(id, deps) };
+  return { context, order, build, deliver, locks, out, err, buildLog, deliverLog, idea, stop, lastResort, sleep, awake, deps, run: (id: string = idea.id) => buildNow(id, deps) };
 }
 
 describe("overnight build-now <ideaId>", () => {
@@ -523,6 +530,177 @@ describe("overnight build-now <ideaId>", () => {
     const hung = setUp({ build: fakeBuild({ one: () => never() }), buildLimitMs: 20 });
     expect(await hung.run()).toBe(1);
     expect(hung.build.oneCalls[0]?.deps.signal?.aborted).toBe(true);
+  });
+});
+
+describe("overnight build-now: a page not seen live, a hold on the Mac's sleep, and a Mac that slept", () => {
+  /** A build that only ends when it is told to stop, and then records what the real builder records. */
+  const stoppableBuild = (store: Store) =>
+    fakeBuild({
+      one: async (ideaId, deps) => {
+        store.transitionIdea(ideaId, "building", { buildBackend: "kiro-crew", buildStartedAt: at(0) }, at(0));
+        await aborted(deps.signal);
+        store.transitionIdea(ideaId, "build_failed", { failureReason: "the build was stopped" }, at(5));
+        return { ok: false, backend: "kiro-crew", ms: 5_000, reason: "the build was stopped", couldNotStart: false };
+      },
+    });
+
+  it("says, after the link, when the page was pushed but not seen live before the wait for it ran out", async () => {
+    const t = setUp();
+    const deliver = fakeDeliver({
+      order: t.order,
+      one: (ideaId) => {
+        t.context.store.transitionIdea(ideaId, "published", { publishedUrl: LINK, publishedAt: at(200) }, at(200));
+        t.context.store.transitionIdea(ideaId, "delivered", { deliveredAt: at(210), morningTodoId: 4242 }, at(210));
+        return { ok: true, url: LINK, notSeenLive: true };
+      },
+    });
+    t.deps.loadDeliverFactories = deliver.load;
+    expect(await t.run()).toBe(0);
+    expect(t.out.lines.slice(-3)).toEqual(['  Done: the idea is now "delivered".', `Link: ${LINK}`, "The page was not seen live before Overnight stopped waiting for it. It usually appears a few minutes later."]);
+    expect(BUILD_NOW_NOT_SEEN_LIVE).toBe("The page was not seen live before Overnight stopped waiting for it. It usually appears a few minutes later.");
+    // The usual run says no such thing.
+    const usual = setUp();
+    await usual.run();
+    expect(usual.out.lines.at(-1)).toBe(`Link: ${LINK}`);
+  });
+
+  it("holds the Mac awake once for the whole command, from before the first lock until after the last one is let go", async () => {
+    const t = setUp({ keepAwake: true });
+    expect(await t.run()).toBe(0);
+    expect(t.order[0]).toBe("keep awake");
+    expect(t.order.at(-1)).toBe("let sleep");
+    expect(t.order.filter((step) => step === "keep awake")).toHaveLength(1);
+    expect(t.order.slice(1, -1)).toEqual([
+      "lock build.lock",
+      "load builder",
+      `buildOne ${t.idea.id}`,
+      "release build.lock",
+      "lock deliver.lock",
+      "load deliver",
+      "create bee",
+      `deliverOne ${t.idea.id}`,
+      "dispose bee",
+      "release deliver.lock",
+    ]);
+    // Its one line goes to the log of the step the command begins with.
+    expect(t.awake.loggers).toEqual([t.buildLog.logger]);
+    const alreadyBuilt = setUp({ state: "built", keepAwake: true });
+    await alreadyBuilt.run();
+    expect(alreadyBuilt.awake.loggers).toEqual([alreadyBuilt.deliverLog.logger]);
+  });
+
+  it("lets go of the hold however the command ends, and never takes one for a command that does nothing", async () => {
+    const failed = setUp({ keepAwake: true, build: fakeBuild({ one: () => ({ ok: false, reason: "made-up: no good" }) }) });
+    expect(await failed.run()).toBe(1);
+    const busy = setUp({ keepAwake: true, held: ["build.lock"] });
+    expect(await busy.run()).toBe(1);
+    const threw = setUp({
+      keepAwake: true,
+      build: fakeBuild({
+        one: () => {
+          throw new Error("the made-up builder fell over");
+        },
+      }),
+    });
+    expect(await threw.run()).toBe(1);
+    const stopped = setUp({ keepAwake: true, build: fakeBuild({ one: () => never() }), stopWaitMs: 30 });
+    const running = stopped.run();
+    await expect.poll(() => stopped.build.oneCalls.length).toBe(1);
+    stopped.stop.send("SIGTERM");
+    expect(await running).toBe(143);
+    for (const t of [failed, busy, threw, stopped]) {
+      expect(t.order.filter((step) => step === "keep awake")).toHaveLength(1);
+      expect(t.order.at(-1)).toBe("let sleep");
+      expect(t.awake.held()).toBe(0);
+      expect(t.sleep.watching()).toBe(0);
+    }
+
+    // Paused, an idea that was never approved, one already delivered: nothing runs, so nothing is held or watched.
+    const paused = setUp({ keepAwake: true, env: { PAUSED: "true" } });
+    await paused.run();
+    const notApproved = setUp({ keepAwake: true, state: "asked" });
+    await notApproved.run();
+    const done = setUp({ keepAwake: true, state: "delivered" });
+    await done.run();
+    for (const t of [paused, notApproved, done]) {
+      expect(t.order).toEqual([]);
+      expect(t.sleep.started()).toBe(0);
+    }
+    // And a hold that will not let go does not get in the way of ending.
+    const stuck = setUp();
+    stuck.deps.keepAwake = () => ({
+      stop: () => {
+        throw new Error("made-up: the hold would not let go");
+      },
+    });
+    expect(await stuck.run()).toBe(0);
+  });
+
+  it("when the Mac slept during the build: the builder is told to stop, nothing is delivered, and the same command carries on later", async () => {
+    const t = setUp();
+    const build = stoppableBuild(t.context.store);
+    build.order = t.order;
+    t.deps.loadBuildFactories = build.load;
+    const running = t.run();
+    await expect.poll(() => build.oneCalls.length).toBe(1);
+    expect(build.oneCalls[0]?.deps.signal?.aborted).toBe(false);
+    t.sleep.fire(1_800_000);
+    expect(build.oneCalls[0]?.deps.signal?.aborted).toBe(true);
+    // Not delivered, so not 0. It was not a signal, so not a signal's code either.
+    expect(await running).toBe(1);
+    expect(t.order).toEqual(["lock build.lock", "load builder", `buildOne ${t.idea.id}`, "release build.lock"]);
+    expect(t.deliver.loads).toBe(0);
+    expect(t.err.lines).toEqual([
+      "  Stopping: the Mac went to sleep during the run. Ending what is running first.",
+      '  Stopped, because the Mac went to sleep during the run. The idea is now "build_failed". Run the same command again to carry on.',
+    ]);
+    expect(t.buildLog.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: SLEPT_LINE, ideaId: t.idea.id, gapSeconds: 1800 }]);
+    expect(t.deliverLog.lines).toEqual([]);
+    expect(t.out.text()).not.toContain("Link:");
+    expect(t.stop.handlers()).toBe(0);
+    expect(t.stop.exits).toEqual([]);
+    expect(t.sleep.watching()).toBe(0);
+  });
+
+  it("when the Mac slept during the deliver step: it is told to stop, the gateway is stopped, and the idea stays where it was", async () => {
+    const deliver = fakeDeliver({ one: async (_ideaId, deps) => (await aborted(deps.signal), { ok: false, reason: "made-up: stopped half way", stopped: true }) });
+    const t = setUp({ state: "built", deliver });
+    const running = t.run();
+    await expect.poll(() => deliver.oneCalls.length).toBe(1);
+    t.sleep.fire();
+    expect(await running).toBe(1);
+    expect(deliver.oneCalls[0]?.deps.signal?.aborted).toBe(true);
+    expect(t.order).toEqual(["lock deliver.lock", "load deliver", "create bee", `deliverOne ${t.idea.id}`, "dispose bee", "release deliver.lock"]);
+    expect(t.err.lines).toEqual([
+      "  Stopping: the Mac went to sleep during the run. Ending what is running first.",
+      '  Stopped, because the Mac went to sleep during the run. The idea is now "built". Run the same command again to carry on.',
+    ]);
+    // The line is in the log of the step that was running.
+    expect(t.deliverLog.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: SLEPT_LINE, ideaId: t.idea.id, gapSeconds: 7200 }]);
+    expect(t.buildLog.lines).toEqual([]);
+  });
+
+  it("when the sleep is noticed while a step is still loading, starts nothing; and gives up on a step that does not come back after it", async () => {
+    const loading = setUp();
+    const load = loading.deps.loadBuildFactories;
+    loading.deps.loadBuildFactories = async () => {
+      loading.sleep.fire();
+      return load();
+    };
+    expect(await loading.run()).toBe(1);
+    expect(loading.build.oneCalls).toEqual([]);
+    expect(loading.order).toEqual(["lock build.lock", "load builder", "release build.lock"]);
+    expect(loading.err.lines.at(-1)).toBe('  Stopped, because the Mac went to sleep during the run. The idea is now "approved". Run the same command again to carry on.');
+
+    const hung = setUp({ build: fakeBuild({ one: () => never() }), stopWaitMs: 30 });
+    const running = hung.run();
+    await expect.poll(() => hung.build.oneCalls.length).toBe(1);
+    hung.sleep.fire();
+    expect(await running).toBe(1);
+    expect(hung.order.at(-1)).toBe("release build.lock");
+    expect(hung.buildLog.lines.at(-1)).toMatchObject({ level: "error", message: "overnight build-now: the builder did not stop in time after it was told to stop; ending anyway" });
+    expect(hung.deliver.loads).toBe(0);
   });
 });
 

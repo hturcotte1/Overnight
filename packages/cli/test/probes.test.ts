@@ -9,9 +9,25 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DELIVER_LEAD_MINUTES, jobSettingsFile, NIGHT_JOB_LABELS, nightJobPath, readCrewJobSandbox, SANDBOX_EXEC } from "../src/background.ts";
+import { DELIVER_LEAD_MINUTES as CORE_DELIVER_LEAD_MINUTES } from "@overnight/core";
+import {
+  DELIVER_LEAD_MINUTES,
+  installedJobFolders,
+  JOB_LABEL,
+  jobSettingsFile,
+  jobsBelongHere,
+  NIGHT_JOB_LABELS,
+  nightJobPath,
+  readCrewJobSandbox,
+  readJobDataDir,
+  readJobTrigger,
+  readJobTriggers,
+  SANDBOX_EXEC,
+} from "../src/background.ts";
 import { repoRoot } from "../src/context.ts";
 import { crewPort, DEFAULT_CREW_PORT, gatewayAnswers } from "../src/gateway.ts";
+import { isOnline, ONLINE_CHECK_URL, ONLINE_TIMEOUT_MS } from "../src/online.ts";
+import { parsePowerSource, readPowerSource } from "../src/power.ts";
 import { realPreflightProbes } from "../src/preflight-probes.ts";
 import type { ProbeParts } from "../src/preflight-probes.ts";
 import { runQuiet } from "../src/run-quiet.ts";
@@ -172,7 +188,265 @@ describe("what the installed background jobs say", () => {
       expect(template, job).toContain(`<string>${nightJobPath("__HOME__", "__NODE_DIR__")}</string>`);
     }
     expect(DELIVER_LEAD_MINUTES).toBe(30);
+    // One number, kept by the night clock in core and handed on from here.
+    expect(DELIVER_LEAD_MINUTES).toBe(CORE_DELIVER_LEAD_MINUTES);
     expect(readFileSync(path.join(repoRoot(), "scripts", "install-agents.sh"), "utf8")).toContain(`DELIVER_LEAD_MINUTES=${DELIVER_LEAD_MINUTES}\n`);
+  });
+
+  /** A build or deliver settings file in the new shape: woken every minute, and at login. Made up, in the installer's layout. */
+  const onTimer = (job: string, dataDir = "/made-up/data") =>
+    `<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Made up for the tests. This job used to have a <key>StartCalendarInterval</key> entry: macOS's
+  calendar started it once a day. Now it is woken every minute and asks Overnight's own clock.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.overnight.${job}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/made-up/node</string>
+    <string>/made-up/repo/packages/cli/src/main.ts</string>
+    <string>${job}</string>
+    <string>--if-due</string>
+  </array>
+  <!-- Every minute. Not a calendar time. -->
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${dataDir}/logs/${job}.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>${dataDir}/logs/${job}.launchd.log</string>
+</dict>
+</plist>
+`;
+  /** The same job in the old shape, as Milestone 2 installed it: once a day, by macOS's calendar. */
+  const onCalendar = (job: string, dataDir = "/made-up/data") =>
+    onTimer(job, dataDir)
+      .replace("    <string>--if-due</string>\n", "")
+      .replace("  <!-- Every minute. Not a calendar time. -->\n  <key>StartInterval</key>\n  <integer>60</integer>\n  <key>RunAtLoad</key>\n  <true/>", "  <!-- Once a day. A <key>StartInterval</key> would be every so many seconds. -->\n  <key>StartCalendarInterval</key>\n  <dict>\n    <key>Hour</key>\n    <integer>1</integer>\n    <key>Minute</key>\n    <integer>0</integer>\n  </dict>\n  <key>RunAtLoad</key>\n  <false/>");
+  const install = (home: string, label: string, content: string) => {
+    mkdirSync(path.join(home, "Library", "LaunchAgents"), { recursive: true });
+    writeFileSync(jobSettingsFile(home, label), content);
+  };
+
+  it("tells a night job that is woken every minute from one still on macOS's calendar, and is not fooled by a word in a comment", () => {
+    const home = homeWith("home triggers", null);
+    expect(readJobTrigger("build", home)).toBeNull();
+    expect(readJobTriggers(home)).toEqual({ build: null, deliver: null });
+
+    install(home, NIGHT_JOB_LABELS.build, onTimer("build"));
+    install(home, NIGHT_JOB_LABELS.deliver, onCalendar("deliver"));
+    // Each of the two made-up files names the other way in a comment.
+    expect(onTimer("build")).toContain("<key>StartCalendarInterval</key>");
+    expect(onCalendar("deliver")).toContain("<key>StartInterval</key>");
+    expect(onCalendar("deliver")).not.toContain("--if-due");
+    expect(readJobTrigger("build", home)).toBe("timer");
+    expect(readJobTrigger("deliver", home)).toBe("calendar");
+    expect(readJobTriggers(home)).toEqual({ build: "timer", deliver: "calendar" });
+
+    // Neither way, both ways, and nothing that can be read: never a guess.
+    install(home, NIGHT_JOB_LABELS.build, "<plist><dict><key>Label</key><string>com.overnight.build</string></dict></plist>");
+    expect(readJobTrigger("build", home)).toBeNull();
+    install(home, NIGHT_JOB_LABELS.build, onTimer("build").replace("<key>RunAtLoad</key>", "<key>StartCalendarInterval</key><dict/>\n  <key>RunAtLoad</key>"));
+    expect(readJobTrigger("build", home)).toBe("calendar");
+    install(home, NIGHT_JOB_LABELS.build, `<!-- <key>StartInterval</key> -->\n<plist/>`);
+    expect(readJobTrigger("build", home)).toBeNull();
+    // A link where the settings file should be is not read through.
+    const linked = homeWith("home linked trigger", null);
+    writeFileSync(path.join(linked, "elsewhere.plist"), onTimer("build"));
+    symlinkSync(path.join(linked, "elsewhere.plist"), jobSettingsFile(linked, NIGHT_JOB_LABELS.build));
+    expect(readJobTrigger("build", linked)).toBeNull();
+  });
+
+  it("reads the trigger from the repo's own build and deliver templates, whichever way they are written today", () => {
+    for (const job of ["build", "deliver"] as const) {
+      const template = readFileSync(path.join(repoRoot(), "launchd", `com.overnight.${job}.plist.template`), "utf8");
+      const home = homeWith(`home template ${job}`, null);
+      install(home, NIGHT_JOB_LABELS[job], template);
+      // Looked at by hand here, outside the comments: the reader must agree.
+      const settings = template.replace(/<!--[\s\S]*?-->/g, "");
+      const expected = settings.includes("<key>StartCalendarInterval</key>") ? "calendar" : settings.includes("<key>StartInterval</key>") ? "timer" : null;
+      expect(expected, job).not.toBeNull();
+      expect(readJobTrigger(job, home), job).toBe(expected);
+    }
+  });
+
+  it("reads the data folder a job was installed for from where its settings file sends what the job prints", () => {
+    const home = homeWith("home data dirs", null);
+    expect(readJobDataDir(home)).toBeNull();
+    expect(installedJobFolders(home)).toEqual([]);
+
+    install(home, JOB_LABEL, onTimer("listen", "/Users/someone/.overnight"));
+    // The listener's, unless another job's label is given.
+    expect(readJobDataDir(home)).toBe("/Users/someone/.overnight");
+    expect(readJobDataDir(home, NIGHT_JOB_LABELS.build)).toBeNull();
+    install(home, NIGHT_JOB_LABELS.build, onTimer("build", "/Users/someone/other data"));
+    install(home, NIGHT_JOB_LABELS.deliver, onCalendar("deliver", "/Users/someone/.overnight"));
+    install(home, NIGHT_JOB_LABELS.crew, onTimer("crew", "/Users/someone/.overnight"));
+    expect(readJobDataDir(home, NIGHT_JOB_LABELS.build)).toBe("/Users/someone/other data");
+    // All four jobs, each folder once.
+    expect(installedJobFolders(home)).toEqual(["/Users/someone/.overnight", "/Users/someone/other data"]);
+
+    // Not a path of the shape the installer writes: no folder is made of it.
+    const odd = (logPath: string) => {
+      install(home, NIGHT_JOB_LABELS.build, onTimer("build").replace(/<key>StandardOutPath<\/key>\s*<string>[^<]*<\/string>/, `<key>StandardOutPath</key>\n  <string>${logPath}</string>`));
+      return readJobDataDir(home, NIGHT_JOB_LABELS.build);
+    };
+    expect(odd("/Users/someone/.overnight/logs/build.launchd.log")).toBe("/Users/someone/.overnight");
+    expect(odd("/Users/someone/.overnight/build.launchd.log")).toBeNull();
+    expect(odd("/Users/someone/.overnight/Logs/build.launchd.log")).toBeNull();
+    expect(odd("relative/logs/build.launchd.log")).toBeNull();
+    expect(odd("/logs/build.launchd.log")).toBeNull();
+    expect(odd("")).toBeNull();
+    // Only the setting itself counts, not a mention of it in a comment.
+    install(home, NIGHT_JOB_LABELS.build, "<!-- <key>StandardOutPath</key>\n<string>/made-up/commented/logs/x.log</string> -->\n<plist/>");
+    expect(readJobDataDir(home, NIGHT_JOB_LABELS.build)).toBeNull();
+  });
+
+  it("reads a data folder with XML's reserved characters in its name exactly as the installer wrote it", () => {
+    // The real listener template, filled in by the real installer function (nothing is installed).
+    const dataDir = "/made-up/R&D <data> & more";
+    const home = homeWith("home escaped", null);
+    const rendered = execFileSync("/bin/bash", ["-c", 'source "$1"; shift; render_plist listen "$@"', "bash", path.join(repoRoot(), "scripts", "install-agents.sh"), "/n/bin/node", "/r", dataDir, home], {
+      encoding: "utf8",
+      timeout: 30_000,
+      env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: home },
+    });
+    expect(rendered).toContain("/made-up/R&amp;D &lt;data&gt; &amp; more/logs/listen.launchd.log");
+    install(home, JOB_LABEL, rendered);
+    expect(readJobDataDir(home)).toBe(dataDir);
+    // "&amp;lt;" in the file is the text "&lt;" in the name, not a "<".
+    install(home, JOB_LABEL, onTimer("listen", "/made-up/a&amp;lt;b"));
+    expect(readJobDataDir(home)).toBe("/made-up/a&lt;b");
+  });
+
+  it("says whether the installed jobs work on a data folder: yes, no, or cannot tell", () => {
+    const here = path.join(scratch, "jobs data here");
+    const there = path.join(scratch, "jobs data there");
+    mkdirSync(here, { recursive: true });
+    mkdirSync(there, { recursive: true });
+    const home = homeWith("home belong", null);
+    // No job is installed: nothing to go by.
+    expect(jobsBelongHere({ root: here }, home)).toBeNull();
+
+    install(home, JOB_LABEL, onTimer("listen", there));
+    install(home, NIGHT_JOB_LABELS.build, onTimer("build", there));
+    expect(jobsBelongHere({ root: here }, home)).toBe(false);
+    expect(jobsBelongHere({ root: there }, home)).toBe(true);
+    // One of them is this folder's: yes.
+    install(home, NIGHT_JOB_LABELS.deliver, onTimer("deliver", here));
+    expect(jobsBelongHere({ root: here }, home)).toBe(true);
+
+    // The same folder under another name is the same folder: through a link, and before it has been made.
+    const link = path.join(scratch, "jobs data link");
+    symlinkSync(there, link);
+    expect(jobsBelongHere({ root: link }, home)).toBe(true);
+    const fresh = homeWith("home belong fresh", null);
+    install(fresh, JOB_LABEL, onTimer("listen", path.join(link, "not made yet")));
+    expect(jobsBelongHere({ root: path.join(there, "not made yet") }, fresh)).toBe(true);
+    expect(jobsBelongHere({ root: path.join(there, "another") }, fresh)).toBe(false);
+
+    // A folder that cannot be looked at: cannot tell.
+    const loop = path.join(scratch, "jobs data loop");
+    symlinkSync(loop, loop);
+    const looped = homeWith("home belong loop", null);
+    install(looped, JOB_LABEL, onTimer("listen", path.join(loop, "data")));
+    expect(jobsBelongHere({ root: here }, looped)).toBeNull();
+  });
+});
+
+describe("is this Mac plugged in?", () => {
+  it("reads the first line of pmset's answer: mains, battery, or neither", () => {
+    // As printed on the Mac this was written on (the battery's id replaced by a made-up one).
+    expect(parsePowerSource("Now drawing from 'AC Power'\n -InternalBattery-0 (id=1234567)\t100%; charged; 0:00 remaining present: true\n")).toBe("mains");
+    // The same Mac's line shape when it runs on its battery.
+    expect(parsePowerSource("Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1234567)\t87%; discharging; 5:12 remaining present: true\n")).toBe("battery");
+    // A Mac on a UPS, a line cut short, nothing, and something else entirely.
+    for (const other of ["Now drawing from 'UPS Power'\n", "Now drawing from 'AC Pow", "", "pmset: command not found", "now drawing from 'ac power'"]) expect(parsePowerSource(other), other).toBe("unknown");
+  });
+
+  it("asks macOS's own pmset once, by its full path, with a bare environment and a short time limit", async () => {
+    const calls: Array<{ command: string; args: string[]; options: QuietOptions }> = [];
+    const answering = (result: Partial<QuietResult>): typeof runQuiet => async (command, args, options) => {
+      calls.push({ command, args, options });
+      return { started: true, exitCode: 0, timedOut: false, output: "", ...result };
+    };
+    expect(await readPowerSource(answering({ output: "Now drawing from 'Battery Power'\n" }))).toBe("battery");
+    expect(calls).toEqual([{ command: "/usr/bin/pmset", args: ["-g", "ps"], options: { env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" }, timeoutMs: 5_000, keepOutput: true } }]);
+    expect(await readPowerSource(answering({ output: "Now drawing from 'AC Power'\n" }))).toBe("mains");
+  });
+
+  it("says it does not know, and never throws, when pmset will not start, fails, takes too long or says something else", async () => {
+    const answering = (result: Partial<QuietResult>): typeof runQuiet => async () => ({ started: true, exitCode: 0, timedOut: false, output: "Now drawing from 'AC Power'\n", ...result });
+    expect(await readPowerSource(answering({ started: false, exitCode: null }))).toBe("unknown");
+    expect(await readPowerSource(answering({ exitCode: 1 }))).toBe("unknown");
+    expect(await readPowerSource(answering({ timedOut: true, exitCode: null }))).toBe("unknown");
+    expect(await readPowerSource(answering({ output: "made-up nonsense" }))).toBe("unknown");
+    const throwing: typeof runQuiet = async () => {
+      throw new Error("made-up: the runner fell over");
+    };
+    expect(await readPowerSource(throwing)).toBe("unknown");
+  });
+
+  it.runIf(process.platform === "darwin")("gets one of the three answers from the real pmset on this Mac", async () => {
+    expect(["mains", "battery", "unknown"]).toContain(await readPowerSource());
+  });
+});
+
+describe("is there real internet?", () => {
+  it("asks GitHub once with a HEAD request that carries no login, and takes any answer at all as yes", async () => {
+    expect(ONLINE_CHECK_URL).toBe("https://api.github.com/");
+    expect(ONLINE_TIMEOUT_MS).toBe(5_000);
+    for (const status of [200, 301, 403, 500]) {
+      const asked: Array<{ url: string; init: RequestInit | undefined }> = [];
+      const fetchFn: typeof fetch = async (url, init) => {
+        asked.push({ url: String(url), init });
+        return new Response(null, { status });
+      };
+      expect(await isOnline({ fetchFn }), String(status)).toBe(true);
+      expect(asked).toHaveLength(1);
+      expect(asked[0]?.url).toBe("https://api.github.com/");
+      expect(asked[0]?.init).toMatchObject({ method: "HEAD", redirect: "manual", credentials: "omit" });
+      // Nothing of ours goes along: no header, no body.
+      expect(asked[0]?.init?.headers).toBeUndefined();
+      expect(asked[0]?.init?.body).toBeUndefined();
+      expect(asked[0]?.init?.signal).toBeInstanceOf(AbortSignal);
+    }
+  });
+
+  it("says no, and does not throw, when the request fails or nothing answers in time", async () => {
+    const failing: typeof fetch = async () => {
+      throw new TypeError("fetch failed");
+    };
+    expect(await isOnline({ fetchFn: failing })).toBe(false);
+    const neverAnswers: typeof fetch = (_url, init) => new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("made-up: timed out"))));
+    const started = Date.now();
+    expect(await isOnline({ fetchFn: neverAnswers, timeoutMs: 50 })).toBe(false);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("with the real fetch: yes for a server on this Mac that answers, no for a port where nothing listens", async () => {
+    // The real request, sent to a made-up server on this Mac in place of GitHub.
+    const asked: string[] = [];
+    const server = createServer((request, response) => {
+      asked.push(`${request.method} ${request.url} cookie:${request.headers.cookie ?? "none"} auth:${request.headers.authorization ?? "none"}`);
+      response.writeHead(403);
+      response.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const toThisMac: typeof fetch = (_url, init) => fetch(`http://127.0.0.1:${port}/`, init);
+    try {
+      expect(await isOnline({ fetchFn: toThisMac })).toBe(true);
+      expect(asked).toEqual(["HEAD / cookie:none auth:none"]);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+    expect(await isOnline({ fetchFn: toThisMac, timeoutMs: 2_000 })).toBe(false);
   });
 });
 
@@ -204,6 +478,9 @@ describe("preflight's questions, as really asked", () => {
       buildSkillFile: ours,
       sandboxProbe: async () => ({ ok: true }),
       buildRunning: () => false,
+      nightJobRunning: () => false,
+      gatewayProfileFile: path.join(home, "repo-crew-gateway.sb"),
+      installedGatewayProfileFile: path.join(home, "data", "sandbox", "crew-gateway.sb"),
       run: fake.run,
       gatewayAnswers: async () => true,
       home,
@@ -211,7 +488,7 @@ describe("preflight's questions, as really asked", () => {
       browsersDir: path.join(home, "browsers"),
       ...overrides,
     };
-    return { home, crewHome, ours, calls: fake.calls, probes: realPreflightProbes(parts), installed: path.join(crewHome, "skills", "overnight-build", "SKILL.md") };
+    return { home, crewHome, ours, parts, calls: fake.calls, probes: realPreflightProbes(parts), installed: path.join(crewHome, "skills", "overnight-build", "SKILL.md") };
   }
 
   it("asks kiro-cli who is signed in, by its full path, and takes \"Not logged in\" or a bad exit as signed out", async () => {
@@ -331,6 +608,50 @@ describe("preflight's questions, as really asked", () => {
     expect(t.probes.buildRunning).toBe(buildRunning);
   });
 
+  it("reads how the build and deliver jobs are started from that home folder too, and passes the look at their locks through", () => {
+    const nightJobRunning = (job: string) => job === "build";
+    const t = setUp({}, { nightJobRunning });
+    expect(t.probes.nightJobTriggers()).toEqual({ build: null, deliver: null });
+    mkdirSync(path.join(t.home, "Library", "LaunchAgents"), { recursive: true });
+    writeFileSync(jobSettingsFile(t.home, NIGHT_JOB_LABELS.build), "<plist><dict><key>StartInterval</key><integer>60</integer></dict></plist>");
+    writeFileSync(jobSettingsFile(t.home, NIGHT_JOB_LABELS.deliver), "<plist><dict><key>StartCalendarInterval</key><dict/></dict></plist>");
+    expect(t.probes.nightJobTriggers()).toEqual({ build: "timer", deliver: "calendar" });
+    expect(t.probes.nightJobRunning).toBe(nightJobRunning);
+  });
+
+  it("compares the gateway job's own copy of the sandbox rules with the repo's: same, different or missing", () => {
+    const t = setUp();
+    const rules = ";; made up for the tests\n(version 1)\n(deny default)\n";
+    // Our own file cannot be read: that is an error, not an answer.
+    expect(() => t.probes.gatewayProfileCopy()).toThrow("packages/builder/sandbox/crew-gateway.sb could not be read");
+    writeFileSync(t.parts.gatewayProfileFile, rules);
+    expect(t.probes.gatewayProfileCopy()).toBe("missing");
+
+    mkdirSync(path.dirname(t.parts.installedGatewayProfileFile), { recursive: true });
+    writeFileSync(t.parts.installedGatewayProfileFile, rules);
+    expect(t.probes.gatewayProfileCopy()).toBe("same");
+    // A blank line more at the end is the same text. One rule more is not.
+    writeFileSync(t.parts.installedGatewayProfileFile, `${rules}\n`);
+    expect(t.probes.gatewayProfileCopy()).toBe("same");
+    writeFileSync(t.parts.installedGatewayProfileFile, `${rules}(allow file-read*)\n`);
+    expect(t.probes.gatewayProfileCopy()).toBe("different");
+    writeFileSync(t.parts.gatewayProfileFile, `${rules}(deny network-outbound)\n`);
+    writeFileSync(t.parts.installedGatewayProfileFile, rules);
+    expect(t.probes.gatewayProfileCopy()).toBe("different");
+
+    // Something is there that is not a plain file (a link, even to the right text): not ours.
+    rmSync(t.parts.installedGatewayProfileFile);
+    symlinkSync(t.parts.gatewayProfileFile, t.parts.installedGatewayProfileFile);
+    expect(t.probes.gatewayProfileCopy()).toBe("different");
+  });
+
+  it("names the real files: the builder's own rules, and the copy where the installer puts it", async () => {
+    const { CREW_GATEWAY_SANDBOX_PROFILE } = await import("@overnight/builder");
+    expect(CREW_GATEWAY_SANDBOX_PROFILE).toBe(path.join(repoRoot(), "packages", "builder", "sandbox", "crew-gateway.sb"));
+    // The installer's own words for where the copy goes.
+    expect(readFileSync(path.join(repoRoot(), "scripts", "install-agents.sh"), "utf8")).toContain(`installed_profile_of() { printf '%s/sandbox/crew-gateway.sb' "$1"; }`);
+  });
+
   it("starts a real program quietly when no stand-in is given", async () => {
     // The real runner, on a stand-in for gh that prints an account name and exits 0.
     const home = mkdtempSync(path.join(scratch, "home real "));
@@ -347,6 +668,9 @@ describe("preflight's questions, as really asked", () => {
       buildSkillFile: path.join(home, "none.md"),
       sandboxProbe: async () => ({ ok: true }),
       buildRunning: () => false,
+      nightJobRunning: () => false,
+      gatewayProfileFile: path.join(home, "none.sb"),
+      installedGatewayProfileFile: path.join(home, "none-installed.sb"),
       home,
       nodeDir: "/made-up/node/bin",
     });

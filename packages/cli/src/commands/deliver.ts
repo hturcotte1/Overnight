@@ -1,4 +1,5 @@
-// `overnight deliver`: the morning. The background job runs this 30 minutes before DELIVER_TIME.
+// `overnight deliver`: the morning. The background job wakes every minute and runs this, with
+// `--if-due`, once Overnight's own clock says it is 30 minutes before DELIVER_TIME (night-tick.ts).
 // Only wiring lives here: checking each build inside the sandbox, publishing, the morning Bee
 // to-do, the Bee fact and the report are all in @overnight/deliver. This file takes the deliver
 // lock, makes the Bee gateway, hands over, and prints one line about how the morning went.
@@ -15,8 +16,13 @@ import { oneLine } from "../output.ts";
 import type { Write } from "../output.ts";
 import { deliverLockFile } from "../single-instance.ts";
 import type { ReleaseLock } from "../single-instance.ts";
+import { SLEPT_LINE, watchForSleep } from "../sleep-watch.ts";
+import type { WatchForSleep } from "../sleep-watch.ts";
 import { STOP_OVERDUE, STOP_SIGNAL_LINE, stopWaitText, watchStopSignals } from "../stop-signals.ts";
 import type { WatchStopSignals } from "../stop-signals.ts";
+import { quietly } from "./build.ts";
+import type { KeepAwakeHold } from "./build.ts";
+import type { NightRunMarks } from "./night-tick.ts";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -30,6 +36,8 @@ export interface DeliverResult {
   notified: string[];
   /** True when the morning was cut short by a stop signal. What it had not reached waits for the next run. */
   stopped?: boolean;
+  /** Pushed to the apps repo, but the page was not seen live before the wait for it ran out. Left out when there are none. */
+  notSeenLive?: string[];
 }
 
 /** What delivering one idea comes back with. */
@@ -40,6 +48,8 @@ export interface DeliverOutcome {
   reason?: string | null;
   /** True when the delivery was cut short by a stop signal. */
   stopped?: boolean;
+  /** True when the app was pushed but its page was not seen live before the wait for it ran out. */
+  notSeenLive?: boolean;
 }
 
 /** What a publisher is asked to put on the web: one checked dist folder, under the idea's slug. */
@@ -102,6 +112,16 @@ export interface DeliverDeps {
   watchStopSignals?: WatchStopSignals;
   /** Watches for an error nobody caught while the morning runs. Default: the real one (last-resort.ts). */
   watchLastResort?: WatchLastResort;
+  /** Watches for the Mac having slept while the morning runs. Default: the real one (sleep-watch.ts). */
+  watchForSleep?: WatchForSleep;
+  /**
+   * Given by `--if-due`: the night clock's marks for this run. `started` is called just before
+   * any work begins, `ended` when it is over. Left out, this command means "now" and the clock
+   * is neither read nor written.
+   */
+  onRun?: NightRunMarks;
+  /** Holds the Mac awake while the morning runs, also on battery. Left out, nothing holds it. */
+  keepAwake?: KeepAwakeHold;
   /** For tests: the last-resort time limit, in milliseconds. */
   limitMs?: number;
 }
@@ -126,11 +146,17 @@ export function deliverLimitMs(store: Pick<Store, "countIdeasByState">): number 
   return Math.max(1, waiting) * DELIVER_ONE_LIMIT_MS + 15 * MINUTE_MS;
 }
 
-/** The one line `overnight deliver` prints. Ids only: titles come from speech and stay out of logs. */
+/**
+ * The one line `overnight deliver` prints. Ids only: titles come from speech and stay out of logs.
+ * A page that was pushed but not seen live is said too: its link went to the wrist all the same,
+ * and for a few minutes it may not open.
+ */
 export function deliverSummary(result: DeliverResult): string {
   const part = (ids: string[], word: string) => (ids.length === 0 ? `0 ${word}` : `${ids.length} ${word} (${ids.map(oneLine).join(", ")})`);
+  const unseen = result.notSeenLive ?? [];
+  const notLive = unseen.length === 0 ? "" : ` ${unseen.length} pushed but not seen live yet (${unseen.map(oneLine).join(", ")}): the link usually starts working a few minutes later.`;
   const cutShort = result.stopped === true ? " Stopped before the morning was done: the rest waits for the next run." : "";
-  return `This morning: ${part(result.delivered, "delivered")}, ${part(result.failed, "failed")}, ${part(result.notified, "told about a failure")}.${cutShort}`;
+  return `This morning: ${part(result.delivered, "delivered")}, ${part(result.failed, "failed")}, ${part(result.notified, "told about a failure")}.${notLive}${cutShort}`;
 }
 
 /**
@@ -157,6 +183,16 @@ export async function deliver(deps: DeliverDeps): Promise<number> {
   }
 
   const stop = (deps.watchStopSignals ?? watchStopSignals)({ onStop: (signal) => logger.warn(`overnight deliver: ${STOP_SIGNAL_LINE}`, { signal }) });
+  // The Mac slept through part of the morning: the deliver step is told to stop, as by a stop
+  // signal. What it had not finished stays as it was, for the next run.
+  let slept = false;
+  const sleepWatch = (deps.watchForSleep ?? watchForSleep)({
+    onSleep: (gapMs) => {
+      slept = true;
+      logger.warn(SLEPT_LINE, { gapSeconds: Math.round(gapMs / 1000) });
+      stop.stopWork();
+    },
+  });
   let bee: ReturnType<DeliverFactories["createBee"]> | null = null;
   // An error nobody caught: one log line, the deliver step is told to stop, any bee program still
   // running is stopped, the lock goes, exit 1.
@@ -166,21 +202,31 @@ export async function deliver(deps: DeliverDeps): Promise<number> {
     letGo: [() => stop.abort(), () => disposeQuietly(bee), release],
     writeError: deps.writeError,
   });
+  let started = false;
+  // Only a morning that ended by itself is "finished". Stopped, slept through, overdue or failed, it was cut short.
+  let how: "finished" | "cut-short" = "cut-short";
+  let hold: { stop(): void } | null = null;
   try {
     const factories = await deps.loadFactories();
-    // Told to stop while the packages were loading: start nothing.
-    if (stop.exitCode() !== null) return stop.exitCode() ?? 1;
+    // Told to stop while the packages were loading, or the Mac slept meanwhile: start nothing.
+    if (stop.signal.aborted) return stop.exitCode() ?? 0;
     bee = factories.createBee({ logger });
+    // The night clock writes the start down before any work begins. If it cannot, nothing begins.
+    deps.onRun?.started();
+    started = true;
+    hold = deps.keepAwake?.(logger) ?? null;
     logger.info("overnight deliver starting", { dataDir: paths.root, timeZone: config.timeZone, deliverTime: config.deliverTime });
     const morning = withDeadline(factories.runDeliver({ store, bee, config, paths, logger, signal: stop.signal }), deps.limitMs ?? deliverLimitMs(store), "The morning's deliver");
     const result = await stop.settle(morning);
     if (result === STOP_OVERDUE) {
-      logger.error("overnight deliver: the deliver step did not stop in time after the stop signal; ending anyway", { waitedFor: stopWaitText() });
+      logger.error(`overnight deliver: the deliver step did not stop in time after ${slept && stop.received() === null ? "the Mac's sleep was noticed" : "the stop signal"}; ending anyway`, { waitedFor: stopWaitText() });
       deps.writeError(`"overnight deliver" was told to stop, and the deliver step had not stopped ${stopWaitText()} later. Ending anyway.`);
       return stop.exitCode() ?? 1;
     }
-    logger.info("overnight deliver finished", { delivered: result.delivered.length, failed: result.failed.length, notified: result.notified.length, stoppedBySignal: stop.received() ?? undefined });
+    logger.info("overnight deliver finished", { delivered: result.delivered.length, failed: result.failed.length, notified: result.notified.length, notSeenLive: result.notSeenLive?.length ?? 0, stoppedBySignal: stop.received() ?? undefined, stoppedBySleep: slept || undefined });
     deps.write(deliverSummary(result));
+    if (stop.exitCode() === null && !slept && result.stopped !== true) how = "finished";
+    // After a sleep the code is still 0: nothing went wrong that a person has to fix.
     return stop.exitCode() ?? 0;
   } catch (error) {
     // Past its last-resort limit: nobody is waiting any more, so tell the deliver step to stop too.
@@ -189,6 +235,10 @@ export async function deliver(deps: DeliverDeps): Promise<number> {
     deps.writeError(`"overnight deliver" could not finish. ${errorSummary(error)}`);
     return stop.exitCode() ?? 1;
   } finally {
+    sleepWatch.stop();
+    // Before the lock goes: the clock's record is closed while this run still holds it.
+    if (started) quietly(() => deps.onRun?.ended(how));
+    quietly(() => hold?.stop());
     lastResort.close();
     stop.close();
     disposeQuietly(bee);

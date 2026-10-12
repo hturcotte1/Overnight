@@ -58,6 +58,27 @@ describe("morningAlarmAt", () => {
     expect(morningAlarmAt(boise("23:59"), none)).toEqual(boise("00:01", 11));
   });
 
+  // Since Milestone 3 a delivery that was missed runs when the Mac is next awake, so the run can
+  // start at any minute of the day. These four times are the promise for that: a late app buzzes
+  // two minutes after it is ready, and never between 11 pm and 7 am.
+  describe("a delivery that starts late, at any minute", () => {
+    it("06:50, held up by a build that ran late: the alarm still waits for 07:00", () => {
+      expect(morningAlarmAt(boise("06:50"), BOISE)).toEqual(boise("07:00"));
+    });
+
+    it("06:58:30, too close to 07:00 for two minutes' notice: 07:00:30", () => {
+      expect(morningAlarmAt(new Date("2026-10-10T06:58:30-06:00"), BOISE)).toEqual(new Date("2026-10-10T07:00:30-06:00"));
+    });
+
+    it("10:04, the Mac was asleep until mid-morning: 10:06", () => {
+      expect(morningAlarmAt(boise("10:04"), BOISE)).toEqual(boise("10:06"));
+    });
+
+    it("23:30, ready late at night: 07:00 the next day", () => {
+      expect(morningAlarmAt(boise("23:30"), BOISE)).toEqual(boise("07:00", 11));
+    });
+  });
+
   it("uses winter time once the clocks have changed, also on the night they change", () => {
     // Nov 2, 2026 is after the change: Boise is UTC-7, so 06:30 local is 13:30 UTC.
     expect(morningAlarmAt(new Date("2026-11-02T13:30:00.000Z"), BOISE)).toEqual(new Date("2026-11-02T14:00:00.000Z"));

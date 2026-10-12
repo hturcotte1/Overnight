@@ -10,7 +10,7 @@ import type { ListenFactories } from "./commands/listen.ts";
 import type { PreflightProbes } from "./commands/preflight.ts";
 import type { Context } from "./context.ts";
 import { realPreflightProbes as probesFrom } from "./preflight-probes.ts";
-import { buildLockFile, lockHeld } from "./single-instance.ts";
+import { buildLockFile, deliverLockFile, lockHeld } from "./single-instance.ts";
 
 export async function realListenFactories(): Promise<ListenFactories> {
   const [bee, detector, listener] = await Promise.all([import("@overnight/bee"), import("@overnight/detector"), import("@overnight/listener")]);
@@ -88,7 +88,11 @@ export async function realPreflightProbes(context: Pick<Context, "config" | "pat
         logger: createLogger({ name: "preflight", file: path.join(context.paths.logs, "build.log"), write: () => {} }),
         signal,
       }),
-    // Every build holds the build lock for as long as it runs.
+    // Every build holds the build lock for as long as it runs, and every deliver the deliver lock.
     buildRunning: () => lockHeld(buildLockFile(context.paths)),
+    nightJobRunning: (job) => lockHeld(job === "build" ? buildLockFile(context.paths) : deliverLockFile(context.paths)),
+    gatewayProfileFile: builder.CREW_GATEWAY_SANDBOX_PROFILE,
+    // Where scripts/install-agents.sh puts the gateway job's copy (its installed_profile_of).
+    installedGatewayProfileFile: path.join(context.paths.root, "sandbox", "crew-gateway.sb"),
   });
 }

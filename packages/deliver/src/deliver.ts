@@ -25,9 +25,13 @@
 //   - A build that was stopped or cut off (rather than failed) and still has a start left. The
 //     night builder tries it once more, and until then nobody is told "couldn't finish". The rule
 //     itself is core's (isBuildAwaitingRetry).
+//
+// And one failure is worded with care: a push that ran into its time limit may have reached
+// GitHub although we never heard so. The idea is failed like any other (nothing was confirmed,
+// so no link is recorded and nobody is sent one), and its reason adds that the app may be public.
 import { randomBytes } from "node:crypto";
 import path from "node:path";
-import { BeeError, errorSummary, isBuildAwaitingRetry } from "@overnight/core";
+import { BeeError, errorSummary, finishedBuildDir, isBuildAwaitingRetry } from "@overnight/core";
 import type { BeeGateway, Config, DataPaths, Idea, Logger, Store } from "@overnight/core";
 import { factText, failureText, morningAlarmAt, morningText } from "./announce.ts";
 import { createPagesPublisher, SLUG_PATTERN } from "./publisher.ts";
@@ -44,7 +48,18 @@ import { createSandboxedVerifier } from "./verifier.ts";
  */
 export const ANNOUNCING_NOTE = "telling the wearer in Bee now";
 
-const INTERRUPTED_NOTE = "told in Bee, but Overnight stopped before the reply came, so the to-do's id is unknown";
+/**
+ * The note on an idea that is closed that way. It says only what is known: Bee was being asked
+ * when Overnight stopped. Whether the to-do was made is not known, so it does not say "told".
+ */
+const INTERRUPTED_NOTE = "Bee was being told when Overnight stopped, so its to-do may or may not exist; no second one is made";
+
+/**
+ * Added to the reason when publishing failed after the push had been started (it ran into its
+ * time limit, say): GitHub may have taken the new version although we never heard so. The idea is
+ * a failure all the same, but its reason must not let anyone think nothing went out.
+ */
+const PUSH_MAY_BE_PUBLIC = " The push may have reached GitHub all the same, so the app may be public.";
 
 /**
  * The note left on an idea when Overnight was stopped after the new version was (or may have
@@ -294,12 +309,18 @@ async function verifyAndPublish(ctx: Context, idea: Idea): Promise<PublishOutcom
   const startedAt = ctx.now().toISOString();
   const report: CarriedReport = { startedAt, checks: {}, timings: { verifyMs: null, publishMs: null, liveAfterMs: null }, screenshots: { phone: null, desktop: null }, confirmedLive: null };
 
-  const fail = (reason: string): PublishOutcome => {
+  /** `pushMayBeOut`: the push had been started and may have got through. The recorded reason and the log both say so. */
+  const fail = (why: string, pushMayBeOut = false): PublishOutcome => {
+    const reason = pushMayBeOut ? `${why}${PUSH_MAY_BE_PUBLIC}` : why;
     const at = ctx.now().toISOString();
     if (idea.state === "built") store.transitionIdea(idea.id, "publish_failed", { failureReason: reason, note: reason }, at);
     else store.updateIdea(idea.id, { failureReason: reason, note: reason }, at);
     saveReport(ctx, idea.id, report);
-    logger.warn("a built app was not published", { ideaId: idea.id, failedStep: typeof report.checks?.failedStep === "string" ? report.checks.failedStep : "publish" });
+    logger.warn("a built app was not published", {
+      ideaId: idea.id,
+      failedStep: typeof report.checks?.failedStep === "string" ? report.checks.failedStep : "publish",
+      ...(pushMayBeOut ? { pushMayHaveReachedGitHub: true } : {}),
+    });
     return { ok: false, reason };
   };
   /** Stopped part-way: no verdict, no state change. The next run starts this idea again. */
@@ -332,7 +353,9 @@ async function verifyAndPublish(ctx: Context, idea: Idea): Promise<PublishOutcom
   const verifyFrom = Date.now();
   let verified: VerifyResult;
   try {
-    verified = await ctx.verifier.verify({ ideaId: idea.id, workspace: path.join(paths.workspaces, idea.id), runDir, ...(ctx.signal === undefined ? {} : { signal: ctx.signal }) });
+    // Where the finished build is (core's rule): built/<id> once the builder has moved it out of
+    // every build job's reach, the workspace itself if that move never happened.
+    verified = await ctx.verifier.verify({ ideaId: idea.id, workspace: finishedBuildDir(paths, idea.id), runDir, ...(ctx.signal === undefined ? {} : { signal: ctx.signal }) });
   } catch (error) {
     logger.error("the verifier stopped on an unexpected error", { ideaId: idea.id, error: errorSummary(error) });
     verified = { ok: false, reason: "Verification could not be completed because of an unexpected error.", checks: {} };
@@ -358,7 +381,7 @@ async function verifyAndPublish(ctx: Context, idea: Idea): Promise<PublishOutcom
   report.timings = { verifyMs: report.timings.verifyMs, publishMs: Date.now() - publishFrom, liveAfterMs: published.ok ? published.liveAfterMs : null };
   if (!published.ok) {
     if (ctx.stopped() || published.stopped === true) return stoppedWhilePublishing(published.pushed === true);
-    return fail(published.reason);
+    return fail(published.reason, published.pushed === true);
   }
   // Pushed, and seen serving this build? Only an explicit "no" from the publisher counts as not seen.
   const seenLive = published.confirmedLive !== false;
@@ -452,13 +475,27 @@ async function announce(ctx: Context, ideaId: string): Promise<"delivered" | "no
 }
 
 /**
- * Tell the wearer, once per idea, that an app could not be finished. The time is recorded BEFORE
- * Bee is asked and taken back only when Bee plainly refused, so no outcome can buzz twice.
- * True when the to-do was created.
+ * Tell the wearer, once per idea, that an app could not be finished. True when the to-do was created.
+ *
+ * The idea is read again first, because what the caller saw can be out of date. The morning run
+ * lists the failures once and then asks Bee about them one at a time, with waits between tries.
+ * In that time `overnight build-now`, or a build that is running late, may have started the idea
+ * again, and another run may have told the wearer already. Only an idea that is still failed,
+ * still untold and not waiting for its second try gets the to-do.
+ *
+ * The time is recorded BEFORE Bee is asked and taken back only when Bee plainly refused, so no
+ * outcome can buzz twice.
  */
-async function notifyFailure(ctx: Context, idea: Idea): Promise<boolean> {
+async function notifyFailure(ctx: Context, ideaId: string): Promise<boolean> {
   const { store, bee, config, logger } = ctx;
-  if (idea.failureNotifiedAt !== null || ctx.stopped()) return false;
+  if (ctx.stopped()) return false;
+  const idea = store.getIdea(ideaId);
+  if (idea === null || idea.failureNotifiedAt !== null) return false;
+  if (idea.state !== "build_failed" && idea.state !== "publish_failed") {
+    logger.info("an idea is no longer failed, so the wearer is not told it could not be finished", { ideaId, state: idea.state });
+    return false;
+  }
+  if (awaitingBuildRetry(ctx, idea)) return false;
   store.updateIdea(idea.id, { failureNotifiedAt: ctx.now().toISOString() }, ctx.now().toISOString());
   const todo = await unlessStopped(
     ctx,
@@ -558,6 +595,7 @@ export async function runDeliver(deps: DeliverDeps): Promise<DeliverSummary> {
 
     // 3. Anything that failed (last night's build, or the publish just now) and was not mentioned
     //    yet. A build that was only cut short is left out while its second try is still to come.
+    //    This list can be old by the time an idea's turn comes, so notifyFailure reads each again.
     if (ctx.stopped()) return;
     let failures: Idea[] = [];
     try {
@@ -568,7 +606,7 @@ export async function runDeliver(deps: DeliverDeps): Promise<DeliverSummary> {
     for (const idea of failures) {
       if (ctx.stopped()) return;
       try {
-        if (await notifyFailure(ctx, idea)) add(summary.notified, idea.id);
+        if (await notifyFailure(ctx, idea.id)) add(summary.notified, idea.id);
       } catch (error) {
         logger.error("could not tell the wearer about a failure", { ideaId: idea.id, error: errorSummary(error) });
       }
@@ -608,7 +646,7 @@ export async function deliverOne(ideaId: string, deps: DeliverDeps): Promise<Del
     if (idea.state === "build_failed") {
       // The same rule as the morning run: a build that was only cut short is not a failure yet.
       if (awaitingBuildRetry(ctx, idea)) return { ok: false, reason: BUILD_RETRY_PENDING_REASON };
-      await notifyFailure(ctx, idea);
+      await notifyFailure(ctx, idea.id);
       return { ok: false, reason: idea.failureReason ?? "The build failed." };
     }
     let notSeenLive: { notSeenLive?: true } = {};
@@ -616,8 +654,7 @@ export async function deliverOne(ideaId: string, deps: DeliverDeps): Promise<Del
       const published = await verifyAndPublish(ctx, idea);
       if (!published.ok) {
         if (published.stopped === true) return stoppedResult();
-        const latest = store.getIdea(ideaId);
-        if (latest !== null) await notifyFailure(ctx, latest);
+        await notifyFailure(ctx, ideaId);
         return { ok: false, reason: published.reason };
       }
       if (published.notSeenLive === true) notSeenLive = { notSeenLive: true };

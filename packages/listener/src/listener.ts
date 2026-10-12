@@ -327,7 +327,8 @@ export function createListener(deps: ListenerDeps): Listener {
     stopSignal = abort;
     abandoned = false;
     const { signal } = abort;
-    const keepAwake = options.keepAwake ? startKeepAwake(logger, process.pid, deps.spawnKeepAwake) : null;
+    // "always": on battery too, so the listener keeps hearing while the lid is open (the owner's decision, Oct 11).
+    const keepAwake = options.keepAwake ? startKeepAwake(logger, process.pid, deps.spawnKeepAwake, "always") : null;
     const forgetSignals = options.handleSignals ? stopOnSignals() : () => {};
     const stopWatchingForWake = watchForWake();
     logger.info("listener starting", { pollMs: options.pollMs, quietMs: options.quietMs, keepAwake: options.keepAwake });

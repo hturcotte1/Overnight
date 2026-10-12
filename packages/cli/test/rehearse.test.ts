@@ -1,16 +1,17 @@
 // All text in this file is made up for the tests. Nothing is built, nothing is published, and
 // Bee is never reached: the builder and the deliver step are fakes, every data folder and every
 // "home folder" is a scratch folder, and the real ~/.overnight is never looked at.
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { dataPaths, ensureDataDirs, parseConfig, silentLogger, Store } from "@overnight/core";
+import { dataPaths, ensureDataDirs, parseConfig, readNightRun, silentLogger, Store } from "@overnight/core";
 import type { BeeGateway } from "@overnight/core";
-import { processIo, REHEARSE_USAGE, runCli } from "../src/cli.ts";
+import { processIo, realRehearsalFolderProblem, REHEARSE_USAGE, runCli } from "../src/cli.ts";
 import type { CliIo } from "../src/cli.ts";
 import type { DeliverRunDeps, DeliverSteps } from "../src/commands/deliver.ts";
 import {
+  isRealDataOnlyCommand,
   isRehearsalIdea,
   MAX_REHEARSAL_PITCH_CHARS,
   MAX_REHEARSAL_TITLE_CHARS,
@@ -18,16 +19,18 @@ import {
   REHEARSAL_ASKED_NOTE,
   REHEARSAL_CONVERSATION_KEY,
   REHEARSAL_DELIVERED_NOTE,
+  REAL_DATA_ONLY_COMMANDS,
   REHEARSAL_NOTE,
   rehearsalFolderRefusal,
 } from "../src/commands/rehearse.ts";
 import type { Context } from "../src/context.ts";
-import { nearestRealPath, readEnvFileText, realDataFolders, REHEARSAL_WHY, rehearsalFolderProblem } from "../src/rehearsal-folder.ts";
+import type { StatFolder } from "../src/folder-identity.ts";
+import { readEnvFileText, realDataFolders, REHEARSAL_WHY, rehearsalFolderProblem } from "../src/rehearsal-folder.ts";
 import { createStandInBee, createStandInPublisher, REHEARSAL_BEE_LOG, rehearsalBeeLogFile, STAND_IN_ID, STAND_IN_SITE } from "../src/rehearsal-stand-ins.ts";
 import { USAGE } from "../src/usage.ts";
 import { addIdea, capture, moveIdea, SAMPLE_IDEAS } from "./helpers.ts";
 import { LAST_RESORT_LINE } from "../src/last-resort.ts";
-import { aborted, collectingLogger, fakeBuild, fakeLastResort, fakeLocks, fakeStopSignals } from "./night-fakes.ts";
+import { aborted, collectingLogger, fakeBuild, fakeLastResort, fakeLocks, fakeSleepWatch, fakeStopSignals } from "./night-fakes.ts";
 import type { FakeBackend } from "./night-fakes.ts";
 
 // The real Bee package, replaced for this whole file by one that counts. If the rehearsal path
@@ -143,14 +146,83 @@ describe("where a rehearsal may run", () => {
     expect(problem(mac, mac.home)).toBeNull();
   });
 
-  it("follows links for as much of a path as exists, and keeps the rest as written", () => {
+  // Neither of these is a link, so following links never found them: a rehearsal on
+  // /.vol/<device>/<file number> used to be allowed onto the real data folder.
+  it.runIf(process.platform === "darwin")("refuses the real data folder by macOS's other two names for it: under /System/Volumes/Data, and as /.vol/<device>/<file number>", () => {
     const mac = madeUpMac();
-    const link = path.join(mac.root, "link");
-    symlinkSync(mac.home, link);
-    const realHome = nearestRealPath(mac.home);
-    expect(nearestRealPath(link)).toBe(realHome);
-    expect(nearestRealPath(path.join(link, ".overnight"))).toBe(path.join(realHome, ".overnight"));
-    expect(nearestRealPath(path.join(link, "not", "there", "yet"))).toBe(path.join(realHome, "not", "there", "yet"));
+    const real = realpathSync(mac.realData);
+    const numbers = statSync(real, { bigint: true });
+    const underData = path.join("/System/Volumes/Data", real);
+    const byNumber = `/.vol/${numbers.dev}/${numbers.ino}`;
+    const refused = `Not started: OVERNIGHT_DATA_DIR points at the real data folder (${mac.realData}), and a rehearsal never runs there, because ${REHEARSAL_WHY}.`;
+    for (const given of [underData, byNumber, path.join(underData, "inside"), `${byNumber}/inside/deeper`]) {
+      expect(problem(mac, given), given).toBe(refused);
+    }
+
+    // The same on a Mac where the real data folder has never been made: it is known by the home folder above it.
+    rmdirSync(mac.realData);
+    const home = statSync(mac.home, { bigint: true });
+    for (const given of [path.join("/System/Volumes/Data", realpathSync(mac.home), ".overnight"), `/.vol/${home.dev}/${home.ino}/.overnight`, `/.vol/${home.dev}/${home.ino}/.Overnight/inside`]) {
+      expect(problem(mac, given), given).toBe(refused);
+    }
+    // A scratch folder beside it is still allowed, by either of those names.
+    expect(problem(mac, `/.vol/${home.dev}/${home.ino}/.overnight-rehearsal`)).toBeNull();
+    expect(problem(mac, path.join("/System/Volumes/Data", realpathSync(mac.root), "rehearsal data"))).toBeNull();
+  });
+
+  it("counts the folder an installed background job names as real too, whatever .env says by now", () => {
+    const mac = madeUpMac();
+    const jobData = path.join(mac.root, "where the jobs were installed");
+    // Only a full path names a folder.
+    expect(realDataFolders(mac.home, null, [jobData, "relative/place", jobData])).toEqual([mac.realData, jobData]);
+    const facts = { home: mac.home, envFileText: null };
+    // Nothing names it: a scratch folder like any other.
+    expect(rehearsalFolderProblem({ ...facts, given: jobData })).toBeNull();
+    const refused = `Not started: OVERNIGHT_DATA_DIR points at the real data folder (${jobData}), and a rehearsal never runs there, because ${REHEARSAL_WHY}.`;
+    expect(rehearsalFolderProblem({ ...facts, given: jobData, jobFolders: [jobData] })).toBe(refused);
+    expect(rehearsalFolderProblem({ ...facts, given: path.join(jobData, "inside"), jobFolders: [jobData] })).toBe(refused);
+    // The other two real folders stay refused, and a folder beside the job's stays allowed.
+    expect(rehearsalFolderProblem({ ...facts, given: mac.realData, jobFolders: [jobData] })).toContain("points at the real data folder");
+    expect(rehearsalFolderProblem({ ...facts, given: mac.rehearsalData, jobFolders: [jobData] })).toBeNull();
+  });
+
+  it("never guesses when a folder cannot be looked at: the error comes out, and the command line makes a refusal of it", () => {
+    const mac = madeUpMac();
+    const failing: StatFolder = () => {
+      throw new Error("made-up disk error");
+    };
+    expect(() => rehearsalFolderProblem({ given: mac.rehearsalData, home: mac.home, envFileText: null, stat: failing })).toThrow("made-up disk error");
+    // For real: a link that leads round to itself cannot be looked at.
+    const loop = path.join(mac.root, "a loop");
+    symlinkSync(loop, loop);
+    const said = processIo.rehearsalFolderProblem(path.join(loop, "data"));
+    expect(said).toMatch(/^Not started: .* could not be looked at \(ELOOP\), so it is not known which folder that is, and a rehearsal must not run on it, because /);
+    expect(said).toContain(REHEARSAL_WHY);
+  });
+
+  it("on the command line, learns the real folders from the home folder, the repo's .env and the installed jobs' own settings files", () => {
+    const mac = madeUpMac();
+    const fromEnv = path.join(mac.root, "named in env");
+    const fromJobs = path.join(mac.root, "named by a job");
+    const asked: string[] = [];
+    const facts = { home: () => mac.home, envFileText: () => `OVERNIGHT_DATA_DIR=${fromEnv}\n`, jobFolders: (home: string) => (asked.push(home), [fromJobs]) };
+    const refused = (real: string) => `Not started: OVERNIGHT_DATA_DIR points at the real data folder (${real}), and a rehearsal never runs there, because ${REHEARSAL_WHY}.`;
+    expect(realRehearsalFolderProblem(mac.realData, facts)).toBe(refused(mac.realData));
+    expect(realRehearsalFolderProblem(fromEnv, facts)).toBe(refused(fromEnv));
+    expect(realRehearsalFolderProblem(path.join(fromJobs, "inside"), facts)).toBe(refused(fromJobs));
+    expect(realRehearsalFolderProblem(mac.rehearsalData, facts)).toBeNull();
+    // The jobs are looked for in the same home folder.
+    expect(asked).toEqual([mac.home, mac.home, mac.home, mac.home]);
+    // Any of the three that cannot be learned is a refusal, never a go-ahead.
+    for (const broken of ["home", "envFileText", "jobFolders"] as const) {
+      const said = realRehearsalFolderProblem(mac.rehearsalData, {
+        ...facts,
+        [broken]: () => {
+          throw new Error("made-up: this could not be read, so the real data folder is not known");
+        },
+      });
+      expect(said, broken).toBe(`Not started: made-up: this could not be read, so the real data folder is not known, and a rehearsal must not run on it, because ${REHEARSAL_WHY}.`);
+    }
   });
 
   it("reads the repo's .env only to learn the real folder, and says so when it cannot", () => {
@@ -291,6 +363,7 @@ function rehearsalCli(options: { settings?: Record<string, string>; given?: stri
   const locks = fakeLocks({ order });
   const stop = fakeStopSignals();
   const lastResort = fakeLastResort();
+  const sleepWatch = fakeSleepWatch();
   const logs = { build: collectingLogger("build"), deliver: collectingLogger("deliver") };
   const io: Partial<CliIo> = {
     write: out.write,
@@ -304,6 +377,12 @@ function rehearsalCli(options: { settings?: Record<string, string>; given?: stri
     takeJobLock: locks.takeLock,
     watchStopSignals: stop.watch,
     watchLastResort: lastResort.watch,
+    // Made up: no timer is set. A test says when the Mac "slept".
+    watchForSleep: sleepWatch.watch,
+    // Someone is at the Mac for a rehearsal, so it never holds the Mac awake. A run that tried would fail here.
+    keepAwake: () => {
+      throw new Error("this test did not expect the Mac to be held awake");
+    },
     listenFactories: () => Promise.reject(new Error("this test did not expect the listener")),
     listenLogger: () => silentLogger,
     takeListenLock: () => {
@@ -320,7 +399,7 @@ function rehearsalCli(options: { settings?: Record<string, string>; given?: stri
       store.close();
     }
   };
-  return { mac, dataDir, out, err, open, opened, order, build, deliverCalls, deliverSteps, stop, lastResort, logs, look, beeLog: path.join(dataDir, REHEARSAL_BEE_LOG), run: (...argv: string[]) => runCli(argv, io) };
+  return { mac, dataDir, out, err, open, opened, order, build, deliverCalls, deliverSteps, stop, lastResort, sleepWatch, logs, look, beeLog: path.join(dataDir, REHEARSAL_BEE_LOG), run: (...argv: string[]) => runCli(argv, io) };
 }
 
 describe("overnight rehearse new", () => {
@@ -540,6 +619,27 @@ describe("overnight rehearse run", () => {
     expect(t.stop.handlers()).toBe(0);
   });
 
+  it("stops like build-now when the Mac slept during the run: the build is told, the idea is not delivered, and the same command carries on", async () => {
+    const t = rehearsalCli({ buildHangs: true });
+    expect(await t.run("rehearse", "new", TITLE, PITCH)).toBe(0);
+    const id = t.out.lines[0] ?? "";
+    const running = t.run("rehearse", "run", id);
+    await expect.poll(() => t.build.oneCalls.length).toBe(1);
+    expect(t.sleepWatch.watching()).toBe(1);
+    t.sleepWatch.fire(600_000);
+    // Not delivered, so not 0. A script that goes by the exit code must not take this for a delivery.
+    expect(await running).toBe(1);
+    expect(t.build.oneCalls[0]?.deps.signal?.aborted).toBe(true);
+    expect(t.deliverCalls).toEqual([]);
+    expect(t.err.lines.slice(-2)).toEqual([
+      "  Stopping: the Mac went to sleep during the run. Ending what is running first.",
+      '  Stopped, because the Mac went to sleep during the run. The idea is now "building". Run the same command again to carry on.',
+    ]);
+    expect(t.logs.build.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: "the Mac went to sleep during the run; what was in progress was stopped and will be tried again", ideaId: id, gapSeconds: 600 }]);
+    expect(t.sleepWatch.watching()).toBe(0);
+    expect(beePackage).toEqual({ loaded: 0, gatewaysMade: 0 });
+  });
+
   it("with --no-publish hands the deliver step a stand-in publisher too, and says nothing was published", async () => {
     const t = await seeded();
     expect(await t.run("rehearse", "run", t.id, "--no-publish")).toBe(0);
@@ -595,24 +695,65 @@ describe("overnight rehearse run", () => {
 });
 
 describe("a data folder that holds a rehearsal idea", () => {
-  it("is refused by the commands that talk to the real Bee: listen, deliver and build-now", async () => {
+  it("is refused by every command that only ever runs on real data: listen, build, deliver and build-now", async () => {
+    expect(REAL_DATA_ONLY_COMMANDS).toEqual(["listen", "build", "deliver", "build-now"]);
     const t = rehearsalCli();
     expect(await t.run("rehearse", "new", TITLE, PITCH)).toBe(0);
     const id = t.out.lines[0] ?? "";
-    for (const argv of [["listen"], ["deliver"], ["build-now", id]]) {
+    for (const command of REAL_DATA_ONLY_COMMANDS) {
       t.err.lines.length = 0;
-      expect(await t.run(...argv), argv[0]).toBe(1);
-      expect(t.err.lines).toEqual([
-        `Not started: this data folder holds a rehearsal idea (made by "overnight rehearse new"), and "overnight ${argv[0]}" talks to the real Bee, so it does not run here. Use "npx overnight rehearse run <ideaId>" for those, or a data folder with no rehearsal in it.`,
+      expect(await t.run(...(command === "build-now" ? [command, id] : [command])), command).toBe(1);
+      // The nightly build never talks to Bee, so it gives its own reason.
+      const why = command === "build" ? '"overnight build" is the real nightly build' : `"overnight ${command}" talks to the real Bee`;
+      expect(t.err.lines, command).toEqual([
+        `Not started: this data folder holds a rehearsal idea (made by "overnight rehearse new"), and ${why}, so it does not run here. Use "npx overnight rehearse run <ideaId>" for those, or a data folder with no rehearsal in it.`,
       ]);
     }
-    // Nothing was loaded, locked or made for any of the three.
+    // Nothing was loaded, locked or made for any of the four.
     expect(t.order).toEqual([]);
     expect(beePackage).toEqual({ loaded: 0, gatewaysMade: 0 });
     expect(t.look((store) => store.getIdea(id)?.state)).toBe("approved");
     // The commands that only read, or that never reach Bee, still run there.
     expect(await t.run("ideas", "--all")).toBe(0);
     expect(t.out.lines.at(-1)).toContain(`[rehearsal] ${TITLE}`);
+    for (const command of ["status", "ideas", "queue", "rehearse", "preflight", "pause", "resume"]) expect(isRealDataOnlyCommand(command), command).toBe(false);
+  });
+
+  it("is refused by the night jobs' every-minute check too: said once when the time comes, and not again that night", async () => {
+    // Midnight in Boise on Oct 12. The build's time is 1:00 am, which is 07:00Z.
+    let clock = Date.parse("2026-10-12T06:00:00.000Z");
+    const t = rehearsalCli({
+      settings: { TZ: "America/Boise", BUILD_TIME: "01:00", DELIVER_TIME: "07:00" },
+      overrides: { now: () => new Date(clock), isOnline: async () => true, sleep: async () => {}, jobLockHeld: () => false },
+    });
+    expect(await t.run("rehearse", "new", TITLE, PITCH)).toBe(0);
+    const id = t.out.lines[0] ?? "";
+    // Neither switch is turned away at the door: one only moves a clock, the other asks later.
+    expect(await t.run("build", "--from-now")).toBe(0);
+    t.err.lines.length = 0;
+    for (const minutes of [1, 30, 59]) {
+      clock = Date.parse("2026-10-12T06:00:00.000Z") + minutes * 60_000;
+      expect(await t.run("build", "--if-due"), `${minutes} minutes past midnight`).toBe(0);
+    }
+    expect(t.err.lines).toEqual([]);
+
+    clock = Date.parse("2026-10-12T07:00:20.000Z");
+    expect(await t.run("build", "--if-due")).toBe(1);
+    const refusal = 'Not started: this data folder holds a rehearsal idea (made by "overnight rehearse new"), and "overnight build" is the real nightly build, so it does not run here. Use "npx overnight rehearse run <ideaId>" for those, or a data folder with no rehearsal in it.';
+    expect(t.err.lines).toEqual([refusal]);
+    // The slot is closed, so the minutes that follow say nothing more.
+    expect(t.look((store) => readNightRun(store, "build"))).toMatchObject({ day: "2026-10-12", startedAt: "2026-10-12T07:00:20.000Z", closedAs: "done" });
+    for (const minutes of [1, 2, 3, 120]) {
+      clock = Date.parse("2026-10-12T07:00:20.000Z") + minutes * 60_000;
+      expect(await t.run("build", "--if-due")).toBe(0);
+    }
+    expect(t.err.lines).toEqual([refusal]);
+    // The builder was never loaded, and the idea is as it was. The lock was taken for each look that acted, and let go again.
+    expect(t.build.loads).toBe(0);
+    expect(t.order.filter((step) => step !== "lock build.lock" && step !== "release build.lock")).toEqual([]);
+    expect(t.order.filter((step) => step === "lock build.lock")).toHaveLength(t.order.filter((step) => step === "release build.lock").length);
+    expect(t.look((store) => store.getIdea(id)?.state)).toBe("approved");
+    expect(beePackage).toEqual({ loaded: 0, gatewaysMade: 0 });
   });
 
   it("is told from an ordinary one by the ideas in it, and counts them", () => {

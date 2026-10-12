@@ -12,8 +12,10 @@
 #
 #   listen    `overnight listen`, always on: hears, notices and asks.
 #   crew      the Kiro Crew gateway, always on: the "kiro-crew" builder hands its build jobs to it.
-#   build     `overnight build`, once a day at BUILD_TIME.
-#   deliver   `overnight deliver`, once a day, 30 minutes before DELIVER_TIME.
+#   build     `overnight build --if-due`: wakes every minute; builds at BUILD_TIME by Overnight's
+#             own clock.
+#   deliver   `overnight deliver --if-due`: wakes every minute; delivers 30 minutes before
+#             DELIVER_TIME by Overnight's own clock.
 #
 # Each job is a macOS "LaunchAgent": a small settings file in ~/Library/LaunchAgents that tells
 # macOS when to run a program whenever you are logged in. Naming one job touches that job only:
@@ -26,6 +28,16 @@
 # own logs folder, because macOS will not start a job whose log folder does not exist. It makes
 # Overnight's data folder private to you, and on a first install, when there is no database yet,
 # it puts Overnight in quiet mode before anything starts.)
+#
+# `install build` and `install deliver` do three more things, in this order:
+#   - They refuse while that job is in the middle of its work: installing would cut it off.
+#   - They start the job's clock from now (`overnight build --from-now`), before anything is
+#     stopped: today's time counts as handled, so nothing that was due before now is run, and the
+#     first run is at the job's next time. This is the one thing written in Overnight's database.
+#   - Once the job has started, they wait up to 30 seconds for its first look at the clock, and
+#     say so plainly if it does not come.
+# `restart build` and `restart deliver` refuse in the same way and wait in the same way. They
+# leave the clock as it is: a run that is due is still due after a restart.
 #
 # `install crew` does four more things:
 #   - It makes the folders the gateway must find in place, if they are missing: the build jobs'
@@ -74,6 +86,8 @@ SKILL_SOURCE="$REPO/crew/build-skill.md"
 CREW_PORT=5476
 # How long `install crew` waits for the gateway to answer once its job has started.
 GATEWAY_WAIT_SECONDS=60
+# How long install and restart wait for a night job's first look at the clock once it has started.
+FIRST_CHECK_WAIT_SECONDS=30
 START_FAILED="macOS would not start the job (launchctl bootstrap failed). You must be logged in at this Mac's screen, not only over a remote shell. \"scripts/install-agents.sh status\" shows where things stand."
 
 die() {
@@ -95,8 +109,10 @@ Jobs (the default is all of them; naming one leaves the others alone):
   running is stopped and started again too. Name the job to touch only that one.
   listen      Overnight's listener, always on.
   crew        The Kiro Crew gateway, always on. The "kiro-crew" builder needs it.
-  build       The nightly build, once a day at BUILD_TIME.
-  deliver     The morning delivery, once a day, 30 minutes before DELIVER_TIME.
+  build       The nightly build. Wakes every minute; builds at BUILD_TIME by
+              Overnight's own clock.
+  deliver     The morning delivery. Wakes every minute; delivers 30 minutes
+              before DELIVER_TIME by Overnight's own clock.
 EOF
 }
 
@@ -125,10 +141,18 @@ title_of() {
   esac
 }
 
-# The two always-on jobs must have a process at all times. The two calendar jobs have one only
-# while they run.
+# The two always-on jobs must have a process at all times. The two night jobs have one for a
+# moment every minute, while they look at the clock, and for as long as their work takes.
 always_on() {
   [[ "$1" == listen || "$1" == crew ]]
+}
+
+# What a night job's work is called when talking to a person.
+work_of() {
+  case "$1" in
+    build) printf 'nightly build' ;;
+    deliver) printf 'morning delivery' ;;
+  esac
 }
 
 # How long macOS gives the job to stop before ending it by force (ExitTimeOut in its template).
@@ -280,15 +304,28 @@ job_cli() {
   env -i HOME="$HOME" PATH="$(dirname -- "$node"):/usr/bin:/bin:/usr/sbin:/sbin" "$node" "$ENTRY" "$@"
 }
 
-# One value out of what `overnight status --json` printed. Fails if it is not there as text.
+# One value out of what `overnight status --json` printed. A name with dots in it is a way down
+# into the report: "nightClock.build.checkedAt". Fails if it is not there as text.
 #   report_value <node> <report> <name>
 report_value() {
   "$1" -e '
     let value;
-    try { value = JSON.parse(process.argv[1])[process.argv[2]]; } catch {}
+    try {
+      value = JSON.parse(process.argv[1]);
+      for (const part of process.argv[2].split(".")) {
+        value = typeof value === "object" && value !== null && Object.hasOwn(value, part) ? value[part] : undefined;
+      }
+    } catch {}
     if (typeof value !== "string" || value === "") process.exit(1);
     process.stdout.write(value);
   ' "$2" "$3" 2>/dev/null
+}
+
+# The time now, written the way the app writes one (UTC, to the millisecond:
+# 2026-10-11T07:00:00.000Z), so that two of them compare as text.
+#   utc_now <node>
+utc_now() {
+  "$1" -p 'new Date().toISOString()' 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S.000Z
 }
 
 # "paused" or "live", as the background jobs see it. "unknown" if the tool would not say.
@@ -323,7 +360,8 @@ print_mode() {
 
 # ---------- the clock ----------
 
-# The time zone this Mac's clock is set to, for example "America/Boise". Calendar jobs run on it.
+# The time zone this Mac's clock is set to, for example "America/Boise". No job goes by it: it is
+# only named to the person installing, when it is not Overnight's own (print_clock_note).
 mac_time_zone() {
   local link
   link="$(readlink /etc/localtime 2>/dev/null)" || return 1
@@ -344,16 +382,18 @@ same_clock() {
   ' "$2" "$3" 2>/dev/null
 }
 
-# Stop unless this Mac's clock and Overnight's TZ setting agree. macOS runs calendar jobs on the
-# Mac's own clock, so with two different clocks "01:00" would be the wrong hour.
-#   require_same_clock <node> <the TZ setting>
-require_same_clock() {
+# Say so when this Mac's clock and Overnight's TZ setting are two different clocks. Nothing
+# depends on it: the night jobs go by Overnight's own clock, not by macOS's calendar. But a
+# person who reads "01:00" should know which 01:00 is meant. Prints nothing when the two agree,
+# or when the Mac's time zone cannot be read.
+#   print_clock_note <node> <the TZ setting>
+print_clock_note() {
   local node="$1" setting="$2" mac
-  mac="$(mac_time_zone)" || die "Could not read this Mac's time zone (System Settings > General > Date & Time), so the build and the delivery cannot be scheduled safely. Nothing was changed."
+  mac="$(mac_time_zone)" || return 0
   if [[ "$mac" == "$setting" ]] || same_clock "$node" "$mac" "$setting"; then
     return 0
   fi
-  die "This Mac's clock is set to the time zone $mac, but Overnight's TZ setting is $setting. macOS runs background jobs on the Mac's own clock, so the build and the delivery would run at the wrong hour. Set TZ=$mac in $ENV_FILE, or change the Mac's time zone (System Settings > General > Date & Time), then run install again. Nothing was changed."
+  echo "  Note: this Mac's clock is set to $mac. Overnight goes by its own TZ setting, $setting: 01:00 means 01:00 there."
 }
 
 # A time of day, some minutes earlier, as "<hour> <minute>" without leading zeros. It wraps
@@ -676,10 +716,10 @@ xml_escape() {
   printf '%s' "$text"
 }
 
-# Print a job's template with its placeholders filled in.
-#   render_plist listen          <node> <repo> <data dir> <home>
-#   render_plist build | deliver <node> <repo> <data dir> <home> <hour> <minute>
-#   render_plist crew            <node> <repo> <data dir> <home> <the gateway's command, one word per argument>
+# Print a job's template with its placeholders filled in. The build and deliver jobs take no
+# time of day: macOS wakes them every minute, and Overnight's own clock decides.
+#   render_plist listen | build | deliver <node> <repo> <data dir> <home>
+#   render_plist crew                     <node> <repo> <data dir> <home> <the gateway's command, one word per argument>
 render_plist() {
   local job="$1" template node repo data_dir home node_dir content word words=""
   template="$(template_of "$job")"
@@ -697,11 +737,6 @@ render_plist() {
   content="${content//__DATA_DIR__/$data_dir}"
   content="${content//__HOME__/$home}"
   case "$job" in
-    build | deliver)
-      [[ "${1:-}" =~ ^[0-9]+$ && "${2:-}" =~ ^[0-9]+$ ]] || die "The $job job needs an hour and a minute."
-      content="${content//__HOUR__/$1}"
-      content="${content//__MINUTE__/$2}"
-      ;;
     crew)
       (( $# > 0 )) || die "The crew job needs the gateway's command."
       for word in "$@"; do
@@ -728,6 +763,48 @@ job_running() {
   local info
   info="$(launchctl print "$(target_of "$1")" 2>/dev/null)" || return 1
   grep -q $'^\tpid = ' <<<"$info"
+}
+
+# Does the job's installed settings file have macOS wake it on a timer (StartInterval)? That is
+# how the build and deliver jobs are installed now. No for one still on macOS's calendar, the old
+# way, and when there is no file.
+#   on_timer <job>
+on_timer() {
+  local plist
+  plist="$(plist_of "$1")"
+  [[ -f "$plist" ]] && plutil -extract StartInterval raw -o - "$plist" >/dev/null 2>&1
+}
+
+# Is a night job (build or deliver) in the middle of its work? Such a job has a process for a
+# moment every minute, while it looks at the clock, so one sighting says nothing. Two sightings,
+# two seconds apart, do.
+#   night_job_busy <job>
+night_job_busy() {
+  job_running "$1" || return 1
+  sleep 2
+  job_running "$1"
+}
+
+# The jobs this command has already dealt with, in order. A refusal made when a later job's turn
+# comes must not say that nothing was changed.
+DONE_JOBS=()
+
+# The last sentence of a refusal made when a job's turn comes.
+#   untouched_words <job>
+untouched_words() {
+  if (( ${#DONE_JOBS[@]} == 0 )); then
+    printf 'Nothing was changed.'
+  else
+    printf 'The %s job was left as it was (already done: %s).' "$1" "${DONE_JOBS[*]}"
+  fi
+}
+
+# Stop if a night job is in the middle of its work: stopping the job would cut that off.
+#   require_not_busy <job> <installing | restarting>
+require_not_busy() {
+  if night_job_busy "$1"; then
+    die "The $(work_of "$1") is running right now, and $2 would cut it off. Run this again when it has finished. $(untouched_words "$1")"
+  fi
 }
 
 # After a start: give the job a moment, then look. A second look, so that a slow start is not
@@ -763,8 +840,8 @@ stop_job() {
   return 0
 }
 
-# Hand the installed settings file to macOS. An always-on job starts straight away; a calendar
-# job waits for its time.
+# Hand the installed settings file to macOS. Every job starts straight away: an always-on job
+# to stay, a night job for its first look at the clock.
 #   start_job <job>
 start_job() {
   local job="$1" plist
@@ -780,15 +857,45 @@ start_job() {
   return 0
 }
 
-# After a start, is the job as it should be? An always-on job must have a process that stays; a
-# calendar job only has to be on macOS's list.
-#   job_in_place <job>
+# After a night job has started: wait for it to look at the clock once. macOS starts the job when
+# it is loaded, and the job writes every look down: `overnight status --json` gives the time of
+# the latest one as nightClock.<job>.checkedAt. A look of ours every two seconds, for at most
+# FIRST_CHECK_WAIT_SECONDS, until that time is later than <since>. Both are UTC times written the
+# same way, so they are compared as text.
+#   wait_for_first_check <node> <job> <since: the time just before the job was started (utc_now)>
+wait_for_first_check() {
+  local node="$1" job="$2" since="$3" looks=0 deadline=$(( SECONDS + FIRST_CHECK_WAIT_SECONDS )) report checked
+  # Text order must be plain character order, whatever language this shell is set to.
+  local LC_ALL=C
+  while true; do
+    report="$(job_cli "$node" status --json 2>/dev/null)" || report=""
+    if checked="$(report_value "$node" "$report" "nightClock.$job.checkedAt")" \
+      && [[ "$checked" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$ && "$checked" > "$since" ]]; then
+      return 0
+    fi
+    looks=$(( looks + 1 ))
+    if (( SECONDS >= deadline || looks >= FIRST_CHECK_WAIT_SECONDS / 2 )); then
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+# After a start, is the job as it should be? An always-on job must have a process that stays. A
+# night job must be on macOS's list and, if it is one that wakes every minute, must have looked
+# at the clock since it was started. (One still on macOS's calendar only has to be listed.)
+# Exit code 1: no process, or not listed. 2: listed, but no look at the clock in time.
+#   job_in_place <job> [<node> <since: the time just before the job was started (utc_now)>]
 job_in_place() {
-  if always_on "$1"; then
-    job_stayed_up "$1"
-  else
-    job_loaded "$1"
+  local job="$1"
+  if always_on "$job"; then
+    if job_stayed_up "$job"; then return 0; else return 1; fi
   fi
+  job_loaded "$job" || return 1
+  if on_timer "$job"; then
+    wait_for_first_check "${2:-}" "$job" "${3:-}" || return 2
+  fi
+  return 0
 }
 
 # After the gateway job has started: stop, saying where to look, unless the gateway itself
@@ -805,9 +912,12 @@ require_gateway_answer() {
 }
 
 # What to say when it is not.
+#   not_in_place <job> <job_in_place's exit code>
 not_in_place() {
   if always_on "$1"; then
     printf '%s' "The job is in place but is not running. The last exit code and the log lines above say why. macOS tries it again every 30 seconds, so it starts by itself once the cause is fixed; \"scripts/install-agents.sh uninstall $1\" takes it out again."
+  elif [[ "${2:-1}" == 2 ]]; then
+    printf '%s' "The job is in place, but it has not checked the time yet, so it may not be running. See: scripts/install-agents.sh status $1"
   else
     printf '%s' "The settings file is in place, but macOS does not list the job, so it will not run at its time. Try \"scripts/install-agents.sh install $1\" again."
   fi
@@ -827,13 +937,21 @@ show_log() {
 
 #   status_of <job>
 status_of() {
-  local job="$1" plist info logs hour minute first
+  local job="$1" plist info logs hour minute first every between
   plist="$(plist_of "$job")"
+  # What having no process means for this job, as it is installed now.
+  if always_on "$job"; then
+    between="none (not running right now)"
+  elif on_timer "$job"; then
+    between="none (it wakes for a moment every minute)"
+  else
+    between="none (it runs at its time, not in between)"
+  fi
 
   echo "$(title_of "$job") ($(label_of "$job"))"
   if info="$(launchctl print "$(target_of "$job")" 2>/dev/null)"; then
     # Top-level lines start with exactly one tab; deeper ones repeat names like "state".
-    printf '%s\n' "$info" | awk -F' = ' -v between="$(always_on "$job" && echo "none (not running right now)" || echo "none (it runs at its time, not in between)")" '
+    printf '%s\n' "$info" | awk -F' = ' -v between="$between" '
       /^\tstate = /          && !("state" in seen) { seen["state"] = $2 }
       /^\tpid = /            && !("pid" in seen)   { seen["pid"] = $2 }
       /^\tlast exit code = / && !("exit" in seen)  { seen["exit"] = $2 }
@@ -854,8 +972,10 @@ status_of() {
   if [[ -f "$plist" ]]; then
     case "$job" in
       build | deliver)
-        if hour="$(plutil -extract StartCalendarInterval.Hour raw -o - "$plist" 2>/dev/null)" && minute="$(plutil -extract StartCalendarInterval.Minute raw -o - "$plist" 2>/dev/null)"; then
-          echo "  runs at:         $(clock_text "$hour" "$minute") every day, on this Mac's clock"
+        if every="$(plutil -extract StartInterval raw -o - "$plist" 2>/dev/null)"; then
+          echo "  wakes every:     $every seconds, and at login. Overnight's own clock decides when it is time"
+        elif hour="$(plutil -extract StartCalendarInterval.Hour raw -o - "$plist" 2>/dev/null)" && minute="$(plutil -extract StartCalendarInterval.Minute raw -o - "$plist" 2>/dev/null)"; then
+          echo "  runs at:         $(clock_text "$hour" "$minute") every day, on macOS's calendar (the old way, which ran an hour late on Oct 11). Move it with: scripts/install-agents.sh install $job"
         fi
         ;;
       crew)
@@ -905,6 +1025,8 @@ RENDERED_deliver=""
 BUILD_AT=""
 DELIVER_AT=""
 BUZZ_AT=""
+# The time zone those three are in: Overnight's TZ setting.
+CLOCK_ZONE=""
 CREW_MODE=""
 # Kiro Crew's program, as found. Asked whether the gateway answers once its job has started.
 CREW_PROGRAM=""
@@ -919,8 +1041,10 @@ prepare_job() {
       content="$(render_plist listen "$node" "$REPO" "$data_dir" "$HOME")"
       ;;
     build | deliver)
-      zone="$(report_value "$node" "$report" timeZone)" || die "\"overnight status --json\" did not say which time zone Overnight uses, so the $job job cannot be scheduled. Nothing was changed."
-      require_same_clock "$node" "$zone"
+      # The times are only read to tell the person installing: the job itself is not given them.
+      # It asks Overnight's own clock every minute.
+      zone="$(report_value "$node" "$report" timeZone)" || die "\"overnight status --json\" did not say which time zone Overnight uses, so the $job job cannot be set up. Nothing was changed."
+      CLOCK_ZONE="$zone"
       if [[ "$job" == build ]]; then
         time="$(report_value "$node" "$report" buildTime)" || die "\"overnight status --json\" did not say when BUILD_TIME is. Nothing was changed."
         at="$(clock_minus "$time" 0)" || die "BUILD_TIME is not a time like 01:00 (it is \"$time\"). Nothing was changed."
@@ -933,7 +1057,10 @@ prepare_job() {
         DELIVER_AT="$(clock_text "$hour" "$minute")"
         BUZZ_AT="$time"
       fi
-      content="$(render_plist "$job" "$node" "$REPO" "$data_dir" "$HOME" "$hour" "$minute")"
+      # Refused here, before anything is changed for any job named, and looked at once more when
+      # this job's turn comes.
+      require_not_busy "$job" installing
+      content="$(render_plist "$job" "$node" "$REPO" "$data_dir" "$HOME")"
       ;;
     crew)
       # The one place the mode comes from: Overnight's own settings, as the background jobs read
@@ -985,29 +1112,45 @@ prepare_job() {
 }
 
 # Put one prepared job in place and start it.
-#   apply_job <job> <data dir>
+#   apply_job <job> <data dir> <node>
 apply_job() {
-  local job="$1" data_dir="$2" plist rendered="RENDERED_$1"
+  local job="$1" data_dir="$2" node="$3" plist rendered="RENDERED_$1" since code=0
   plist="$(plist_of "$job")"
-  if [[ "$job" == crew ]]; then
-    # Before the gateway is loaded: the folders it must find in place, its TMPDIR among them.
-    make_gateway_folders "$CREW_MODE" "$data_dir"
-    # Kiro Crew looks for skills in its own folder. Ours is copied there, never linked, so that
-    # nothing the gateway does can reach back into the repo.
-    install_skill
-  fi
+  case "$job" in
+    crew)
+      # Before the gateway is loaded: the folders it must find in place, its TMPDIR among them.
+      make_gateway_folders "$CREW_MODE" "$data_dir"
+      # Kiro Crew looks for skills in its own folder. Ours is copied there, never linked, so that
+      # nothing the gateway does can reach back into the repo.
+      install_skill
+      ;;
+    build | deliver)
+      # The stop below would cut off a run that is going.
+      require_not_busy "$job" installing
+      # Start the job's clock from now, BEFORE anything is stopped: today's time counts as
+      # handled, so the first run is at the job's next time, and whatever started this job until
+      # now (macOS's calendar, or an earlier install) cannot be followed by a second run today.
+      # The tool refuses while a run holds the job's lock, also one started by hand; if it
+      # refuses or fails, the job that is installed now goes on exactly as it was.
+      job_cli "$node" "$job" --from-now >/dev/null \
+        || die "Could not start the $job job's clock (\"overnight $job --from-now\" failed; its message is above). $(untouched_words "$job")"
+      ;;
+  esac
   stop_job "$job" || die "The old copy of the $job job would not stop. Its settings file was not changed. Try again in a minute."
   (umask 177 && printf '%s\n' "${!rendered}" >"$plist") || die "Could not write $plist."
   chmod 600 "$plist"
   plutil -lint "$plist" >/dev/null || die "$plist did not come out valid."
 
+  # Taken before the start: a night job's first look at the clock has to come after this.
+  since="$(utc_now "$node")"
   start_job "$job" || die "$START_FAILED"
 
   # macOS accepting the job says nothing about whether it stays up: a bad value in .env, a second
   # listener already running, or a missing module ends it within a second. Look before saying it worked.
-  if ! job_in_place "$job"; then
+  job_in_place "$job" "$node" "$since" || code=$?
+  if (( code != 0 )); then
     status_of "$job"
-    die "$(not_in_place "$job")"
+    die "$(not_in_place "$job" "$code")"
   fi
   if [[ "$job" == crew ]]; then
     require_gateway_answer "$CREW_PROGRAM"
@@ -1023,8 +1166,8 @@ installed_line() {
       echo "  build skill:  $(skill_dir)/SKILL.md ($SKILL_NOTE)"
       echo "  build temp:   $(build_tmp_of "$2") (the build jobs' own temporary folder)"
       ;;
-    build) echo "Installed. Overnight now builds approved ideas every day at $BUILD_AT." ;;
-    deliver) echo "Installed. Overnight now tests, publishes and delivers every day at $DELIVER_AT, for a buzz on the wrist at $BUZZ_AT." ;;
+    build) echo "Installed. Overnight now checks the time every minute and builds approved ideas at $BUILD_AT ($CLOCK_ZONE). If the Mac is asleep or off then, it builds once it is awake again. It has checked the time once already." ;;
+    deliver) echo "Installed. Overnight now checks the time every minute, and tests, publishes and delivers at $DELIVER_AT ($CLOCK_ZONE), for a buzz on the wrist at $BUZZ_AT. If the Mac is asleep then, it delivers when the Mac is next awake and online, and the wrist buzzes two minutes after the link is ready." ;;
   esac
 }
 
@@ -1075,8 +1218,9 @@ cmd_install() {
   mkdir -p -- "$HOME/Library/LaunchAgents"
 
   for job in "$@"; do
-    apply_job "$job" "$data_dir"
+    apply_job "$job" "$data_dir" "$node"
     installed_line "$job" "$data_dir"
+    DONE_JOBS+=("$job")
   done
   echo "  node:         $node"
   echo "  repo:         $REPO"
@@ -1090,6 +1234,10 @@ cmd_install() {
       echo "  Note: the \"kiro-crew\" builder needs the Kiro Crew gateway job too: scripts/install-agents.sh install crew"
     fi
   done
+  # Once, when a night job was named: the times above are Overnight's, whatever the Mac's clock says.
+  if [[ -n "$CLOCK_ZONE" ]]; then
+    print_clock_note "$node" "$CLOCK_ZONE"
+  fi
   echo
   if [[ "$first_install" == yes ]]; then
     echo "This is a first install, so Overnight was put in quiet mode before it started."
@@ -1119,7 +1267,7 @@ cmd_uninstall() {
 
 #   cmd_restart [job...]   (no job: every job that is installed)
 cmd_restart() {
-  local job named=yes kirocrew
+  local job named=yes kirocrew node="" since code
   local -a jobs=()
   if (( $# == 0 )); then
     named=no
@@ -1133,18 +1281,38 @@ cmd_restart() {
     fi
   done
   (( ${#jobs[@]} > 0 )) || die "No Overnight job is installed. Install the one you want with: scripts/install-agents.sh install <listen | crew | build | deliver>"
+  # Everything that can refuse, for every job, before any of them is stopped.
   for job in "${jobs[@]}"; do
+    [[ "$job" == build || "$job" == deliver ]] || continue
+    require_not_busy "$job" restarting
+    # A job that wakes every minute is asked, through the tool, whether it has looked at the clock.
+    if on_timer "$job" && [[ -z "$node" ]]; then
+      node="$(find_node)" || die "Could not find Node.js, which is needed to see whether the $job job looks at the clock once it has started again. Expected it at $HOME/.local/node/bin/node, or as \"node\" on the PATH. Nothing was changed."
+    fi
+  done
+  for job in "${jobs[@]}"; do
+    if [[ "$job" == build || "$job" == deliver ]]; then
+      # Once more, now that its turn has come: the jobs before it may have taken a while.
+      require_not_busy "$job" restarting
+    fi
     stop_job "$job" || die "The $job job would not stop. Try again in a minute."
+    since=""
+    if [[ -n "$node" ]]; then
+      since="$(utc_now "$node")"
+    fi
     start_job "$job" || die "$START_FAILED"
-    if ! job_in_place "$job"; then
+    code=0
+    job_in_place "$job" "$node" "$since" || code=$?
+    if (( code != 0 )); then
       status_of "$job"
-      die "$(not_in_place "$job")"
+      die "$(not_in_place "$job" "$code")"
     fi
     if [[ "$job" == crew ]]; then
       kirocrew="$(find_kirocrew)" || die "The Kiro Crew gateway job was started again, but Kiro Crew's program could not be found to ask whether the gateway answers. Expected it at $HOME/.local/bin/kirocrew."
       require_gateway_answer "$kirocrew"
     fi
     echo "Restarted: $(title_of "$job")."
+    DONE_JOBS+=("$job")
   done
   cmd_status "${jobs[@]}"
 }

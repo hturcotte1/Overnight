@@ -3,7 +3,7 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { dataPaths, ensureDataDirs } from "@overnight/core";
+import { dataPaths, ensureDataDirs, finishedBuildDir } from "@overnight/core";
 import { describe, expect, it } from "vitest";
 import { CONTRACT_MARKER } from "../src/contract.ts";
 import type { ContractMeasure, ViewMeasure } from "../src/contract.ts";
@@ -203,7 +203,7 @@ function makeRig(options: { behaviour?: Behaviour; limits?: Partial<VerifyLimits
     return found;
   };
   const verify = (signal?: AbortSignal) => verifier.verify({ ideaId: IDEA_ID, workspace, runDir, ...(signal ? { signal } : {}) });
-  return { root, paths, nodeBin, toolsDir, browsersDir, npmCacheDir, home, sandboxExec, workspace, runDir, at, calls, call, seen, proxy, logLines: lines, verify };
+  return { root, paths, nodeBin, toolsDir, browsersDir, npmCacheDir, home, sandboxExec, workspace, runDir, at, calls, call, seen, proxy, logLines: lines, verifier, verify };
 }
 
 describe("the sandboxed verifier: a good app", () => {
@@ -357,6 +357,44 @@ describe("the sandboxed verifier: a good app", () => {
 });
 
 describe("the sandboxed verifier: the clean copy", () => {
+  it("verifies a finished build kept in built/<id> just like one in workspaces/<id>, only ever reads it, and tells no sandboxed step where it is", async () => {
+    const usual = makeRig();
+    const usualResult = await usual.verify();
+
+    const rig = makeRig();
+    // What the builder does once an idea is recorded as built: one rename, out of the build jobs' reach.
+    const sealed = path.join(rig.paths.built, IDEA_ID);
+    renameSync(rig.workspace, sealed);
+    expect(finishedBuildDir(rig.paths, IDEA_ID)).toBe(sealed);
+    /** Every file and folder in the sealed build: its name, its mode and, for a file, what is in it. */
+    const snapshot = () =>
+      (readdirSync(sealed, { recursive: true }) as string[]).sort().map((name) => {
+        const stat = lstatSync(path.join(sealed, name));
+        return [name, stat.mode, stat.isFile() ? readFileSync(path.join(sealed, name), "utf8") : null];
+      });
+    const before = snapshot();
+    expect(before.map((entry) => entry[0])).toContain(path.join("dist", "index.html"));
+
+    const result = await rig.verifier.verify({ ideaId: IDEA_ID, workspace: finishedBuildDir(rig.paths, IDEA_ID), runDir: rig.runDir });
+
+    if (!result.ok || !usualResult.ok) throw new Error("Both verifications should have passed.");
+    expect(rig.calls.map((call) => call.step)).toEqual(["npm-ci-offline", "build", "contract", "app-smoke"]);
+    // The same clean copy, the same counts and the same site as from a workspace.
+    expect(rig.seen.appAtBuild).toEqual(usual.seen.appAtBuild);
+    expect(rig.seen.site).toEqual(usual.seen.site);
+    for (const key of ["sourceFiles", "sourceBytes", "distFiles", "distBytes", "appSmokePresent", "installOk", "buildOk", "contractOk", "appSmokeOk"]) expect(result.checks[key], key).toBe(usualResult.checks[key]);
+    expect(readFileSync(path.join(result.distDir, "index.html"), "utf8")).toBe("<h1>made-up app</h1>\n");
+    // The sandbox is given our copy under tmp/deliver, as always. Nothing it is handed names the folder of finished builds.
+    for (const call of rig.calls) {
+      expect(call.defines.WORKSPACE?.startsWith(`${rig.runDir}${path.sep}`), call.step).toBe(true);
+      expect(JSON.stringify([call.defines, call.argv, call.cwd, call.env]), call.step).not.toContain(rig.paths.built);
+    }
+    // The sealed build is exactly as it was, stale dist and all, and nothing was put back where the workspace used to be.
+    expect(snapshot()).toEqual(before);
+    expect(readdirSync(rig.paths.built)).toEqual([IDEA_ID]);
+    expect(existsSync(rig.workspace)).toBe(false);
+  });
+
   it("refuses a workspace with a symbolic link in it, before anything runs", async () => {
     const rig = makeRig();
     symlinkSync("/etc/hosts", path.join(rig.workspace, "src/hosts"));

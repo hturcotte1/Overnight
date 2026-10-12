@@ -1,5 +1,5 @@
 // Synthetic test data: every title, pitch, quote and link in this file is made up. None of it is Bee data.
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { BeeError, BUILD_INTERRUPTED_REASON, BUILD_STOPPED_REASON, MAX_BUILD_STARTS } from "@overnight/core";
 import { describe, expect, it, vi } from "vitest";
@@ -7,6 +7,10 @@ import { ANNOUNCING_NOTE, BUILD_RETRY_PENDING_REASON, DELIVER_STOPPED_REASON, de
 import { HOUR, lostReply, makeRig, MINUTE, PITCH, QUOTE, refused, T_0630, TITLE } from "./helpers.ts";
 
 const SEVEN_AM = "2026-10-10T13:00:00.000Z";
+/** The note on an idea whose to-do was being created when Overnight was cut off. Written out here on purpose: the words are the promise. */
+const CUT_OFF_NOTE = "Bee was being told when Overnight stopped, so its to-do may or may not exist; no second one is made";
+/** What a failed publish's reason ends with when the push had been started and may have got through. */
+const MAY_BE_PUBLIC = " The push may have reached GitHub all the same, so the app may be public.";
 
 function readReport(rig: ReturnType<typeof makeRig>, ideaId: string): Record<string, unknown> {
   return JSON.parse(readFileSync(reportPath(rig.paths, ideaId), "utf8")) as Record<string, unknown>;
@@ -99,6 +103,88 @@ describe("runDeliver: the happy path", () => {
     await runDeliver(rig.deps);
     expect(rig.bee.factCalls).toEqual([]);
     expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "delivered", factId: null });
+  });
+});
+
+describe("where the finished build is read from", () => {
+  it("built/<id>, when the builder has moved the finished build there", async () => {
+    const rig = makeRig();
+    const idea = rig.idea("built");
+    // The move is one rename, so the workspace is gone once the sealed build is there.
+    mkdirSync(path.join(rig.paths.built, idea.id));
+
+    expect(await runDeliver(rig.deps)).toEqual({ delivered: [idea.id], failed: [], notified: [] });
+
+    expect(rig.verifier.calls.map((job) => job.workspace)).toEqual([path.join(rig.paths.built, idea.id)]);
+  });
+
+  it("workspaces/<id>, when there is no sealed build (recorded as built, then cut off before the move)", async () => {
+    const rig = makeRig();
+    const idea = rig.idea("built");
+    mkdirSync(path.join(rig.paths.workspaces, idea.id));
+
+    expect(await runDeliver(rig.deps)).toEqual({ delivered: [idea.id], failed: [], notified: [] });
+
+    expect(rig.verifier.calls.map((job) => job.workspace)).toEqual([path.join(rig.paths.workspaces, idea.id)]);
+  });
+
+  it("each idea by its own folder: one sealed and one not, in the same run", async () => {
+    const rig = makeRig();
+    const sealed = rig.idea("built");
+    const unsealed = rig.idea("built", { title: "Marmalade tracker" });
+    mkdirSync(path.join(rig.paths.built, sealed.id));
+    mkdirSync(path.join(rig.paths.workspaces, unsealed.id));
+    // An older sealed copy that was moved aside belongs to nobody's delivery.
+    mkdirSync(path.join(rig.paths.built, `${unsealed.id}.old-20261009T070000Z`));
+
+    await runDeliver(rig.deps);
+
+    expect(rig.verifier.calls.map((job) => [job.ideaId, job.workspace])).toEqual([
+      [sealed.id, path.join(rig.paths.built, sealed.id)],
+      [unsealed.id, path.join(rig.paths.workspaces, unsealed.id)],
+    ]);
+  });
+
+  it("a link or a plain file at built/<id> is not a sealed build: the workspace is used", async () => {
+    const rig = makeRig();
+    const linked = rig.idea("built");
+    const file = rig.idea("built", { title: "Marmalade tracker" });
+    const elsewhere = path.join(rig.paths.root, "made-up-elsewhere");
+    mkdirSync(elsewhere);
+    symlinkSync(elsewhere, path.join(rig.paths.built, linked.id));
+    writeFileSync(path.join(rig.paths.built, file.id), "made-up\n");
+
+    await runDeliver(rig.deps);
+
+    expect(rig.verifier.calls.map((job) => job.workspace)).toEqual([path.join(rig.paths.workspaces, linked.id), path.join(rig.paths.workspaces, file.id)]);
+  });
+
+  it("deliverOne reads from the same place, also when a failed publish is tried again by id", async () => {
+    const rig = makeRig();
+    const built = rig.idea("built");
+    const failedBefore = rig.idea("publish_failed", { title: "Marmalade tracker" });
+    for (const idea of [built, failedBefore]) mkdirSync(path.join(rig.paths.built, idea.id));
+
+    expect(await deliverOne(built.id, rig.deps)).toMatchObject({ ok: true });
+    expect(await deliverOne(failedBefore.id, rig.deps)).toMatchObject({ ok: true });
+
+    expect(rig.verifier.calls.map((job) => job.workspace)).toEqual([path.join(rig.paths.built, built.id), path.join(rig.paths.built, failedBefore.id)]);
+  });
+
+  it("the sealed build is only read: delivering leaves built/<id> exactly as it was", async () => {
+    const rig = makeRig();
+    const idea = rig.idea("built");
+    const sealed = path.join(rig.paths.built, idea.id);
+    mkdirSync(path.join(sealed, "src"), { recursive: true });
+    writeFileSync(path.join(sealed, "src", "main.ts"), "export {};\n");
+
+    await runDeliver(rig.deps);
+
+    expect(rig.store.getIdea(idea.id)?.state).toBe("delivered");
+    expect(readdirSync(sealed, { recursive: true }).sort()).toEqual(["src", path.join("src", "main.ts")]);
+    expect(readdirSync(rig.paths.built)).toEqual([idea.id]);
+    // And nothing was made where the workspace used to be.
+    expect(existsSync(path.join(rig.paths.workspaces, idea.id))).toBe(false);
   });
 });
 
@@ -277,7 +363,7 @@ describe("runDeliver: never twice", () => {
     expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "delivered", morningTodoId: 7001 });
   });
 
-  it("an idea cut off while its to-do was being created is closed without a second to-do", async () => {
+  it("an idea cut off while its to-do was being created is closed without a second to-do, and its note does not claim the wearer was told", async () => {
     const rig = makeRig();
     const idea = rig.idea("published");
     rig.store.updateIdea(idea.id, { note: ANNOUNCING_NOTE }, rig.clock.iso());
@@ -285,10 +371,43 @@ describe("runDeliver: never twice", () => {
     const summary = await runDeliver(rig.deps);
 
     expect(summary.delivered).toEqual([idea.id]);
+    // Bee is not asked for a to-do at all, on this run or the next.
     expect(rig.bee.todoCalls).toEqual([]);
     const after = rig.store.getIdea(idea.id);
-    expect(after).toMatchObject({ state: "delivered", morningTodoId: null });
-    expect(after?.note).toContain("stopped before the reply came");
+    expect(after).toMatchObject({ state: "delivered", morningTodoId: null, deliveredAt: T_0630 });
+    // Word for word: the to-do may or may not exist, and that is all that is known.
+    expect(after?.note).toBe(CUT_OFF_NOTE);
+    expect(after?.note).not.toContain("told in Bee");
+    // The note is on the timeline and in the report too.
+    expect(rig.store.ideaEvents(idea.id).find((event) => event.toState === "delivered")?.note).toBe(CUT_OFF_NOTE);
+    expect(readReport(rig, idea.id)).toMatchObject({ state: "delivered", ok: true, note: CUT_OFF_NOTE, morningTodoId: null });
+    // The fact is true whether or not the to-do exists (the app was built and is published), so it is still written, once.
+    expect(rig.bee.factCalls).toEqual([`Overnight built "${TITLE}" on Oct 10: ${idea.publishedUrl}`]);
+
+    await runDeliver(rig.deps);
+    expect(rig.bee.todoCalls).toEqual([]);
+    expect(rig.bee.factCalls).toHaveLength(1);
+  });
+
+  it("with facts switched off, closing an idea that was cut off asks Bee for nothing at all", async () => {
+    const rig = makeRig({ env: { WRITE_BEE_FACTS: "false" } });
+    const idea = rig.idea("published");
+    rig.store.updateIdea(idea.id, { note: ANNOUNCING_NOTE }, rig.clock.iso());
+
+    expect(await runDeliver(rig.deps)).toEqual({ delivered: [idea.id], failed: [], notified: [] });
+
+    expect(rig.bee.todoCalls).toEqual([]);
+    expect(rig.bee.factCalls).toEqual([]);
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "delivered", morningTodoId: null, factId: null, note: CUT_OFF_NOTE });
+  });
+
+  it("deliverOne closes an idea that was cut off the same way: the link, the note, no to-do", async () => {
+    const rig = makeRig();
+    const idea = rig.idea("published");
+    rig.store.updateIdea(idea.id, { note: ANNOUNCING_NOTE }, rig.clock.iso());
+    expect(await deliverOne(idea.id, rig.deps)).toEqual({ ok: true, url: idea.publishedUrl });
+    expect(rig.bee.todoCalls).toEqual([]);
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "delivered", note: CUT_OFF_NOTE });
   });
 
   it("leaves the mark in place while Bee is being asked, so a crash at that moment is seen by the next run", async () => {
@@ -481,6 +600,126 @@ describe("runDeliver: a build that was cut short gets one more try before anyone
   });
 });
 
+describe("runDeliver: a failed idea is read again just before the wearer is told", () => {
+  const failureTodo = (title: string) => `🌙 Couldn't finish ${title}, details on the dashboard`;
+  /** Runs `change` once, while Bee is being asked for the first to-do: what another command does to the store in that time. */
+  const duringTheFirstTodo = (rig: ReturnType<typeof makeRig>, change: () => void) => {
+    rig.bee.onCreateTodo = () => {
+      if (rig.bee.todoCalls.length === 1) change();
+    };
+  };
+
+  it("an idea that is being built again by the time its turn comes gets no 🌙 to-do, and is told about once if that build fails too", async () => {
+    const rig = makeRig();
+    const first = rig.idea("build_failed");
+    const second = rig.idea("build_failed", { title: "Marmalade tracker" });
+    // While Bee is being asked about the first, `overnight build-now` starts the second again.
+    duringTheFirstTodo(rig, () => rig.store.transitionIdea(second.id, "building", { buildStartedAt: rig.clock.iso(), failureReason: null }, rig.clock.iso()));
+
+    expect(await runDeliver(rig.deps)).toEqual({ delivered: [], failed: [], notified: [first.id] });
+
+    expect(rig.bee.todoCalls.map((call) => call.text)).toEqual([failureTodo(TITLE)]);
+    expect(rig.store.getIdea(first.id)?.failureNotifiedAt).toBe(T_0630);
+    // Nothing at all was written to the second: no time recorded, so it can still be told about later.
+    expect(rig.store.getIdea(second.id)).toMatchObject({ state: "building", failureNotifiedAt: null, failureReason: null });
+    const skipped = rig.logLines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((line) => String(line.msg ?? line.message ?? "").includes("is no longer failed"));
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toMatchObject({ level: "info", ideaId: second.id, state: "building" });
+    expect(rig.logLines.join("\n")).not.toContain("Marmalade");
+
+    // That build fails for real: the next morning says so, once.
+    rig.store.transitionIdea(second.id, "build_failed", { failureReason: "The build agent ran out of time." }, rig.clock.iso());
+    rig.clock.advance(24 * HOUR);
+    expect(await runDeliver(rig.deps)).toEqual({ delivered: [], failed: [], notified: [second.id] });
+    expect(await runDeliver(rig.deps)).toEqual({ delivered: [], failed: [], notified: [] });
+    expect(rig.bee.todoCalls.map((call) => call.text)).toEqual([failureTodo(TITLE), failureTodo("Marmalade tracker")]);
+  });
+
+  it("an idea that was built in the meantime is delivered with its ☀️ to-do the next morning and never gets a 🌙 one", async () => {
+    const rig = makeRig();
+    const first = rig.idea("build_failed");
+    const second = rig.idea("build_failed", { title: "Marmalade tracker" });
+    duringTheFirstTodo(rig, () => rig.buildAgain(second.id, "built"));
+
+    expect(await runDeliver(rig.deps)).toEqual({ delivered: [], failed: [], notified: [first.id] });
+    expect(rig.store.getIdea(second.id)).toMatchObject({ state: "built", failureNotifiedAt: null });
+
+    expect(await runDeliver(rig.deps)).toEqual({ delivered: [second.id], failed: [], notified: [] });
+    expect(rig.bee.todoCalls.map((call) => call.text)).toEqual([failureTodo(TITLE), `☀️ Built overnight: Marmalade tracker → https://made-up-owner.github.io/overnight-apps/${second.slug}/`]);
+    expect(rig.store.getIdea(second.id)).toMatchObject({ state: "delivered", failureNotifiedAt: null });
+  });
+
+  it("an idea another run has told the wearer about in the meantime is not told about twice, and its recorded time is left alone", async () => {
+    const rig = makeRig();
+    const first = rig.idea("build_failed");
+    const second = rig.idea("publish_failed", { title: "Marmalade tracker" });
+    const toldByTheOther = "2026-10-10T12:29:30.000Z";
+    duringTheFirstTodo(rig, () => rig.store.updateIdea(second.id, { failureNotifiedAt: toldByTheOther }, toldByTheOther));
+
+    expect(await runDeliver(rig.deps)).toEqual({ delivered: [], failed: [], notified: [first.id] });
+
+    expect(rig.bee.todoCalls.map((call) => call.text)).toEqual([failureTodo(TITLE)]);
+    expect(rig.store.getIdea(second.id)).toMatchObject({ state: "publish_failed", failureNotifiedAt: toldByTheOther });
+  });
+
+  it("an idea whose build starts can no longer be counted when its turn comes is left for the next run rather than told about on a guess", async () => {
+    const rig = makeRig();
+    // Stopped on both starts: no try left, so this morning it is listed as a failure to tell about.
+    const idea = rig.idea("build_failed", { failureReason: BUILD_STOPPED_REASON });
+    rig.buildAgain(idea.id, { failureReason: BUILD_STOPPED_REASON });
+    const countForReal = rig.store.countBuildStarts.bind(rig.store);
+    let asked = 0;
+    const count = vi.spyOn(rig.store, "countBuildStarts").mockImplementation((id) => {
+      asked += 1;
+      // The first count (when the failures are listed) works; the second (just before telling) does not.
+      if (asked === 2) throw new Error("made-up database trouble");
+      return countForReal(id);
+    });
+    try {
+      expect(await runDeliver(rig.deps)).toEqual({ delivered: [], failed: [], notified: [] });
+      expect(asked).toBe(2);
+      expect(rig.bee.todoCalls).toEqual([]);
+      expect(rig.store.getIdea(idea.id)?.failureNotifiedAt).toBeNull();
+      expect(rig.logLines.join("\n")).toContain("could not count an idea's build starts");
+
+      // The next run can count again, and tells the wearer once.
+      expect(await runDeliver(rig.deps)).toEqual({ delivered: [], failed: [], notified: [idea.id] });
+      expect(rig.bee.todoCalls.map((call) => call.text)).toEqual([failureTodo(TITLE)]);
+    } finally {
+      count.mockRestore();
+    }
+  });
+
+  it("an idea that is gone when its turn comes is skipped without a to-do", async () => {
+    const rig = makeRig();
+    const first = rig.idea("build_failed");
+    const second = rig.idea("build_failed", { title: "Marmalade tracker" });
+    const getForReal = rig.store.getIdea.bind(rig.store);
+    let gone = false;
+    const get = vi.spyOn(rig.store, "getIdea").mockImplementation((id) => (gone && id === second.id ? null : getForReal(id)));
+    duringTheFirstTodo(rig, () => {
+      gone = true;
+    });
+    try {
+      expect(await runDeliver(rig.deps)).toEqual({ delivered: [], failed: [], notified: [first.id] });
+      expect(rig.bee.todoCalls).toHaveLength(1);
+    } finally {
+      get.mockRestore();
+    }
+    expect(rig.store.getIdea(second.id)?.failureNotifiedAt).toBeNull();
+    // Skipped quietly: it is not an error.
+    expect(rig.logLines.join("\n")).not.toContain("could not tell the wearer about a failure");
+  });
+
+  it("nothing changes for an idea that is still as it was listed: every failed idea gets its one to-do, in order", async () => {
+    const rig = makeRig();
+    const ideas = [rig.idea("build_failed"), rig.idea("publish_failed", { title: "Marmalade tracker" }), rig.idea("build_failed", { title: "Accordion lesson planner" })];
+    expect(await runDeliver(rig.deps)).toEqual({ delivered: [], failed: [], notified: ideas.map((idea) => idea.id) });
+    expect(rig.bee.todoCalls.map((call) => call.text)).toEqual([failureTodo(TITLE), failureTodo("Marmalade tracker"), failureTodo("Accordion lesson planner")]);
+    expect(rig.logLines.join("\n")).not.toContain("is no longer failed");
+  });
+});
+
 describe("runDeliver: pushed, but the page was not seen live before the wait ran out", () => {
   const TEN_MINUTES = 10 * MINUTE;
   const url = (slug: string | null) => `https://made-up-owner.github.io/overnight-apps/${slug}/`;
@@ -597,14 +836,88 @@ describe("runDeliver: pushed, but the page was not seen live before the wait ran
     expect(readReport(rig, idea.id)).toMatchObject({ state: "delivered", confirmedLive: false, note: NOT_SEEN_LIVE_NOTE, timings: { liveAfterMs: null } });
   });
 
-  it("a push that did not go through is still a failure with a 🌙 to-do: only a push that succeeded can be 'not seen live'", async () => {
+  it("a push that did not go through is still a failure with a 🌙 to-do: only a push that succeeded can be 'not seen live'. If it may have reached GitHub, the reason says the app may be public", async () => {
     const rig = makeRig();
     const idea = rig.idea("built");
     // What the publisher answers when the push ran into its time limit: it MAY be on GitHub.
     rig.publisher.results.push({ ok: false, reason: "Could not push the new version to GitHub.", pushed: true });
     expect(await runDeliver(rig.deps)).toEqual({ delivered: [], failed: [idea.id], notified: [idea.id] });
-    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "publish_failed", publishedUrl: null });
-    expect(readReport(rig, idea.id)).toMatchObject({ ok: false, confirmedLive: null });
+
+    const reason = `Could not push the new version to GitHub.${MAY_BE_PUBLIC}`;
+    expect(reason).toBe("Could not push the new version to GitHub. The push may have reached GitHub all the same, so the app may be public.");
+    // Failed like any other: no link is recorded and nobody is sent one. But the reason, the note,
+    // the timeline and the report all say what may be true of the public page.
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "publish_failed", publishedUrl: null, publishedAt: null, failureReason: reason, note: reason, failureNotifiedAt: T_0630 });
+    expect(rig.store.ideaEvents(idea.id).find((event) => event.toState === "publish_failed")?.note).toBe(reason);
+    expect(readReport(rig, idea.id)).toMatchObject({ ok: false, state: "publish_failed", url: null, confirmedLive: null, failureReason: reason, note: reason });
+    expect(rig.bee.todoCalls.map((call) => call.text)).toEqual([`🌙 Couldn't finish ${TITLE}, details on the dashboard`]);
+    // The log says it too, by id only.
+    const warning = rig.logLines.map((line) => JSON.parse(line) as Record<string, unknown>).find((line) => String(line.msg ?? line.message ?? "").includes("a built app was not published"));
+    expect(warning).toMatchObject({ level: "warn", ideaId: idea.id, failedStep: "publish", pushMayHaveReachedGitHub: true });
+  });
+
+  it("a push GitHub plainly refused changed nothing there, so its reason says nothing about the app being public", async () => {
+    const rig = makeRig();
+    // The first fails verification and never reaches the publisher; the second is the refused push.
+    const failedCheck = rig.idea("built", { title: "Marmalade tracker" });
+    const refusedPush = rig.idea("built");
+    rig.verifier.results.push({ ok: false, reason: "The app's build command (npm run build) failed.", checks: { failedStep: "build" } });
+    // The publisher leaves `pushed` out when the push was refused, or never started.
+    rig.publisher.results.push({ ok: false, reason: "Could not push the new version to GitHub." });
+
+    expect(await runDeliver(rig.deps)).toMatchObject({ delivered: [], failed: [failedCheck.id, refusedPush.id] });
+    expect(rig.publisher.calls.map((call) => call.ideaId)).toEqual([refusedPush.id]);
+
+    expect(rig.store.getIdea(refusedPush.id)).toMatchObject({ state: "publish_failed", failureReason: "Could not push the new version to GitHub.", note: "Could not push the new version to GitHub." });
+    expect(rig.store.getIdea(failedCheck.id)).toMatchObject({ state: "publish_failed", failureReason: "The app's build command (npm run build) failed." });
+    const all = rig.logLines.join("\n");
+    expect(all).toContain("a built app was not published");
+    expect(all).not.toContain("pushMayHaveReachedGitHub");
+    expect(JSON.stringify(rig.store.listIdeas({ states: ["publish_failed"] }))).not.toContain("may be public");
+  });
+
+  it("any failure after the push was started carries the sentence, also one the publisher did not expect", async () => {
+    const rig = makeRig();
+    const idea = rig.idea("built");
+    rig.publisher.results.push({ ok: false, reason: "Publishing could not be completed because of an unexpected error.", pushed: true });
+    await runDeliver(rig.deps);
+    expect(rig.store.getIdea(idea.id)?.failureReason).toBe(`Publishing could not be completed because of an unexpected error.${MAY_BE_PUBLIC}`);
+  });
+
+  it("stopped after the push is still a stop, not a failure: the sentence is not added and nobody is told", async () => {
+    const stop = new AbortController();
+    const rig = makeRig();
+    const idea = rig.idea("built");
+    rig.publisher.onPublish = () => stop.abort();
+    // A real failure and a possible push, reported just as we are stopped.
+    rig.publisher.results.push({ ok: false, reason: "Could not push the new version to GitHub.", pushed: true });
+
+    expect(await runDeliver({ ...rig.deps, signal: stop.signal })).toEqual({ delivered: [], failed: [], notified: [], stopped: true });
+
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "built", failureReason: null, note: PUSHED_UNCONFIRMED_NOTE, failureNotifiedAt: null });
+    expect(rig.bee.todoCalls).toEqual([]);
+  });
+
+  it("deliverOne answers with the same reason, and a later try by id that works clears it", async () => {
+    const rig = makeRig({ startIso: "2026-10-10T21:00:00.000Z" });
+    const idea = rig.idea("built");
+    rig.publisher.results.push({ ok: false, reason: "Could not push the new version to GitHub.", pushed: true });
+    const reason = `Could not push the new version to GitHub.${MAY_BE_PUBLIC}`;
+
+    expect(await deliverOne(idea.id, rig.deps)).toEqual({ ok: false, reason });
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "publish_failed", failureReason: reason, note: reason });
+    expect(rig.bee.todoCalls.map((call) => call.text)).toEqual([`🌙 Couldn't finish ${TITLE}, details on the dashboard`]);
+
+    // Tried again by id, and it fails after the push once more, in another way: the new reason carries the sentence too, and nobody is buzzed twice.
+    rig.publisher.results.push({ ok: false, reason: "Publishing could not be completed because of an unexpected error.", pushed: true });
+    const secondReason = `Publishing could not be completed because of an unexpected error.${MAY_BE_PUBLIC}`;
+    expect(await deliverOne(idea.id, rig.deps)).toEqual({ ok: false, reason: secondReason });
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "publish_failed", failureReason: secondReason, note: secondReason });
+    expect(rig.bee.todoCalls).toHaveLength(1);
+
+    // Published again by id: the publisher replaces whatever the earlier pushes left, and the stale reason and note go.
+    expect(await deliverOne(idea.id, rig.deps)).toEqual({ ok: true, url: url(idea.slug) });
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "delivered", failureReason: null, note: null });
   });
 
   it("deliverOne says so in its answer, next to the link", async () => {
@@ -895,6 +1208,26 @@ describe("runDeliver: being stopped", () => {
     expect(await runDeliver({ ...rig.deps, signal: stop.signal })).toMatchObject({ delivered: [], failed: [], stopped: true });
     expect(rig.publisher.calls).toEqual([]);
     expect(rig.store.getIdea(idea.id)?.state).toBe("built");
+  });
+
+  it("a check that ran past its time limit while the Mac slept is no verdict: the run was stopped when the sleep was noticed, so the idea stays built", async () => {
+    const stop = new AbortController();
+    const rig = makeRig();
+    const idea = rig.idea("built");
+    // What the command line does when it finds the Mac has slept during the run: it stops the work, as a stop signal would.
+    rig.verifier.onVerify = () => stop.abort();
+    // What a step's time limit makes of a sleep: the wall clock moved on while the step stood still.
+    rig.verifier.results.push({ ok: false, reason: "Building the app took longer than 5 minutes and was stopped.", checks: { buildOk: false, failedStep: "build" } });
+
+    expect(await runDeliver({ ...rig.deps, signal: stop.signal })).toEqual({ delivered: [], failed: [], notified: [], stopped: true });
+
+    // A good app is not failed for good, and nobody is told it could not be finished.
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "built", failureReason: null, failureNotifiedAt: null, note: null });
+    expect(rig.bee.todoCalls).toEqual([]);
+    expect(existsSync(reportPath(rig.paths, idea.id))).toBe(false);
+    // The next run checks it again from the start, and it goes out.
+    expect(await runDeliver(rig.deps)).toEqual({ delivered: [idea.id], failed: [], notified: [] });
+    expect(rig.verifier.calls).toHaveLength(2);
   });
 
   it("stopped after the push but before the link was confirmed: the idea says so, nobody is told, and the next run publishes again with a new marker and one to-do", async () => {

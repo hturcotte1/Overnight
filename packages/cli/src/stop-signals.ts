@@ -15,6 +15,10 @@
 //   - If the work has not come back STOP_WAIT_MS after the first signal, the command stops
 //     waiting and ends anyway, well inside the 60 seconds macOS gives the job (ExitTimeOut).
 //
+// A command can also stop its own work the same way, with no signal: when it finds that the Mac
+// slept through part of the run (sleep-watch.ts). The work is aborted and waited for just the
+// same, but the process was not asked to end, so there is no signal's exit code to end with.
+//
 // `overnight listen` does not use this: the listener has its own handling in @overnight/listener.
 
 /** The exit code a shell reports for a process ended by each signal: 128 + the signal's number. */
@@ -62,6 +66,12 @@ export interface StopWatch {
   settle<T>(work: Promise<T> | T): Promise<T | typeof STOP_OVERDUE>;
   /** Abort without a signal: the command itself has given up on the work (its time limit passed). */
   abort(): void;
+  /**
+   * Stop the work as a first stop signal would, without one: the work is aborted and given
+   * `waitMs` to come back, after which `settle` answers STOP_OVERDUE. `received()` and
+   * `exitCode()` stay null, because nothing asked the process to end.
+   */
+  stopWork(): void;
   /** Take the handlers off again. Safe to call more than once. */
   close(): void;
 }
@@ -90,7 +100,8 @@ export const watchStopSignals: WatchStopSignals = (options = {}) => {
         return;
       }
       first = name;
-      overdueTimer = setTimeout(markOverdue, waitMs);
+      // Not a second countdown if the command has already stopped its own work: that one stands.
+      overdueTimer ??= setTimeout(markOverdue, waitMs);
       try {
         options.onStop?.(name);
       } catch {
@@ -114,6 +125,11 @@ export const watchStopSignals: WatchStopSignals = (options = {}) => {
       return Promise.race([running, overdue]);
     },
     abort: () => controller.abort(),
+    stopWork: () => {
+      if (closed) return;
+      overdueTimer ??= setTimeout(markOverdue, waitMs);
+      controller.abort();
+    },
     close: () => {
       if (closed) return;
       closed = true;

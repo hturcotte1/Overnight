@@ -1,11 +1,12 @@
 // All text in this file is made up for the tests. No Bee, Kiro, Kiro Crew, GitHub or network
 // call is made: every one of preflight's questions is answered by a fake.
 import { describe, expect, it } from "vitest";
-import { BeeError, Store } from "@overnight/core";
+import { BeeError, closedRun, currentSlot, noteChecked, noticedRun, Store, writeNightRun } from "@overnight/core";
+import type { ClockedJob } from "@overnight/core";
 import { CROSS, DASH, formatCheck, preflight, PREFLIGHT_READY, PREFLIGHT_STOPPED, PREFLIGHT_TITLE, TICK, verdict } from "../src/commands/preflight.ts";
 import type { PreflightProbes } from "../src/commands/preflight.ts";
 import type { WatchStopSignals } from "../src/stop-signals.ts";
-import { at, capture, testConfig } from "./helpers.ts";
+import { at, capture, fixedNow, testConfig } from "./helpers.ts";
 import { aborted, fakeStopSignals, never } from "./night-fakes.ts";
 
 /** A Mac on which everything tonight's run needs is in place. Each test breaks one thing. */
@@ -26,18 +27,34 @@ function allGood(overrides: Partial<PreflightProbes> = {}): PreflightProbes & { 
     headlessShellPresent: async () => note("browser", true),
     nightJobs: () => note("jobs", { build: true, deliver: true, crew: true }),
     crewJobSandbox: () => note("gateway job", "overnight" as const),
+    nightJobTriggers: () => note("triggers", { build: "timer" as const, deliver: "timer" as const }),
+    nightJobRunning: (job) => note(`${job} lock`, false),
+    gatewayProfileCopy: () => note("gateway copy", "same" as const),
     ...overrides,
   };
 }
 
-async function run(overrides: Partial<PreflightProbes> = {}, options: { settings?: Record<string, string>; paused?: boolean; checkLimitMs?: number; watchStopSignals?: WatchStopSignals } = {}) {
-  const out = capture();
+/** A database in which both night jobs asked the clock a minute before the made-up noon: awake, as on a Mac where all is well. */
+function awakeStore(lastChecks: Partial<Record<ClockedJob, string | null>> = {}): Store {
   const store = new Store(":memory:");
+  for (const job of ["build", "deliver"] as const) {
+    const last = lastChecks[job] === undefined ? at(-60) : lastChecks[job];
+    if (last !== null) noteChecked(store, job, new Date(last));
+  }
+  return store;
+}
+
+async function run(
+  overrides: Partial<PreflightProbes> = {},
+  options: { settings?: Record<string, string>; paused?: boolean; checkLimitMs?: number; watchStopSignals?: WatchStopSignals; store?: Store; now?: string } = {},
+) {
+  const out = capture();
+  const store = options.store ?? awakeStore();
   if (options.paused) store.setPaused(true, at(0));
   const probes = allGood(overrides);
   // Made-up stop signals: no test listens to, or sends, a real one.
   const watchStopSignals = options.watchStopSignals ?? fakeStopSignals().watch;
-  const code = await preflight({ store, config: testConfig(options.settings), write: out.write, probes, checkLimitMs: options.checkLimitMs, watchStopSignals });
+  const code = await preflight({ store, config: testConfig(options.settings), write: out.write, now: fixedNow(options.now), probes, checkLimitMs: options.checkLimitMs, watchStopSignals });
   return { code, lines: out.lines, text: out.text(), asked: probes.asked };
 }
 
@@ -58,12 +75,15 @@ describe("overnight preflight", () => {
       `  ${TICK} The apps repo (overnight-apps) can be reached on GitHub.`,
       `  ${TICK} Playwright's headless browser is installed.`,
       `  ${TICK} The three background jobs are installed: build, deliver and the Kiro Crew gateway.`,
+      `  ${TICK} The build and deliver jobs wake every minute and go by Overnight's own clock (America/Boise). Both checked the time in the last 3 minutes.`,
       `  ${TICK} The gateway job was installed for BUILD_SANDBOX=overnight.`,
       PREFLIGHT_READY,
     ]);
+    // Thirteen checks, and the title and the verdict around them.
+    expect(ran.lines).toHaveLength(15);
     // Every question was asked once, and the sandbox mode asked about is the one in the settings.
     // (Before the probe, one look at the build lock: the probe must not get in the way of a build.)
-    expect(ran.asked).toEqual(["bee", "kiro", "gateway", "crew settings for overnight", "skill", "build lock", "probe", "gh", "repo overnight-apps", "browser", "jobs", "gateway job"]);
+    expect(ran.asked).toEqual(["bee", "kiro", "gateway", "crew settings for overnight", "skill", "build lock", "probe", "gh", "repo overnight-apps", "browser", "jobs", "triggers", "build lock", "deliver lock", "gateway job", "gateway copy"]);
     expect([TICK, CROSS, DASH]).toEqual(["✓", "✗", "–"]);
   });
 
@@ -79,7 +99,7 @@ describe("overnight preflight", () => {
       const ran = await broken({}, options);
       expect(ran.code).toBe(1);
       expect(ran.marked).toEqual([`  ${CROSS} Overnight is paused, so nothing is asked or built. Fix: npx overnight resume`]);
-      expect(ran.last).toBe(`Not ready: 1 failed, of 12 checks. Fix what is marked ${CROSS} and run this again.`);
+      expect(ran.last).toBe(`Not ready: 1 failed, of 13 checks. Fix what is marked ${CROSS} and run this again.`);
     }
   });
 
@@ -91,7 +111,7 @@ describe("overnight preflight", () => {
     const unknown = await broken({ beeLoginState: async () => "unknown" });
     expect(unknown.code).toBe(1);
     expect(unknown.marked).toEqual([`  ${DASH} Is Bee logged in? Not checked: Bee did not answer`]);
-    expect(unknown.last).toBe(`Not confirmed: 1 of 12 checks could not be made (marked ${DASH}). Everything that was checked is in place.`);
+    expect(unknown.last).toBe(`Not confirmed: 1 of 13 checks could not be made (marked ${DASH}). Everything that was checked is in place.`);
 
     // A Bee call that fails outright is "could not be checked", with Bee's own one-line reason.
     const threw = await broken({
@@ -118,7 +138,7 @@ describe("overnight preflight", () => {
       `  ${DASH} Does the build sandbox hold? Not checked: the probe is a Kiro Crew job, and the gateway is not running`,
     ]);
     expect(probed).toBe(0);
-    expect(ran.last).toBe(`Not ready: 1 failed, 1 could not be checked, of 12 checks. Fix what is marked ${CROSS} and run this again.`);
+    expect(ran.last).toBe(`Not ready: 1 failed, 1 could not be checked, of 13 checks. Fix what is marked ${CROSS} and run this again.`);
   });
 
   it("crosses the settings line when Kiro Crew is not set the way the sandbox mode needs, with the command for that mode", async () => {
@@ -167,7 +187,7 @@ describe("overnight preflight", () => {
     expect(ran.marked).toEqual([
       `  ${CROSS} The build sandbox check did not pass: the transcript database can be read. Fix: scripts/install-agents.sh install crew   then run this again. Until it passes, nothing is built with Kiro Crew`,
     ]);
-    expect(ran.last).toBe(`Not ready: 1 failed, of 12 checks. Fix what is marked ${CROSS} and run this again.`);
+    expect(ran.last).toBe(`Not ready: 1 failed, of 13 checks. Fix what is marked ${CROSS} and run this again.`);
 
     // A reason without those words is said as it is, on one line.
     const other = await broken({ sandboxProbe: async () => ({ ok: false, reason: "Kiro Crew's sandbox\nis not at its strict level" }) });
@@ -184,7 +204,7 @@ describe("overnight preflight", () => {
       `  ${DASH} Does the build sandbox hold? Not checked: a build is running on this data folder right now, and the check would get in its way. That build made the same check itself: see logs/build.log`,
     ]);
     // Nothing is known to be wrong, so nothing is called a failure. It is still not "ready", and the exit code says so.
-    expect(building.last).toBe(`Not confirmed: 1 of 12 checks could not be made (marked ${DASH}). Everything that was checked is in place.`);
+    expect(building.last).toBe(`Not confirmed: 1 of 13 checks could not be made (marked ${DASH}). Everything that was checked is in place.`);
 
     const unknown = await broken({ buildRunning: () => null, sandboxProbe: async () => ((probed += 1), { ok: true }) });
     expect(unknown.marked).toEqual([`  ${DASH} Does the build sandbox hold? Not checked: could not tell whether a build is running right now, and the check must not get in its way`]);
@@ -243,12 +263,17 @@ describe("overnight preflight", () => {
     const one = await broken({ nightJobs: () => ({ build: true, deliver: false, crew: true }) });
     expect(one.code).toBe(1);
     // The fix names the job. A bare "scripts/install-agents.sh install" would also stop and restart the listener.
-    expect(one.marked).toEqual([`  ${CROSS} Not installed: deliver. Fix: scripts/install-agents.sh install deliver`]);
+    // With one of the two clocked jobs missing, there is no telling whether "they" keep their own time.
+    expect(one.marked).toEqual([
+      `  ${CROSS} Not installed: deliver. Fix: scripts/install-agents.sh install deliver`,
+      `  ${DASH} Do the night jobs keep their own time? Not checked: the build and deliver jobs are not both installed`,
+    ]);
 
     const none = await broken({ nightJobs: () => ({ build: false, deliver: false, crew: false }), crewJobSandbox: () => null });
     expect(none.marked).toEqual([
       // One command per job, the gateway first: the build needs it.
       `  ${CROSS} Not installed: build, deliver, Kiro Crew gateway. Fix: scripts/install-agents.sh install crew   then: scripts/install-agents.sh install build   then: scripts/install-agents.sh install deliver`,
+      `  ${DASH} Do the night jobs keep their own time? Not checked: the build and deliver jobs are not both installed`,
       `  ${DASH} Was the gateway job installed for this build sandbox? Not checked: the gateway job is not installed`,
     ]);
     for (const ran of [one, none]) expect(ran.lines.join("\n")).not.toMatch(/install-agents\.sh install(?! (crew|build|deliver|listen))/);
@@ -262,6 +287,28 @@ describe("overnight preflight", () => {
 
     const unreadable = await broken({ crewJobSandbox: () => null });
     expect(unreadable.marked).toEqual([`  ${DASH} Was the gateway job installed for this build sandbox? Not checked: its settings file could not be read`]);
+  });
+
+  it("crosses the last line when the gateway is running behind a copy of the sandbox rules that is not the repo's, or has none", async () => {
+    for (const copy of ["different", "missing"] as const) {
+      const ran = await broken({ gatewayProfileCopy: () => copy });
+      expect(ran.code, copy).toBe(1);
+      expect(ran.marked, copy).toEqual([`  ${CROSS} The gateway is running behind an older copy of the sandbox rules. Fix: scripts/install-agents.sh install crew`]);
+    }
+    // In crew mode the gateway has no rules of ours to copy: the copy is not looked at.
+    const crew = await run({ crewJobSandbox: () => "crew", gatewayProfileCopy: () => "missing" }, { settings: { BUILD_SANDBOX: "crew" } });
+    expect(crew.code).toBe(0);
+    expect(crew.asked).not.toContain("gateway copy");
+    // Installed for the other mode: that is said first, and it is the whole of the trouble.
+    const otherMode = await broken({ crewJobSandbox: () => "crew", gatewayProfileCopy: () => "different" });
+    expect(otherMode.marked).toEqual([`  ${CROSS} The gateway job was installed for BUILD_SANDBOX=crew, but the setting is now overnight. Fix: scripts/install-agents.sh install crew`]);
+    // The copy cannot be compared at all: not a pass.
+    const threw = await broken({
+      gatewayProfileCopy: () => {
+        throw new Error("packages/builder/sandbox/crew-gateway.sb could not be read");
+      },
+    });
+    expect(threw.marked).toEqual([`  ${DASH} Was the gateway job installed for this build sandbox? Not checked: packages/builder/sandbox/crew-gateway.sb could not be read`]);
   });
 
   it("goes on to the next line when a check throws or never answers, and never repeats what a program printed", async () => {
@@ -283,11 +330,11 @@ describe("overnight preflight", () => {
     expect(ran.lines.join("\n")).not.toContain("example.invalid");
     // The checks after the broken ones were still made.
     expect(ran.lines).toContain(`  ${TICK} Playwright's headless browser is installed.`);
-    expect(ran.last).toBe(`Not confirmed: 3 of 12 checks could not be made (marked ${DASH}). Everything that was checked is in place.`);
+    expect(ran.last).toBe(`Not confirmed: 3 of 13 checks could not be made (marked ${DASH}). Everything that was checked is in place.`);
   });
 
-  it("changes nothing: it only reads the pause switch", async () => {
-    const store = new Store(":memory:");
+  it("changes nothing: it only reads the pause switch and the night clock's stored values", async () => {
+    const store = awakeStore();
     const touched: string[] = [];
     const readOnly = new Proxy(store, {
       get(target, property, receiver) {
@@ -297,8 +344,107 @@ describe("overnight preflight", () => {
       },
     });
     const out = capture();
-    expect(await preflight({ store: readOnly, config: testConfig(), write: out.write, probes: allGood(), watchStopSignals: fakeStopSignals().watch })).toBe(0);
-    expect([...new Set(touched)]).toEqual(["isPaused"]);
+    expect(await preflight({ store: readOnly, config: testConfig(), write: out.write, now: fixedNow(), probes: allGood(), watchStopSignals: fakeStopSignals().watch })).toBe(0);
+    expect([...new Set(touched)]).toEqual(["isPaused", "getValue"]);
+  });
+
+  describe("do the night jobs keep their own time?", () => {
+    const QUESTION = "Do the night jobs keep their own time?";
+    const STALE_FIX = (jobs: string[]) => `if the Mac has only just woken, wait two minutes and run this again. Otherwise: ${jobs.map((job) => `scripts/install-agents.sh status ${job}   then: scripts/install-agents.sh install ${job}`).join("   then: ")}`;
+
+    it("crosses the line when a job is still on macOS's calendar, naming it, with the command that moves it", async () => {
+      const both = await broken({ nightJobTriggers: () => ({ build: "calendar", deliver: "calendar" }) });
+      expect(both.code).toBe(1);
+      expect(both.marked).toEqual([`  ${CROSS} Still on macOS's calendar: build, deliver. That calendar ran both jobs an hour late on Oct 11. Fix: scripts/install-agents.sh install build   then: scripts/install-agents.sh install deliver`]);
+      const one = await broken({ nightJobTriggers: () => ({ build: "timer", deliver: "calendar" }) });
+      expect(one.marked).toEqual([`  ${CROSS} Still on macOS's calendar: deliver. That calendar ran both jobs an hour late on Oct 11. Fix: scripts/install-agents.sh install deliver`]);
+      // A job on the calendar is said first: whether it has checked the time lately is beside the point.
+      const stale = await broken({ nightJobTriggers: () => ({ build: "calendar", deliver: "timer" }) }, { store: awakeStore({ build: null, deliver: null }) });
+      expect(stale.marked).toEqual([`  ${CROSS} Still on macOS's calendar: build. That calendar ran both jobs an hour late on Oct 11. Fix: scripts/install-agents.sh install build`]);
+    });
+
+    it("does not call it either way when the look at the installed jobs itself failed", async () => {
+      const ran = await broken({
+        nightJobs: () => {
+          throw new Error("made-up: the folder could not be listed");
+        },
+      });
+      expect(ran.marked).toEqual([
+        `  ${DASH} Are the night's background jobs installed? Not checked: made-up: the folder could not be listed`,
+        `  ${DASH} ${QUESTION} Not checked: could not tell which background jobs are installed`,
+        `  ${DASH} Was the gateway job installed for this build sandbox? Not checked: the gateway job is not installed`,
+      ]);
+    });
+
+    it("does not call it either way when a job's settings file cannot be read", async () => {
+      const ran = await broken({ nightJobTriggers: () => ({ build: "timer", deliver: null }) });
+      expect(ran.code).toBe(1);
+      expect(ran.marked).toEqual([`  ${DASH} ${QUESTION} Not checked: the settings file of the deliver job could not be read`]);
+      const both = await broken({ nightJobTriggers: () => ({ build: null, deliver: null }) });
+      expect(both.marked).toEqual([`  ${DASH} ${QUESTION} Not checked: the settings files of the build and deliver jobs could not be read`]);
+    });
+
+    it("crosses the line when a job has not checked the time lately, says since when, and says to wait before installing anything", async () => {
+      // The deliver job last asked the clock at 9:02 am on Oct 9. Now it is noon.
+      const one = await broken({}, { store: awakeStore({ deliver: "2026-10-09T15:02:00.000Z" }) });
+      expect(one.code).toBe(1);
+      expect(one.marked).toEqual([`  ${CROSS} The deliver job has not checked the time since Oct 9, 9:02 AM, so it would not start at its time. Fix: ${STALE_FIX(["deliver"])}`]);
+
+      const never = await broken({}, { store: awakeStore({ build: null }) });
+      expect(never.marked).toEqual([`  ${CROSS} The build job has never checked the time, so it would not start at its time. Fix: ${STALE_FIX(["build"])}`]);
+
+      // Both at once is what a Mac that has only just woken shows: one line for the two, with the later of their times.
+      const both = await broken({}, { store: awakeStore({ build: "2026-10-09T05:01:00.000Z", deliver: "2026-10-09T05:02:00.000Z" }) });
+      expect(both.marked).toEqual([`  ${CROSS} The build and deliver jobs have not checked the time since Oct 8, 11:02 PM, so they would not start at their times. Fix: ${STALE_FIX(["build", "deliver"])}`]);
+      const neither = await broken({}, { store: awakeStore({ build: null, deliver: null }) });
+      expect(neither.marked).toEqual([`  ${CROSS} The build and deliver jobs have never checked the time, so they would not start at their times. Fix: ${STALE_FIX(["build", "deliver"])}`]);
+      // One never, one long ago: the first one's story is told, and the fix still names both.
+      const mixed = await broken({}, { store: awakeStore({ build: null, deliver: "2026-10-09T05:02:00.000Z" }) });
+      expect(mixed.marked).toEqual([`  ${CROSS} The build job has never checked the time, so it would not start at its time. Fix: ${STALE_FIX(["build", "deliver"])}`]);
+    });
+
+    it("takes three minutes as lately, to the millisecond, by the clock it is given", async () => {
+      const justInTime = await run({}, { store: awakeStore({ build: at(-180), deliver: at(-180) }) });
+      expect(justInTime.code).toBe(0);
+      const justTooLong = await broken({}, { store: awakeStore({ build: "2026-10-09T17:56:59.999Z" }) });
+      expect(justTooLong.marked[0]).toContain("The build job has not checked the time since Oct 9, 11:56 AM");
+      // The same heartbeats, an hour later.
+      const later = await broken({}, { now: at(3600) });
+      expect(later.marked[0]).toContain("The build and deliver jobs have not checked the time since Oct 9, 11:59 AM");
+    });
+
+    it("takes a job that is running right now as awake, and says so in the line", async () => {
+      // The build has been going for forty minutes: it has not asked the clock since it started.
+      const store = awakeStore({ build: at(-2400) });
+      const building = await run({ nightJobRunning: (job) => job === "build" }, { store });
+      expect(building.code).toBe(0);
+      expect(building.lines).toContain(`  ${TICK} The build and deliver jobs wake every minute and go by Overnight's own clock (America/Boise). The build job is running right now, and the deliver job checked the time in the last 3 minutes.`);
+      const both = await run({ nightJobRunning: () => true }, { store: awakeStore({ build: null, deliver: null }) });
+      expect(both.lines).toContain(`  ${TICK} The build and deliver jobs wake every minute and go by Overnight's own clock (America/Boise). Both are running right now.`);
+      // Not being able to tell is not "running".
+      const unknown = await broken({ nightJobRunning: () => null }, { store });
+      expect(unknown.marked[0]).toContain("The build job has not checked the time since");
+    });
+
+    it("crosses the line when a clock's record is dated ahead, so that job starts nothing until then", async () => {
+      const store = awakeStore();
+      // The Mac's clock once read January 5: the deliver job's record is from then.
+      const then = new Date("2027-01-05T14:00:00.000Z");
+      writeNightRun(store, "deliver", closedRun(noticedRun(currentSlot("deliver", then, testConfig()), then), "first-check", then), then);
+      const ran = await broken({}, { store });
+      expect(ran.code).toBe(1);
+      expect(ran.marked).toEqual([`  ${CROSS} The deliver clock's record is dated ahead (Jan 5, 2027), so nothing runs until then. Fix: scripts/install-agents.sh install deliver`]);
+      // A record of today's slot, or of an earlier one, is as it should be.
+      const usual = awakeStore();
+      const noon = new Date(at(0));
+      for (const job of ["build", "deliver"] as const) writeNightRun(usual, job, closedRun(noticedRun(currentSlot(job, noon, testConfig()), noon), "first-check", noon), noon);
+      expect((await run({}, { store: usual })).code).toBe(0);
+    });
+
+    it("names the time zone from the settings", async () => {
+      const ran = await run({}, { settings: { TZ: "Europe/Vienna" } });
+      expect(ran.lines).toContain(`  ${TICK} The build and deliver jobs wake every minute and go by Overnight's own clock (Europe/Vienna). Both checked the time in the last 3 minutes.`);
+    });
   });
 
   it("on a stop signal during the sandbox probe: aborts it, waits for it to remove its job, asks nothing more, and exits with the signal's code", async () => {

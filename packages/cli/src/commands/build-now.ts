@@ -7,6 +7,8 @@
 //   - Nothing while paused.
 //   - One build at a time and one deliver at a time: the same locks as the nightly jobs.
 //   - A stop signal (Ctrl-C, a closed window) stops what is running before the process ends.
+//   - So does a Mac that slept through part of the run: what was running is stopped, and the
+//     same command carries on from there when it is run again.
 import { BUILD_INTERRUPTED_REASON, errorSummary, formatLocal } from "@overnight/core";
 import type { Config, DataPaths, Idea, IdeaState, Logger, Store } from "@overnight/core";
 import { DeadlinePassed, MINUTE_MS, withDeadline } from "../deadline.ts";
@@ -16,10 +18,12 @@ import { oneLine } from "../output.ts";
 import type { Write } from "../output.ts";
 import { buildLockFile, deliverLockFile } from "../single-instance.ts";
 import type { ReleaseLock } from "../single-instance.ts";
+import { SLEPT_LINE, watchForSleep } from "../sleep-watch.ts";
+import type { WatchForSleep } from "../sleep-watch.ts";
 import { STOP_OVERDUE, STOP_SIGNAL_LINE, stopWaitText, watchStopSignals } from "../stop-signals.ts";
 import type { StopWatch, WatchStopSignals } from "../stop-signals.ts";
-import { chooseBackends, formatDuration, oneTryLimitMs, signInStep } from "./build.ts";
-import type { BuildFactories, BuildOutcome } from "./build.ts";
+import { chooseBackends, formatDuration, oneTryLimitMs, quietly, signInStep } from "./build.ts";
+import type { BuildFactories, BuildOutcome, KeepAwakeHold } from "./build.ts";
 import { DELIVER_ONE_LIMIT_MS, disposeQuietly } from "./deliver.ts";
 import type { DeliverFactories, DeliverOutcome } from "./deliver.ts";
 
@@ -42,6 +46,10 @@ export interface BuildNowDeps<Backend = unknown> {
   watchStopSignals?: WatchStopSignals;
   /** Watches for an error nobody caught while the two steps run. Default: the real one (last-resort.ts). */
   watchLastResort?: WatchLastResort;
+  /** Watches for the Mac having slept while the two steps run. Default: the real one (sleep-watch.ts). */
+  watchForSleep?: WatchForSleep;
+  /** Holds the Mac awake for the whole command, also on battery. Left out, nothing holds it (a rehearsal is attended, and passes none). */
+  keepAwake?: KeepAwakeHold;
   /** The command's name in its log lines. Default "overnight build-now"; a rehearsal, which runs through this code, passes its own. */
   commandName?: string;
   /** For tests: the last-resort time limits, in milliseconds. */
@@ -56,6 +64,8 @@ const nameOf = (deps: { commandName?: string }): string => deps.commandName ?? B
 export const BUILD_NOW_PAUSED = "Overnight is paused, so nothing is built or delivered. Turn it on first with: npx overnight resume";
 export const BUILD_NOW_BUILD_BUSY = "A build is already running on this data folder (the nightly build, or another build-now). Try again when it has finished.";
 export const BUILD_NOW_DELIVER_BUSY = "A deliver is already running on this data folder, so this command did not publish or deliver. Run the same command again when it has finished.";
+/** Printed after the link when the page was pushed but had not been seen live when the wait for it ran out. */
+export const BUILD_NOW_NOT_SEEN_LIVE = "The page was not seen live before Overnight stopped waiting for it. It usually appears a few minutes later.";
 /**
  * The reason recorded on a build that was found cut off. It is core's own constant, the one the
  * builder records too: core's rule for a second try (build-retry.ts) goes by these exact words.
@@ -148,7 +158,11 @@ function stillBuildingLine(idea: Idea, config: Pick<Config, "buildTimeoutMin" | 
   return `${base} If that build was cut off, it is given up on at ${formatLocal(overAt, config.timeZone)} (its time limit and 15 minutes after it began): run this command again after that.`;
 }
 
-/** Resolves with the exit code: 0 only when the idea ends up delivered. 130, 143 or 129 when it was stopped by a signal. */
+/**
+ * Resolves with the exit code: 0 only when the idea ends up delivered. 130, 143 or 129 when it
+ * was stopped by a signal. 1 when the Mac slept through part of the run: what was running was
+ * stopped, the idea is not delivered, and the same command carries on from where it stands.
+ */
 export async function buildNow<Backend>(ideaId: string, deps: BuildNowDeps<Backend>): Promise<number> {
   const { store, config, write, writeError } = deps;
   const now = deps.now ?? (() => new Date());
@@ -190,6 +204,17 @@ export async function buildNow<Backend>(ideaId: string, deps: BuildNowDeps<Backe
       writeError("  Stopping: told to stop. Ending what is running first.");
     },
   });
+  // The Mac slept through part of the run: the step that is running is told to stop, as by a
+  // stop signal. A build stopped that way is tried again; a delivery picks up where it was.
+  let slept = false;
+  const sleepWatch = (deps.watchForSleep ?? watchForSleep)({
+    onSleep: (gapMs) => {
+      slept = true;
+      stepLogger.warn(SLEPT_LINE, { ideaId: idea.id, gapSeconds: Math.round(gapMs / 1000) });
+      writeError("  Stopping: the Mac went to sleep during the run. Ending what is running first.");
+      stop.stopWork();
+    },
+  });
   // An error nobody caught: one log line (in the log of the step that is running), the step is
   // told to stop, whatever a step holds right now (its lock, its bee program) is let go, exit 1.
   const held: HeldNow = new Set();
@@ -199,14 +224,22 @@ export async function buildNow<Backend>(ideaId: string, deps: BuildNowDeps<Backe
     letGo: [() => stop.abort(), () => letGoOf(held)],
     writeError,
   });
-  /** The exit code if a stop signal has arrived, after saying where the idea was left. Null if none has. */
+  /** The exit code if a stop signal has arrived or the Mac slept, after saying where the idea was left. Null if neither. */
   const stoppedCode = (): number | null => {
     const code = stop.exitCode();
-    if (code !== null) writeError(`  Stopped. The idea is now "${store.getIdea(idea.id)?.state ?? "unknown"}".`);
-    return code;
+    if (code !== null) {
+      writeError(`  Stopped. The idea is now "${store.getIdea(idea.id)?.state ?? "unknown"}".`);
+      return code;
+    }
+    if (!slept) return null;
+    writeError(`  Stopped, because the Mac went to sleep during the run. The idea is now "${store.getIdea(idea.id)?.state ?? "unknown"}". Run the same command again to carry on.`);
+    return 1;
   };
 
+  // One hold for the whole command, from the first step to the last.
+  let hold: { stop(): void } | null = null;
   try {
+    hold = deps.keepAwake?.(stepLogger) ?? null;
     // ---------- step 1: build ----------
     if (plan === "build") {
       const outcome = await buildStep(idea.id, deps, stop, held);
@@ -242,8 +275,11 @@ export async function buildNow<Backend>(ideaId: string, deps: BuildNowDeps<Backe
     const url = delivered.url ?? after?.publishedUrl ?? null;
     write(`  Done: the idea is now "${after?.state ?? "unknown"}".`);
     write(url === null ? "No link came back. Look it up with: npx overnight ideas --all" : `Link: ${oneLine(url)}`);
+    if (delivered.notSeenLive === true) write(BUILD_NOW_NOT_SEEN_LIVE);
     return 0;
   } finally {
+    sleepWatch.stop();
+    quietly(() => hold?.stop());
     lastResort.close();
     stop.close();
   }
@@ -281,15 +317,15 @@ async function buildStep<Backend>(ideaId: string, deps: BuildNowDeps<Backend>, s
   held.add(release);
   try {
     const factories = await deps.loadBuildFactories();
-    // Told to stop while the builder was loading: start nothing.
-    if (stop.exitCode() !== null) return null;
+    // Told to stop while the builder was loading, or the Mac slept meanwhile: start nothing.
+    if (stop.signal.aborted) return null;
     const chosen = chooseBackends(factories, { config, paths, logger });
     write(`1. Build: starting with ${chosen.primaryName} (${chosen.fallbackName} if that fails). This can take up to ${config.buildTimeoutMin} minutes each.`);
     logger.info(`${nameOf(deps)}: build starting`, { ideaId, primary: chosen.primaryName, fallback: chosen.fallbackName, sandboxMode: config.buildSandbox });
     const building = withDeadline(factories.buildOne(ideaId, { store, config, paths, backends: chosen.backends, logger, signal: stop.signal, ...signInStep(factories, logger) }), deps.buildLimitMs ?? buildOneLimitMs(config), "The build");
     const outcome = await stop.settle(building);
     if (outcome === STOP_OVERDUE) {
-      logger.error(`${nameOf(deps)}: the builder did not stop in time after the stop signal; ending anyway`, { ideaId, waitedFor: stopWaitText() });
+      logger.error(`${nameOf(deps)}: the builder did not stop in time after ${stop.received() === null ? "it was told to stop" : "the stop signal"}; ending anyway`, { ideaId, waitedFor: stopWaitText() });
       return null;
     }
     logger.info(`${nameOf(deps)}: build finished`, { ideaId, ok: outcome.ok, backend: outcome.backend, ms: outcome.ms, stoppedBySignal: stop.received() ?? undefined });
@@ -327,15 +363,15 @@ async function deliverStep<Backend>(ideaId: string, deps: BuildNowDeps<Backend>,
   held.add(release);
   try {
     const factories = await deps.loadDeliverFactories();
-    // Told to stop while the packages were loading: start nothing.
-    if (stop.exitCode() !== null) return null;
+    // Told to stop while the packages were loading, or the Mac slept meanwhile: start nothing.
+    if (stop.signal.aborted) return null;
     bee = factories.createBee({ logger });
     write("2. Deliver: installing, building and testing a clean copy inside the sandbox, then publishing.");
     logger.info(`${nameOf(deps)}: deliver starting`, { ideaId });
     const delivering = withDeadline(factories.deliverOne(ideaId, { store, bee, config, paths, logger, signal: stop.signal }), deps.deliverLimitMs ?? DELIVER_ONE_LIMIT_MS, "Checking and publishing");
     const outcome = await stop.settle(delivering);
     if (outcome === STOP_OVERDUE) {
-      logger.error(`${nameOf(deps)}: the deliver step did not stop in time after the stop signal; ending anyway`, { ideaId, waitedFor: stopWaitText() });
+      logger.error(`${nameOf(deps)}: the deliver step did not stop in time after ${stop.received() === null ? "it was told to stop" : "the stop signal"}; ending anyway`, { ideaId, waitedFor: stopWaitText() });
       return null;
     }
     logger.info(`${nameOf(deps)}: deliver finished`, { ideaId, ok: outcome.ok, stoppedBySignal: stop.received() ?? undefined });

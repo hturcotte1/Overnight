@@ -2,6 +2,8 @@ export { isSlug, slugFor, SLUG_MAX_CHARS, SLUG_MIN_CHARS } from "./slug.ts";
 export { cleanDescriptionText, DESCRIPTION_END, DESCRIPTION_START, MAX_BRIEF_PITCH_CHARS, MAX_BRIEF_TITLE_CHARS, renderBrief } from "./brief.ts";
 export { prepareWorkspace } from "./workspace.ts";
 export type { PreparedWorkspace } from "./workspace.ts";
+export { retireSealed, sealedDir, sealWorkspace } from "./seal.ts";
+export type { SealResult } from "./seal.ts";
 export { STOPPED_REASON } from "./types.ts";
 export type { BuildBackend, BuildJob, BuildOptions, BuildOutcome } from "./types.ts";
 export { BUILD_STATUS_FILE, checkBuildResult } from "./build-status.ts";

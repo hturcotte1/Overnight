@@ -41,6 +41,12 @@ export interface RunOptions {
 /** Run one program and wait for it. Never rejects: every failure comes back in the result. */
 export type CommandRunner = (command: string, args: string[], options: RunOptions) => Promise<CommandResult>;
 
+/**
+ * The `error` of a program that was started and then ended by us because this process was told
+ * to stop. Unlike the other errors made here, it means the program did run for a while.
+ */
+export const STOPPED_WHILE_RUNNING = "the program was stopped: this process is stopping";
+
 /** A build prints far less than this. It only stops a runaway process from eating memory. */
 const MAX_OUTPUT_CHARS = 1_000_000;
 /** How long to wait for the pipes to close after a kill before answering anyway. */
@@ -223,7 +229,7 @@ export function createCommandRunner(): CommandRunner {
         options.signal?.removeEventListener("abort", stop);
         livePrograms.delete(program);
         // A run that ends badly after it was told to stop was killed by us.
-        const error = startError ?? (stopRequested && exitCode !== 0 ? "the program was stopped: this process is stopping" : undefined);
+        const error = startError ?? (stopRequested && exitCode !== 0 ? STOPPED_WHILE_RUNNING : undefined);
         resolve({
           stdout: stripAnsi(stdout.slice(-MAX_OUTPUT_CHARS)),
           stderr: stripAnsi(stderr.slice(-MAX_OUTPUT_CHARS)),

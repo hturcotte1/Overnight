@@ -33,7 +33,19 @@ function exists(file: string): boolean {
   }
 }
 
-function privateDir(dir: string): void {
+/**
+ * A free name to move an older folder to: "<dir>.old-<time>", with "-2", "-3" and so on added
+ * for as long as that name is taken. Nothing is ever moved on top of something else.
+ */
+export function asideName(dir: string, now: Date): string {
+  const base = `${dir}.old-${compactStamp(now)}`;
+  let name = base;
+  for (let n = 2; exists(name); n += 1) name = `${base}-${n}`;
+  return name;
+}
+
+/** Make a folder (and the ones above it) if it is missing, private to the user. Throws when it is not a plain folder. */
+export function privateDir(dir: string): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   // A link where the folder should be would send everything written "inside" it, and the
   // chmod below, to wherever the link points. Whoever put it there, it is not our folder.
@@ -54,9 +66,7 @@ export function prepareWorkspace(options: { paths: DataPaths; ideaId: string; br
   const dir = path.join(paths.workspaces, ideaId);
   let movedAside: string | null = null;
   if (exists(dir)) {
-    const base = `${dir}.old-${compactStamp(now)}`;
-    movedAside = base;
-    for (let n = 2; exists(movedAside); n += 1) movedAside = `${base}-${n}`;
+    movedAside = asideName(dir, now);
     renameSync(dir, movedAside);
   }
   // Not recursive: if the folder is somehow there again, fail instead of building on top of it.

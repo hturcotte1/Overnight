@@ -210,6 +210,8 @@ describe("everything an agent can write is read that way", () => {
       "write-node.txt": "0\n",
       "write-kirocrew.txt": "0\n",
       "write-launch-agents.txt": "0\n",
+      "list-built.txt": "0\n",
+      "write-built.txt": "0\n",
     };
     for (const [name, text] of Object.entries(results)) writeFileSync(path.join(dir, name), text);
     expect(judgeProbe(dir)).toEqual({ ok: true });
@@ -230,7 +232,7 @@ describe("everything an agent can write is read that way", () => {
     spawnSync("/bin/rm", [path.join(dir, "keychain.txt")]);
     writeFileSync(path.join(dir, "keychain.txt"), "0\n");
     expect(judgeProbe(dir)).toEqual({ ok: true });
-    for (const name of ["list-documents.txt", "processes.txt"]) {
+    for (const name of ["list-documents.txt", "processes.txt", "list-built.txt", "write-built.txt"]) {
       spawnSync("/bin/rm", [path.join(dir, name)]);
       symlinkSync(zero, path.join(dir, name));
       expect(judgeProbe(dir), name).toMatchObject({ ok: false, reason: expect.stringContaining("its results could not be read") });

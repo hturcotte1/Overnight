@@ -1,13 +1,16 @@
 // What `overnight status` and `overnight preflight` can say about the background jobs without
 // asking macOS anything. For the listener, two plain facts: is one running on this data folder
 // (it holds the lock), and has its background job been installed (its settings file is in place).
-// For the night jobs (build, deliver, the Kiro Crew gateway): whether each has been installed, and
-// for the gateway, whether it was installed to run inside Overnight's own sandbox. The full
-// picture from macOS, with the last exit code and log lines, is `scripts/install-agents.sh status`.
+// For the night jobs (build, deliver, the Kiro Crew gateway): whether each has been installed;
+// for build and deliver, whether macOS wakes them every minute or still by its calendar; for the
+// gateway, whether it was installed to run inside Overnight's own sandbox. And for all four:
+// which data folder each was installed for. The full picture from macOS, with the last exit code
+// and log lines, is `scripts/install-agents.sh status`.
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import type { DataPaths } from "@overnight/core";
+import type { ClockedJob, DataPaths } from "@overnight/core";
+import { sameFolder } from "./folder-identity.ts";
 import { listenLockFile, listenLockHeld } from "./single-instance.ts";
 import { readSmallFile } from "./small-file.ts";
 
@@ -17,8 +20,8 @@ export const JOB_LABEL = "com.overnight.listen";
 /**
  * The jobs that make the night happen. Each has a template in launchd/ and is put in place by
  * scripts/install-agents.sh under these names:
- *   build    runs `overnight build` once a day at BUILD_TIME
- *   deliver  runs `overnight deliver` once a day, 30 minutes before DELIVER_TIME
+ *   build    wakes every minute; builds at BUILD_TIME, by Overnight's own clock
+ *   deliver  wakes every minute; delivers 30 minutes before DELIVER_TIME, by the same clock
  *   crew     keeps the Kiro Crew gateway running, which the "kiro-crew" builder needs
  */
 export const NIGHT_JOB_LABELS = {
@@ -48,11 +51,10 @@ export function installCommands(jobs: readonly NightJob[]): string {
     .join("   then: ");
 }
 
-/**
- * How long before DELIVER_TIME the morning's testing and publishing starts (SPEC §7).
- * scripts/install-agents.sh schedules the deliver job with the same number (a test checks it).
- */
-export const DELIVER_LEAD_MINUTES = 30;
+// How long before DELIVER_TIME the morning's testing and publishing starts (SPEC §7). The night
+// clock in @overnight/core owns the number; scripts/install-agents.sh prints its times with the
+// same one (a test checks it).
+export { DELIVER_LEAD_MINUTES } from "@overnight/core";
 
 /** macOS's own program that starts a command inside a sandbox profile. */
 export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
@@ -109,4 +111,77 @@ export function readCrewJobSandbox(home: string = homedir()): "overnight" | "cre
   const first = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>/.exec(text)?.[1];
   if (first === undefined) return null;
   return first === SANDBOX_EXEC ? "overnight" : "crew";
+}
+
+/** What makes macOS start a night job: "timer" (every minute; Overnight's own clock decides) or "calendar" (once a day at a set hour, the old way). */
+export type JobTrigger = "timer" | "calendar";
+
+/** A settings file with its XML comments taken out, so a word inside a comment is never mistaken for a setting. */
+function withoutComments(text: string): string {
+  return text.replace(/<!--[\s\S]*?-->/g, "");
+}
+
+/**
+ * How the installed build or deliver job is started. Null when the job is not installed, its
+ * settings file cannot be read, or the file names neither way. Only reads the file
+ * scripts/install-agents.sh wrote; asks macOS nothing.
+ */
+export function readJobTrigger(job: ClockedJob, home: string = homedir()): JobTrigger | null {
+  const text = readSmallFile(jobSettingsFile(home, NIGHT_JOB_LABELS[job]), MAX_SETTINGS_FILE_BYTES);
+  if (text === null) return null;
+  const settings = withoutComments(text);
+  // A file that somehow names both is treated as the old way: reinstalling it is the fix either way.
+  if (settings.includes("<key>StartCalendarInterval</key>")) return "calendar";
+  return settings.includes("<key>StartInterval</key>") ? "timer" : null;
+}
+
+/** For both clocked jobs at once: what `overnight status` and `overnight preflight` ask. */
+export function readJobTriggers(home: string = homedir()): Record<ClockedJob, JobTrigger | null> {
+  return { build: readJobTrigger("build", home), deliver: readJobTrigger("deliver", home) };
+}
+
+/** The three ways the installer writes a character that XML reserves, turned back. "&amp;" last, so "&amp;lt;" stays "&lt;". */
+function xmlUnescape(text: string): string {
+  return text.replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+}
+
+/**
+ * The data folder an installed job was installed for, read from where its settings file sends
+ * what the job prints: <data folder>/logs/<job>.launchd.log. Null when the job is not installed,
+ * the file cannot be read, or that path is not of that shape. The listener's, unless another
+ * job's label is given.
+ */
+export function readJobDataDir(home: string = homedir(), label: string = JOB_LABEL): string | null {
+  const text = readSmallFile(jobSettingsFile(home, label), MAX_SETTINGS_FILE_BYTES);
+  if (text === null) return null;
+  const written = /<key>StandardOutPath<\/key>\s*<string>([^<]*)<\/string>/.exec(withoutComments(text))?.[1];
+  if (written === undefined) return null;
+  const logFile = xmlUnescape(written);
+  const logs = path.dirname(logFile);
+  if (!path.isAbsolute(logFile) || path.basename(logs) !== "logs") return null;
+  const dataDir = path.dirname(logs);
+  // "/logs/x.log" would make the top of the disk a data folder. No installer writes that.
+  return dataDir === path.dirname(dataDir) ? null : dataDir;
+}
+
+/** The data folders the installed background jobs (the listener and the three night jobs) were installed for, each once. */
+export function installedJobFolders(home: string = homedir()): string[] {
+  const folders = [JOB_LABEL, ...Object.values(NIGHT_JOB_LABELS)].map((label) => readJobDataDir(home, label)).filter((folder): folder is string => folder !== null);
+  return [...new Set(folders)];
+}
+
+/**
+ * Do the installed background jobs work on this data folder? True when one of them was installed
+ * for it, false when all of them were installed for other folders, and null when that cannot be
+ * told: no job is installed, or a folder could not be looked at. `overnight status` on a scratch
+ * folder uses it, so as not to say "installed" about jobs that never touch that folder.
+ */
+export function jobsBelongHere(paths: Pick<DataPaths, "root">, home: string = homedir()): boolean | null {
+  const folders = installedJobFolders(home);
+  if (folders.length === 0) return null;
+  try {
+    return folders.some((folder) => sameFolder(folder, paths.root));
+  } catch {
+    return null;
+  }
 }

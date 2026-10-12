@@ -6,13 +6,17 @@
 //   - OVERNIGHT_DATA_DIR was given to this very command, in its environment (a value that only
 //     comes from the repo's .env file does not count: that file is where the background jobs get
 //     THEIR folder from), and
-//   - that folder is not the real data folder, nor inside it. The real data folder is the one
-//     the background jobs use: ~/.overnight, or what the repo's .env file says.
-// Folders are compared as real paths (links followed), and without regard to capitals: on a Mac
-// "/Users/x/.Overnight" is the same folder as "/Users/x/.overnight".
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+//   - that folder is not a real data folder, nor inside one. The real data folders are the ones
+//     the background jobs use: ~/.overnight, what the repo's .env file says, and whichever
+//     folder each installed job's own settings file names.
+// Folders are compared by what the disk says they are (device and file number), not by how they
+// are spelled: a link, other capitals, or one of macOS's other names for the same place
+// (/System/Volumes/Data/..., /.vol/...) all lead to the same folder (see folder-identity.ts).
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseEnv } from "node:util";
+import { sameOrInsideFolder } from "./folder-identity.ts";
+import type { StatFolder } from "./folder-identity.ts";
 
 export interface RehearsalFolderFacts {
   /**
@@ -24,8 +28,13 @@ export interface RehearsalFolderFacts {
   home: string;
   /** The text of the repo's .env file, or null when there is none. */
   envFileText: string | null;
-  /** Replaced in tests. Default: follow every link, for as much of the path as exists. */
-  realPath?: (folder: string) => string;
+  /**
+   * The data folders the installed background jobs name in their settings files
+   * (background.ts: installedJobFolders). They count as real too. Left out: none.
+   */
+  jobFolders?: readonly string[];
+  /** Replaced in tests. Default: ask the disk (folder-identity.ts). */
+  stat?: StatFolder;
 }
 
 /** Why a rehearsal is not for the real folder. Every refusal ends with it. */
@@ -39,50 +48,30 @@ function expandHome(value: string, home: string): string {
 }
 
 /**
- * A path with its links followed, as far as it exists: the nearest folder that is there is
- * resolved, and the parts below it (not created yet) are kept as written.
+ * The data folders the background jobs use: the default one, the one the repo's .env names (a
+ * job is given only PATH and HOME, so .env is where its folder comes from), and the ones the
+ * installed jobs' own settings files name. Those can differ from .env: a job keeps writing its
+ * log where it was installed, whatever .env says by now.
  */
-export function nearestRealPath(folder: string): string {
-  let existing = path.resolve(folder);
-  const rest: string[] = [];
-  while (!existsSync(existing)) {
-    const parent = path.dirname(existing);
-    if (parent === existing) break;
-    rest.unshift(path.basename(existing));
-    existing = parent;
-  }
-  let real = existing;
-  try {
-    real = realpathSync.native(existing);
-  } catch {
-    // Not there after all, or not ours to look at: compare it as written.
-  }
-  return path.join(real, ...rest);
-}
-
-/**
- * The data folders the background jobs use: the default one, and the one the repo's .env names
- * (a job is given only PATH and HOME, so .env is the only other place its folder can come from).
- */
-export function realDataFolders(home: string, envFileText: string | null): string[] {
+export function realDataFolders(home: string, envFileText: string | null, jobFolders: readonly string[] = []): string[] {
   const folders = [path.join(home, ".overnight")];
   if (envFileText !== null) {
     const fromFile = (parseEnv(envFileText).OVERNIGHT_DATA_DIR ?? "").trim();
     const expanded = expandHome(fromFile, home);
     if (fromFile !== "" && path.isAbsolute(expanded)) folders.push(path.resolve(expanded));
   }
+  for (const folder of jobFolders) {
+    if (path.isAbsolute(folder)) folders.push(path.resolve(folder));
+  }
   return [...new Set(folders)];
 }
 
-function sameOrInside(folder: string, parent: string): boolean {
-  const a = folder.toLowerCase();
-  const b = parent.toLowerCase();
-  return a === b || a.startsWith(b.endsWith(path.sep) ? b : b + path.sep);
-}
-
-/** Null when a rehearsal may run on the folder given. Otherwise why not, in one sentence. */
+/**
+ * Null when a rehearsal may run on the folder given. Otherwise why not, in one sentence.
+ * Throws when a folder cannot be looked at: the caller turns that into a refusal, because not
+ * knowing which folder is the real one is a reason to refuse.
+ */
 export function rehearsalFolderProblem(facts: RehearsalFolderFacts): string | null {
-  const realPath = facts.realPath ?? nearestRealPath;
   const given = (facts.given ?? "").trim();
   if (given === "") {
     return `Not started: a rehearsal only runs on a scratch data folder named on the command itself (${EXAMPLE}), because ${REHEARSAL_WHY}.`;
@@ -91,9 +80,9 @@ export function rehearsalFolderProblem(facts: RehearsalFolderFacts): string | nu
   if (!path.isAbsolute(expanded)) {
     return `Not started: OVERNIGHT_DATA_DIR must be a full path to a scratch folder (${EXAMPLE}), because ${REHEARSAL_WHY}.`;
   }
-  const folder = realPath(path.resolve(expanded));
-  for (const real of realDataFolders(facts.home, facts.envFileText)) {
-    if (sameOrInside(folder, realPath(real))) {
+  const folder = path.resolve(expanded);
+  for (const real of realDataFolders(facts.home, facts.envFileText, facts.jobFolders)) {
+    if (sameOrInsideFolder(folder, real, facts.stat)) {
       return `Not started: OVERNIGHT_DATA_DIR points at the real data folder (${real}), and a rehearsal never runs there, because ${REHEARSAL_WHY}.`;
     }
   }

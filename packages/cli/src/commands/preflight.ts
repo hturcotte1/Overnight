@@ -14,15 +14,16 @@
 // of it is ever shown here: each check answers yes or no, and every sentence below is our own.
 // This file holds the questions and the words. How each question is really asked of the Mac is in
 // ../preflight-probes.ts, and tests pass fakes instead.
-import { errorSummary } from "@overnight/core";
-import type { Config, LoginState, Store } from "@overnight/core";
+import { CLOCKED_JOBS, currentSlot, errorSummary, formatLocal, NIGHT_CHECK_FRESH_MS, readCheckedAt, readNightRun } from "@overnight/core";
+import type { ClockedJob, Config, LoginState, Store } from "@overnight/core";
 import { installCommand, installCommands, NIGHT_JOBS } from "../background.ts";
-import type { NightJobsState } from "../background.ts";
+import type { JobTrigger, NightJobsState } from "../background.ts";
 import { withDeadline } from "../deadline.ts";
 import { oneLine } from "../output.ts";
 import type { Write } from "../output.ts";
 import { STOP_OVERDUE, watchStopSignals } from "../stop-signals.ts";
 import type { WatchStopSignals } from "../stop-signals.ts";
+import { dayWords } from "./status.ts";
 
 export type SandboxProbeResult = { ok: true } | { ok: false; reason: string };
 
@@ -57,13 +58,23 @@ export interface PreflightProbes {
   nightJobs(): NightJobsState;
   /** How the installed gateway job starts the gateway; null if it is not installed or cannot be read. */
   crewJobSandbox(): "overnight" | "crew" | null;
+  /** How macOS starts the build and the deliver job: every minute ("timer") or still by its calendar. Null for a job whose settings file cannot be read. */
+  nightJobTriggers(): Record<ClockedJob, JobTrigger | null>;
+  /** Is the build, or the deliver, running on this data folder right now (is its lock held)? Null if that could not be told. */
+  nightJobRunning(job: ClockedJob): boolean | null;
+  /**
+   * The gateway job's own copy of the sandbox rules (<data folder>/sandbox/crew-gateway.sb, made
+   * by `install crew`) against the repo's packages/builder/sandbox/crew-gateway.sb.
+   */
+  gatewayProfileCopy(): "same" | "different" | "missing";
 }
 
 export interface PreflightDeps {
-  store: Pick<Store, "isPaused">;
-  config: Pick<Config, "pausedByDefault" | "buildSandbox" | "githubPagesRepo">;
+  store: Pick<Store, "isPaused" | "getValue">;
+  config: Pick<Config, "pausedByDefault" | "buildSandbox" | "githubPagesRepo" | "timeZone" | "buildTime" | "deliverTime">;
   write: Write;
   probes: PreflightProbes;
+  now?: () => Date;
   /** For tests: the longest any one check may take, in milliseconds. */
   checkLimitMs?: number;
   /** Watches for stop signals while the checks run. Default: the real one (stop-signals.ts). */
@@ -88,6 +99,9 @@ export const PREFLIGHT_STOPPED = "Stopped: not every check was made.";
 const SANDBOX_REASON_PREFIX = /^the build sandbox check failed:\s*/i;
 
 const INSTALL_CREW = installCommand("crew");
+const JOB_STATUS_COMMAND = "scripts/install-agents.sh status";
+/** "3", for "in the last 3 minutes": how recent a job's last look at the clock has to be. */
+const FRESH_MINUTES = Math.round(NIGHT_CHECK_FRESH_MS / 60_000);
 const KIROCREW = "~/.local/bin/kirocrew";
 /** The sandbox probe is a Kiro Crew job with its own 3-minute limit. Everything else answers in seconds. */
 const CHECK_LIMIT_MS = 4 * 60_000;
@@ -118,6 +132,28 @@ const CREW_SETTING_FIX: Record<Config["buildSandbox"], string> = {
   overnight: `${KIROCREW} config set agent.sandbox_allow_unsandboxed_exec true   then: ${INSTALL_CREW}`,
   crew: `${KIROCREW} config set agent.sandbox strict   and: ${KIROCREW} config set agent.sandbox_allow_unsandboxed_exec false   then: ${INSTALL_CREW}`,
 };
+
+/** Why a job that has stopped asking the clock is a problem, for one job or for both. */
+function staleText(jobs: readonly ClockedJob[], checkedAt: Record<ClockedJob, string | null>, timeZone: string): string {
+  const times = jobs.map((job) => checkedAt[job]);
+  const known = times.filter((time): time is string => time !== null);
+  // Both at once is the usual case (the Mac was asleep). When their stories differ, the first one is told.
+  const told = jobs.length > 1 && (known.length === 0 || known.length === times.length) ? jobs : jobs.slice(0, 1);
+  const who = told.length === 1 ? `The ${told[0]} job has` : `The ${told.join(" and ")} jobs have`;
+  const then = told.length === 1 ? "so it would not start at its time" : "so they would not start at their times";
+  const last = told.map((job) => checkedAt[job]).filter((time): time is string => time !== null).sort().at(-1);
+  return last === undefined ? `${who} never checked the time, ${then}.` : `${who} not checked the time since ${formatLocal(new Date(last), timeZone)}, ${then}.`;
+}
+
+/**
+ * What to do about it. Waiting comes first, on purpose: a Mac that has only just woken shows
+ * exactly this for a minute or two, and installing a job again starts its clock from now, which
+ * would skip a run that is still due.
+ */
+function staleFix(jobs: readonly ClockedJob[]): string {
+  const commands = jobs.map((job) => `${JOB_STATUS_COMMAND} ${job}   then: ${installCommand(job)}`).join("   then: ");
+  return `if the Mac has only just woken, wait two minutes and run this again. Otherwise: ${commands}`;
+}
 
 /**
  * Resolves with the exit code: 0 only when every check passed. A check that could not be made is
@@ -244,8 +280,10 @@ export async function preflight(deps: PreflightDeps): Promise<number> {
     );
 
     let gatewayJobInstalled = false;
+    let installed: NightJobsState | null = null;
     await check("Are the night's background jobs installed?", () => {
       const state = probes.nightJobs();
+      installed = state;
       gatewayJobInstalled = state.crew;
       const names: Record<keyof NightJobsState, string> = { build: "build", deliver: "deliver", crew: "Kiro Crew gateway" };
       const missing = NIGHT_JOBS.filter((job) => !state[job]);
@@ -255,14 +293,51 @@ export async function preflight(deps: PreflightDeps): Promise<number> {
           fail(`Not installed: ${missing.map((job) => names[job]).join(", ")}.`, installCommands(missing));
     });
 
+    await check("Do the night jobs keep their own time?", () => {
+      const question = "Do the night jobs keep their own time?";
+      const state = installed as NightJobsState | null;
+      if (state === null) return unchecked(question, "could not tell which background jobs are installed");
+      if (!state.build || !state.deliver) return unchecked(question, "the build and deliver jobs are not both installed");
+      const triggers = probes.nightJobTriggers();
+      const unread = CLOCKED_JOBS.filter((job) => triggers[job] === null);
+      if (unread.length > 0) return unchecked(question, unread.length === 1 ? `the settings file of the ${unread[0]} job could not be read` : "the settings files of the build and deliver jobs could not be read");
+      const onCalendar = CLOCKED_JOBS.filter((job) => triggers[job] === "calendar");
+      if (onCalendar.length > 0) return fail(`Still on macOS's calendar: ${onCalendar.join(", ")}. That calendar ran both jobs an hour late on Oct 11.`, installCommands(onCalendar));
+
+      const now = deps.now?.() ?? new Date();
+      // A record dated after today's slot: the Mac's clock or a setting was moved back, and the job starts nothing until that day.
+      for (const job of CLOCKED_JOBS) {
+        const record = readNightRun(store, job);
+        const slot = currentSlot(job, now, config);
+        if (record !== null && record.day > slot.day) {
+          return fail(`The ${job} clock's record is dated ahead (${dayWords(record.day, slot.day)}), so nothing runs until then.`, installCommand(job));
+        }
+      }
+      // Awake means: asked the clock moments ago, or is running right now (a job that is running does not ask).
+      const running = CLOCKED_JOBS.filter((job) => probes.nightJobRunning(job) === true);
+      const checkedAt = { build: readCheckedAt(store, "build"), deliver: readCheckedAt(store, "deliver") };
+      const asleep = CLOCKED_JOBS.filter((job) => {
+        const at = checkedAt[job];
+        return !running.includes(job) && !(at !== null && now.getTime() - Date.parse(at) <= NIGHT_CHECK_FRESH_MS);
+      });
+      if (asleep.length > 0) return fail(staleText(asleep, checkedAt, config.timeZone), staleFix(asleep));
+      const ownTime = `The build and deliver jobs wake every minute and go by Overnight's own clock (${config.timeZone}).`;
+      if (running.length === 0) return pass(`${ownTime} Both checked the time in the last ${FRESH_MINUTES} minutes.`);
+      if (running.length === CLOCKED_JOBS.length) return pass(`${ownTime} Both are running right now.`);
+      const other = CLOCKED_JOBS.find((job) => !running.includes(job));
+      return pass(`${ownTime} The ${running[0]} job is running right now, and the ${other} job checked the time in the last ${FRESH_MINUTES} minutes.`);
+    });
+
     await check("Was the gateway job installed for this build sandbox?", () => {
       const question = "Was the gateway job installed for this build sandbox?";
       if (!gatewayJobInstalled) return unchecked(question, "the gateway job is not installed");
-      const installed = probes.crewJobSandbox();
-      if (installed === null) return unchecked(question, "its settings file could not be read");
-      return installed === mode
-        ? pass(`The gateway job was installed for BUILD_SANDBOX=${mode}.`)
-        : fail(`The gateway job was installed for BUILD_SANDBOX=${installed}, but the setting is now ${mode}.`, INSTALL_CREW);
+      const installedFor = probes.crewJobSandbox();
+      if (installedFor === null) return unchecked(question, "its settings file could not be read");
+      if (installedFor !== mode) return fail(`The gateway job was installed for BUILD_SANDBOX=${installedFor}, but the setting is now ${mode}.`, INSTALL_CREW);
+      // Inside Overnight's sandbox the gateway goes by its own copy of the rules, made by the last
+      // `install crew`. A copy that is not the repo's file means the rules changed since.
+      if (mode === "overnight" && probes.gatewayProfileCopy() !== "same") return fail("The gateway is running behind an older copy of the sandbox rules.", INSTALL_CREW);
+      return pass(`The gateway job was installed for BUILD_SANDBOX=${mode}.`);
     });
 
     const stopCode = stop.exitCode();

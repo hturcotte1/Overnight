@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Overnight's morning delivery, as a macOS background job (a "LaunchAgent"). Once a day, 30
-  minutes before DELIVER_TIME, it runs `overnight deliver`: each build is tested inside
-  Overnight's own sandbox, the ones that pass are published, and the link is put on the wrist
-  with an alarm at DELIVER_TIME.
+  Overnight's morning delivery, as a macOS background job (a "LaunchAgent"). Every minute it
+  runs `overnight deliver` with the if-due switch: Overnight looks at its own clock, and 30
+  minutes before DELIVER_TIME each build is tested inside Overnight's own sandbox, the ones that
+  pass are published, and the link is put on the wrist with an alarm at DELIVER_TIME. At every
+  other minute it ends at once.
   This is a template: scripts/install-agents.sh replaces the names written in capitals between
   double underscores with real values, and puts the result in
   ~/Library/LaunchAgents/com.overnight.deliver.plist. Do not install this file by hand.
@@ -27,6 +28,7 @@
     <string>__NODE__</string>
     <string>__REPO__/packages/cli/src/main.ts</string>
     <string>deliver</string>
+    <string>--if-due</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -41,26 +43,25 @@
   </dict>
 
   <!--
-    Once a day, 30 minutes before DELIVER_TIME, on this Mac's own clock. The installer works the
-    time out from Overnight's settings and refuses to install if the Mac's time zone and the TZ
-    setting disagree, because this hour would then be the wrong one.
+    macOS starts this job every 60 seconds, and once when it is loaded (at login, and when it is
+    installed). macOS does not decide when the delivery happens. Overnight's own clock does, from
+    its TZ and DELIVER_TIME settings: the if-due switch above makes every start ask that clock
+    first. The answer is "not yet" all day but once, and then the job ends within a second or two.
 
-    If the Mac is asleep at that time, macOS runs the job once when the Mac next wakes. That is
-    Apple's documented behaviour for calendar jobs (launchd.plist(5): intervals missed while
-    asleep are run, once, on wake); we have not tested it ourselves. If the Mac is switched off or
-    nobody is logged in at that time, that morning's run is skipped.
+    macOS's calendar (a set hour and minute) is not used. It goes by the Mac's own time zone, not
+    Overnight's, and it ran this job an hour late on Oct 11.
+
+    If the Mac is asleep or switched off at that time, the first start after it is awake again
+    finds the delivery still due and runs it then, once the internet answers. A day's delivery is
+    started at most once: the start is written down before the work begins. macOS starts no
+    second copy of a job that is still running.
   -->
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>__HOUR__</integer>
-    <key>Minute</key>
-    <integer>__MINUTE__</integer>
-  </dict>
+  <key>StartInterval</key>
+  <integer>60</integer>
 
-  <!-- Only at that time: not at login, not when installed, and not again when it ends. -->
+  <!-- Also once when it is loaded, so the first look at the clock does not wait a minute. -->
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
 
   <!--
     When macOS stops the job (uninstall, restart, logout) it asks first, and ends it by force only
@@ -74,7 +75,8 @@
   <!--
     The deliver step writes its own log, logs/deliver.log. This second file holds the one summary
     line it prints each morning, and anything printed outside that log: a crash, or a bad setting
-    that stopped it before it could start.
+    that stopped it before it could start. A look at the clock that finds nothing due prints
+    nothing.
   -->
   <key>StandardOutPath</key>
   <string>__DATA_DIR__/logs/deliver.launchd.log</string>

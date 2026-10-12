@@ -7,11 +7,12 @@ import { homedir } from "node:os";
 import path from "node:path";
 import type { DataPaths } from "@overnight/core";
 import { describe, expect, it } from "vitest";
-import { BUILD_SKILL_FILE, createKiroCliBackend, KIRO_CLI_SANDBOX_PROFILE, KIRO_OUTPUT_FILE, prepareWorkspace, renderBrief } from "../src/index.ts";
+import { BUILD_SKILL_FILE, createKiroCliBackend, KIRO_CLI_SANDBOX_PROFILE, KIRO_OUTPUT_FILE, prepareWorkspace, renderBrief, STOPPED_REASON } from "../src/index.ts";
 import type { BuildBackend, BuildJob, CommandResult, KiroCliBackendOptions } from "../src/index.ts";
 import { emptyFolder, KIRO_CLI_TMP, PRIVACY_SETTINGS, SHARING_NOT_OFF, SHARING_UNKNOWN } from "../src/kiro-cli.ts";
 import { profileParams } from "../src/sandbox-values.ts";
-import { collectingLogger, leaveBuild, MINUTE, recordingRunner, reply, tempDir, testPaths } from "./helpers.ts";
+import { STOPPED_WHILE_RUNNING } from "../src/run.ts";
+import { collectingLogger, leaveBuild, MINUTE, movableClock, recordingRunner, reply, SECOND, tempDir, testPaths } from "./helpers.ts";
 import type { RunCall } from "./helpers.ts";
 
 const ID = "idea_20261010_ab12cd34";
@@ -296,6 +297,103 @@ describe("Kiro CLI backend: deciding whether the build worked", () => {
     const log = rig.lines.join("\n");
     expect(log).toContain('"message":"kiro cli build started"');
     for (const never of ["Zebra", "npm install", "Hard rules"]) expect(log, never).not.toContain(never);
+  });
+});
+
+describe("Kiro CLI backend: what a try cost", () => {
+  /**
+   * A rig on a clock the test moves: each settings question takes 2 seconds and the build itself
+   * `runMs`, and `kiro` says how the build ends.
+   */
+  function timedRig(runMs: number, kiro: (call: RunCall) => CommandResult, setting: () => CommandResult = () => reply(OFF)) {
+    const clock = movableClock();
+    const rig = makeRig(
+      (call) => {
+        clock.advance(runMs);
+        return kiro(call);
+      },
+      { now: clock.now },
+      () => {
+        clock.advance(2 * SECOND);
+        return setting();
+      },
+    );
+    return { ...rig, clock };
+  }
+  const builds = (call: RunCall) => (leaveBuild(call.options.cwd ?? ""), reply());
+
+  it("says how long the agent ran, which is the one Kiro run and not the questions before it", async () => {
+    const rig = timedRig(7 * MINUTE, builds);
+    const outcome = await rig.backend.build(rig.job);
+    expect(outcome).toEqual({ ok: true, backend: "kiro-cli", ms: 7 * MINUTE + 4 * SECOND, agentMs: 7 * MINUTE });
+  });
+
+  it("never gives a figure of its own: Kiro CLI has none, so the month's ledger estimates from the time", async () => {
+    for (const kiro of [builds, (call: RunCall) => (leaveBuild(call.options.cwd ?? "", { status: "failed" }), reply())]) {
+      const rig = timedRig(MINUTE, kiro);
+      const outcome = await rig.backend.build(rig.job);
+      expect(outcome).not.toHaveProperty("credits");
+      expect(outcome).toHaveProperty("agentMs", MINUTE);
+    }
+  });
+
+  it("says it for a build that failed, left nothing, or ran past its time limit", async () => {
+    const failed = timedRig(9 * MINUTE, (call) => (leaveBuild(call.options.cwd ?? "", { status: "failed" }), reply()));
+    expect(await failed.backend.build(failed.job)).toMatchObject({ ok: false, couldNotStart: false, agentMs: 9 * MINUTE });
+
+    const nothing = timedRig(30 * SECOND, () => reply("All done!\n"));
+    expect(await nothing.backend.build(nothing.job)).toMatchObject({ ok: false, reason: expect.stringContaining("left no BUILD_STATUS.json"), agentMs: 30 * SECOND });
+
+    const tooLong = timedRig(45 * MINUTE, () => reply("", { exitCode: null, timedOut: true }));
+    expect(await tooLong.backend.build(tooLong.job)).toEqual({ ok: false, backend: "kiro-cli", ms: 45 * MINUTE + 4 * SECOND, reason: "the build ran past its time limit of 45 minutes", couldNotStart: false, agentMs: 45 * MINUTE });
+  });
+
+  it("says it for a build that was stopped while it ran", async () => {
+    const stop = new AbortController();
+    // What the runner answers for a program it started and then ended because of the stop.
+    const rig = timedRig(11 * MINUTE, () => (stop.abort(), reply("", { exitCode: null, error: STOPPED_WHILE_RUNNING })));
+    const outcome = await rig.backend.build(rig.job, { signal: stop.signal });
+    expect(outcome).toEqual({ ok: false, backend: "kiro-cli", ms: 11 * MINUTE + 4 * SECOND, reason: STOPPED_REASON, couldNotStart: false, agentMs: 11 * MINUTE });
+    expect(STOPPED_WHILE_RUNNING).toBe("the program was stopped: this process is stopping");
+  });
+
+  it("never says the agent ran for longer than its time limit, however long the Mac slept in the middle of the build", async () => {
+    const stop = new AbortController();
+    // Six hours pass on the clock while Kiro "runs": the Mac was asleep, and the run is stopped when it wakes.
+    const rig = timedRig(6 * 60 * MINUTE, () => (stop.abort(), reply("", { exitCode: null, error: STOPPED_WHILE_RUNNING })));
+    const outcome = await rig.backend.build(rig.job, { signal: stop.signal });
+    expect(outcome).toMatchObject({ ok: false, reason: STOPPED_REASON, ms: 6 * 60 * MINUTE + 4 * SECOND });
+    expect(outcome.agentMs).toBe(45 * MINUTE);
+    expect(rig.job.timeoutMs).toBe(45 * MINUTE);
+  });
+
+  it("says nothing about cost when Kiro was never started", async () => {
+    // The stop came just before the run: the runner starts nothing and says so.
+    const stop = new AbortController();
+    const stoppedFirst = timedRig(0, () => (stop.abort(), reply("", { exitCode: null, error: "the program was not started: this process is stopping" })));
+    const stopped = await stoppedFirst.backend.build(stoppedFirst.job, { signal: stop.signal });
+    expect(stopped).toMatchObject({ ok: false, reason: STOPPED_REASON });
+    expect(stopped).not.toHaveProperty("agentMs");
+
+    const cannotRun = timedRig(0, () => reply("", { exitCode: null, error: "could not start the program (ENOENT)" }));
+    const outcome = await cannotRun.backend.build(cannotRun.job);
+    expect(outcome).toMatchObject({ ok: false, couldNotStart: true, reason: "Kiro CLI could not be started inside the build sandbox" });
+    expect(outcome).not.toHaveProperty("agentMs");
+
+    // Refused before the run: a setting that is on, a missing program.
+    const sharing = timedRig(MINUTE, builds, () => reply("true (global)\n"));
+    expect(await sharing.backend.build(sharing.job)).not.toHaveProperty("agentMs");
+    const noKiro = makeRig(undefined, { kiroBinary: path.join(tempDir(), "no-kiro") });
+    expect(await noKiro.backend.build(noKiro.job)).not.toHaveProperty("agentMs");
+  });
+
+  it("still says it when the program ran and the answer is that the build could not begin", async () => {
+    // Kiro was started and gave up at once (signed out), or sandbox-exec itself refused. The few
+    // seconds are passed on; the ledger counts its smallest amount for such a try.
+    const signedOut = timedRig(3 * SECOND, () => reply("", { exitCode: 1, stderr: "error: You are not logged in, please log in with kiro-cli login\n" }));
+    expect(await signedOut.backend.build(signedOut.job)).toMatchObject({ ok: false, couldNotStart: true, agentMs: 3 * SECOND });
+    const refused = timedRig(SECOND, () => reply("", { exitCode: 65, stderr: "sandbox-exec: invalid parameter\n" }));
+    expect(await refused.backend.build(refused.job)).toMatchObject({ ok: false, couldNotStart: true, reason: "the build sandbox refused to start Kiro CLI", agentMs: SECOND });
   });
 });
 

@@ -25,7 +25,7 @@ import path from "node:path";
 import type { DataPaths, Logger } from "@overnight/core";
 import { checkBuildResult } from "./build-status.ts";
 import { BUILD_SKILL_FILE, kiroCliPrompt, readTextFile, REPO_ROOT } from "./crew-files.ts";
-import { createCommandRunner, isStopping } from "./run.ts";
+import { createCommandRunner, isStopping, STOPPED_WHILE_RUNNING } from "./run.ts";
 import type { CommandResult, CommandRunner } from "./run.ts";
 import { realPath, realPathAllowMissing, sandboxDefines } from "./sandbox-values.ts";
 import { buildTmpDir, isSafeIdeaId } from "./workspace.ts";
@@ -228,24 +228,35 @@ export function createKiroCliBackend(options: KiroCliBackendOptions): BuildBacke
     const args = sandboxedKiroArgs({ ...parts, prompt });
     logger.info("kiro cli build started", { ideaId: job.ideaId, timeoutMin: Math.round(job.timeoutMs / 60_000) });
     // Stopped at once, with everything it started, when Overnight is told to stop.
+    const agentStartedMs = now().getTime();
     const result = await run(sandboxExec, args, { cwd: workspace, env, timeoutMs: job.timeoutMs, ...withSignal });
+    // By the clock on the wall, and never more than the time limit: the run is ended at that
+    // limit, so a longer gap means the Mac slept in the middle of the build. Without this, one
+    // build slept through would be estimated at hours of credits.
+    const agentMs = Math.min(Math.max(0, now().getTime() - agentStartedMs), job.timeoutMs);
     saveOutput(job.ideaId, result);
+    // What the try cost. Kiro CLI gives no figure of its own, so the month's ledger takes an
+    // estimate from how long the agent ran, however the run ended. Not when the program was never
+    // started: then there is nothing to count. (A run that was started and then ended by a stop
+    // carries an `error` as well; that one did run.)
+    const agentRan = result.error === undefined || result.error === STOPPED_WHILE_RUNNING;
+    const withCost = (outcome: BuildOutcome): BuildOutcome => (agentRan ? { ...outcome, agentMs } : outcome);
 
     const check = checkBuildResult(workspace, startedMs);
     logger.info("kiro cli ended", { ideaId: job.ideaId, exitCode: result.exitCode, timedOut: result.timedOut, built: check.ok });
     // A build that had already finished cleanly when it was stopped, or the time ran out, still counts.
-    if (check.ok) return { ok: true, backend: KIRO_CLI, ms: ms() };
+    if (check.ok) return withCost({ ok: true, backend: KIRO_CLI, ms: ms() });
     // Cut off because Overnight itself was told to stop: not a failure of the build.
-    if (stopped()) return failed(STOPPED_REASON);
+    if (stopped()) return withCost(failed(STOPPED_REASON));
     if (result.error !== undefined) return cannotStart("Kiro CLI could not be started inside the build sandbox");
-    if (result.timedOut) return failed(`the build ran past its time limit of ${minutesText(job.timeoutMs)}`);
+    if (result.timedOut) return withCost(failed(`the build ran past its time limit of ${minutesText(job.timeoutMs)}`));
     if (check.neverStarted) {
       const said = `${result.stdout}\n${result.stderr}`;
       // sandbox-exec's own complaints start with its name: a bad profile or a missing value.
-      if (/^sandbox-exec: /m.test(result.stderr)) return cannotStart("the build sandbox refused to start Kiro CLI");
-      if (/not logged in|kiro-cli login/i.test(said)) return cannotStart("Kiro is signed out on this Mac (to fix it, run: kiro-cli login)");
+      if (/^sandbox-exec: /m.test(result.stderr)) return withCost(cannotStart("the build sandbox refused to start Kiro CLI"));
+      if (/not logged in|kiro-cli login/i.test(said)) return withCost(cannotStart("Kiro is signed out on this Mac (to fix it, run: kiro-cli login)"));
     }
-    return failed(check.reason);
+    return withCost(failed(check.reason));
   }
 
   return {

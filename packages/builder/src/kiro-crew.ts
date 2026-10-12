@@ -230,6 +230,7 @@ function crewAccess(options: KiroCrewBackendOptions): CrewAccess {
 
 const SANDBOX_PARTS_MISSING = `${SANDBOX_CHECK_FAILED}: a folder or file the Overnight sandbox needs is missing`;
 const NOT_INSTALLED = "Kiro Crew is not installed (kirocrew was not found)";
+const UNEXPECTED_ERROR = "the Kiro Crew build stopped on an unexpected error";
 
 export function createKiroCrewBackend(options: KiroCrewBackendOptions): BuildBackend {
   const { sandboxMode } = options;
@@ -312,36 +313,65 @@ export function createKiroCrewBackend(options: KiroCrewBackendOptions): BuildBac
     );
     if (!added.ok) return stopped() ? failed(STOPPED_REASON) : cannotStart(added.reason);
 
-    // True from the trigger until we know the run is over. A run that may still be going is
-    // cancelled before its job is removed (removing alone does not end it), so no agent is left
-    // working with nobody watching. Asking costs nothing when nothing is running.
-    let mayBeRunning = false;
-    try {
-      if (stopped()) return failed(STOPPED_REASON);
-      mayBeRunning = true;
-      const triggered = await crew.trigger(added.id, signal);
-      if (!triggered.ok) return stopped() ? failed(STOPPED_REASON) : cannotStart(triggered.reason);
-      logger.info("kiro crew build started", { ideaId: job.ideaId, jobId: added.id, timeoutSecs });
+    // `mayBeRunning` is true from the trigger until we know the run is over. A run that may still
+    // be going is cancelled before its job is removed (removing alone does not end it), so no
+    // agent is left working with nobody watching. Asking costs nothing when nothing is running.
+    // `triggeredAtMs` is when the agent was started, once Kiro Crew has said it was. From then on
+    // the try has a cost, however it ends.
+    const run: { mayBeRunning: boolean; triggeredAtMs: number | null } = { mayBeRunning: false, triggeredAtMs: null };
+    let agentEndedMs: number;
 
-      const waited = await crew.waitUntilFinished(added.id, triggered.triggeredAtMs, triggered.triggeredAtMs + job.timeoutMs + CREW_STOP_GRACE_MS, signal);
+    /** Start the job and wait for it. Its answer is the outcome, less what the try cost. */
+    const runJob = async (jobId: string): Promise<BuildOutcome> => {
+      if (stopped()) return failed(STOPPED_REASON);
+      run.mayBeRunning = true;
+      const triggered = await crew.trigger(jobId, signal);
+      if (!triggered.ok) return stopped() ? failed(STOPPED_REASON) : cannotStart(triggered.reason);
+      run.triggeredAtMs = triggered.triggeredAtMs;
+      logger.info("kiro crew build started", { ideaId: job.ideaId, jobId, timeoutSecs });
+
+      const waited = await crew.waitUntilFinished(jobId, triggered.triggeredAtMs, triggered.triggeredAtMs + job.timeoutMs + CREW_STOP_GRACE_MS, signal);
       if (!waited.finished) {
-        if (waited.stopped) logger.warn("kiro crew build stopped: Overnight was told to stop", { ideaId: job.ideaId, jobId: added.id });
+        if (waited.stopped) logger.warn("kiro crew build stopped: Overnight was told to stop", { ideaId: job.ideaId, jobId });
         return failed(waited.stopped ? STOPPED_REASON : `the build ran past its time limit of ${minutesText(job.timeoutMs)}`);
       }
-      mayBeRunning = false;
+      run.mayBeRunning = false;
 
       const result = checkBuildResult(workspace, triggered.triggeredAtMs);
-      const credits = crew.creditsFor(added.id, [new Date(triggered.triggeredAtMs), now()]);
-      logger.info("kiro crew job ended", { ideaId: job.ideaId, jobId: added.id, crewStatus: waited.status, built: result.ok, credits });
-      if (result.ok) return { ok: true, backend: KIRO_CREW, ms: ms(), ...(credits === undefined ? {} : { credits }) };
+      logger.info("kiro crew job ended", { ideaId: job.ideaId, jobId, crewStatus: waited.status, built: result.ok });
+      if (result.ok) return { ok: true, backend: KIRO_CREW, ms: ms() };
       if (waited.status === "timeout") return failed(`the build ran past its time limit of ${minutesText(job.timeoutMs)}`);
       // Crew recorded a failure and the agent never wrote a thing: Crew refused to run the job.
       if (result.neverStarted && waited.status === "failure") return cannotStart("Kiro Crew could not run the build job (its own record says it failed at once)");
       return failed(result.reason);
+    };
+
+    let outcome: BuildOutcome;
+    try {
+      outcome = await runJob(added.id);
+    } catch {
+      // The error's own text is not passed on: it could quote a path or a tool's reply.
+      logger.error("kiro crew build stopped on an unexpected error", { ideaId: job.ideaId });
+      outcome = failed(UNEXPECTED_ERROR);
     } finally {
-      if (mayBeRunning) await crew.cancel(added.id).catch(() => false);
+      // The agent's time ends here: the clean-up below is ours, not the agent's.
+      agentEndedMs = now().getTime();
+      if (run.mayBeRunning) await crew.cancel(added.id).catch(() => false);
       await crew.remove(added.id, signal === undefined ? {} : { signal }).catch(() => false);
     }
+    if (run.triggeredAtMs === null) return outcome;
+
+    // What the try cost, read only now: the run is over (it was cancelled if it had to be), so
+    // Kiro Crew has had its chance to write the figure down. This goes for a build that failed,
+    // ran out of time or was stopped as much as for one that worked. Reading it is a look at a
+    // few small files: no time worth counting against the 10 seconds a stop may take.
+    // By the clock on the wall, and never more than the try was allowed: the agent cannot have
+    // run for longer than its time limit, so a longer gap means the Mac slept in the middle of
+    // the build. Without this, one build slept through would be estimated at hours of credits.
+    const agentMs = Math.min(Math.max(0, agentEndedMs - run.triggeredAtMs), job.timeoutMs + CREW_STOP_GRACE_MS);
+    // Kiro Crew's own record, best effort. Without it the ledger takes an estimate.
+    const credits = crew.creditsFor(added.id, [new Date(run.triggeredAtMs), now()]);
+    return { ...outcome, agentMs, ...(credits === undefined ? {} : { credits }) };
   }
 
   return {
@@ -353,7 +383,7 @@ export function createKiroCrewBackend(options: KiroCrewBackendOptions): BuildBac
       } catch {
         // The error's own text is not passed on: it could quote a path or a tool's reply.
         logger.error("kiro crew build stopped on an unexpected error", { ideaId: job.ideaId });
-        return { ok: false, backend: KIRO_CREW, ms: now().getTime() - startedMs, reason: "the Kiro Crew build stopped on an unexpected error", couldNotStart: false };
+        return { ok: false, backend: KIRO_CREW, ms: now().getTime() - startedMs, reason: UNEXPECTED_ERROR, couldNotStart: false };
       }
     },
   };

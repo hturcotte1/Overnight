@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Overnight's nightly build, as a macOS background job (a "LaunchAgent"). Once a day, at
-  BUILD_TIME, it runs `overnight build`: each approved idea is built, one at a time.
+  Overnight's nightly build, as a macOS background job (a "LaunchAgent"). Every minute it runs
+  `overnight build` with the if-due switch: Overnight looks at its own clock, and at BUILD_TIME
+  each approved idea is built, one at a time. At every other minute it ends at once.
   This is a template: scripts/install-agents.sh replaces the names written in capitals between
   double underscores with real values, and puts the result in
   ~/Library/LaunchAgents/com.overnight.build.plist. Do not install this file by hand.
@@ -25,6 +26,7 @@
     <string>__NODE__</string>
     <string>__REPO__/packages/cli/src/main.ts</string>
     <string>build</string>
+    <string>--if-due</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -39,26 +41,25 @@
   </dict>
 
   <!--
-    Once a day at BUILD_TIME, on this Mac's own clock. The installer takes the time from
-    Overnight's settings and refuses to install if the Mac's time zone and the TZ setting disagree,
-    because this hour would then be the wrong one.
+    macOS starts this job every 60 seconds, and once when it is loaded (at login, and when it is
+    installed). macOS does not decide when a build happens. Overnight's own clock does, from its
+    TZ and BUILD_TIME settings: the if-due switch above makes every start ask that clock first.
+    The answer is "not yet" all day but once, and then the job ends within a second or two.
 
-    If the Mac is asleep at that time, macOS runs the job once when the Mac next wakes. That is
-    Apple's documented behaviour for calendar jobs (launchd.plist(5): intervals missed while
-    asleep are run, once, on wake); we have not tested it ourselves. If the Mac is switched off or
-    nobody is logged in at that time, that night's run is skipped.
+    macOS's calendar (a set hour and minute) is not used. It goes by the Mac's own time zone, not
+    Overnight's, and it ran this job an hour late on Oct 11.
+
+    If the Mac is asleep or switched off at BUILD_TIME, the first start after it is awake again
+    finds the build still due and runs it then. A day's build is started at most once: the start
+    is written down before the work begins. macOS starts no second copy of a job that is still
+    running, so a long build is not disturbed by the next minute.
   -->
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>__HOUR__</integer>
-    <key>Minute</key>
-    <integer>__MINUTE__</integer>
-  </dict>
+  <key>StartInterval</key>
+  <integer>60</integer>
 
-  <!-- Only at that time: not at login, not when installed, and not again when it ends. -->
+  <!-- Also once when it is loaded, so the first look at the clock does not wait a minute. -->
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
 
   <!--
     When macOS stops the job (uninstall, restart, logout) it asks first, and ends it by force only
@@ -72,7 +73,7 @@
   <!--
     The build writes its own log, logs/build.log. This second file holds the one summary line it
     prints each night, and anything printed outside that log: a crash, or a bad setting that
-    stopped it before it could start.
+    stopped it before it could start. A look at the clock that finds nothing due prints nothing.
   -->
   <key>StandardOutPath</key>
   <string>__DATA_DIR__/logs/build.launchd.log</string>

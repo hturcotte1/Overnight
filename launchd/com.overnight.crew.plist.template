@@ -7,6 +7,11 @@
   double underscores with real values, and puts the result in
   ~/Library/LaunchAgents/com.overnight.crew.plist. Do not install this file by hand.
 
+  Until it is filled in, this file is not a valid settings file, on purpose: the gateway's whole
+  command goes where the one name in capitals stands alone inside the list of program arguments,
+  and bare text is not allowed there. `plutil -lint` says so about this file. The installer
+  checks the filled-in result with that same tool before it puts anything in place.
+
   This job takes the place of `kirocrew service install`. Run only one of the two: both start the
   same gateway on the same port.
 

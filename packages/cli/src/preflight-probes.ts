@@ -7,7 +7,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import path from "node:path";
 import type { Config, LoginState } from "@overnight/core";
-import { nightJobPath, readCrewJobSandbox, readNightJobsState } from "./background.ts";
+import { nightJobPath, readCrewJobSandbox, readJobTriggers, readNightJobsState } from "./background.ts";
 import type { PreflightProbes } from "./commands/preflight.ts";
 import { gatewayAnswers } from "./gateway.ts";
 import { runQuiet } from "./run-quiet.ts";
@@ -31,6 +31,12 @@ export interface ProbeParts {
   sandboxProbe: PreflightProbes["sandboxProbe"];
   /** Is a build running on this data folder right now? Null if that could not be told. */
   buildRunning: PreflightProbes["buildRunning"];
+  /** Is the build, or the deliver, running on this data folder right now? Null if that could not be told. */
+  nightJobRunning: PreflightProbes["nightJobRunning"];
+  /** The repo's own sandbox rules for the gateway: packages/builder/sandbox/crew-gateway.sb (@overnight/builder). */
+  gatewayProfileFile: string;
+  /** The gateway job's copy of them, made by `install crew`: <data folder>/sandbox/crew-gateway.sb. */
+  installedGatewayProfileFile: string;
   /** Replaced in tests. */
   run?: (command: string, args: string[], options: QuietOptions) => Promise<QuietResult>;
   gatewayAnswers?: () => Promise<boolean>;
@@ -45,6 +51,8 @@ const KIRO_TIMEOUT_MS = 20_000;
 const GH_TIMEOUT_MS = 30_000;
 /** A skill is a few kilobytes of text. */
 const MAX_SKILL_BYTES = 1024 * 1024;
+/** The sandbox rules are a few dozen kilobytes of text. */
+const MAX_PROFILE_BYTES = 1024 * 1024;
 /** GitHub's own rule for an account name. Checked before the name is put into a request path. */
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const REPO_NAME = /^[A-Za-z0-9._-]+$/;
@@ -128,5 +136,16 @@ export function realPreflightProbes(parts: ProbeParts): PreflightProbes {
 
     nightJobs: () => readNightJobsState(home),
     crewJobSandbox: () => readCrewJobSandbox(home),
+    nightJobTriggers: () => readJobTriggers(home),
+    nightJobRunning: parts.nightJobRunning,
+
+    gatewayProfileCopy() {
+      const ours = readSmallFile(parts.gatewayProfileFile, MAX_PROFILE_BYTES);
+      if (ours === null) throw new Error("packages/builder/sandbox/crew-gateway.sb could not be read");
+      const copy = readSmallFile(parts.installedGatewayProfileFile, MAX_PROFILE_BYTES);
+      // Something is there but it is not a plain, readable file of a sensible size: not ours.
+      if (copy === null) return existsSync(parts.installedGatewayProfileFile) ? "different" : "missing";
+      return sameText(copy, ours) ? "same" : "different";
+    },
   };
 }

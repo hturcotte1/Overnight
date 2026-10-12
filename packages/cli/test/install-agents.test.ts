@@ -12,18 +12,44 @@
 // one in the scratch folder, so these tests do not depend on what
 // packages/builder/sandbox/crew-gateway.sb holds today; one test reads that real file, only to
 // check that the installer knows how to fill every value it asks for. The `overnight` tool itself
-// is really run (pause, status), but always with its data folder forced into the scratch folder,
-// so the real one is never opened, and with the gateway's port pointed at one where nothing
-// listens. No test runs the script's own `install`, `uninstall` or `restart` subcommand. Every
-// path, job listing and log line below is made up.
+// is really run (pause, status, and `build --from-now` or `deliver --from-now`, which only write
+// down that today's time counts as handled), but always with its data folder forced into the
+// scratch folder, so the real one is never opened, and with the gateway's port pointed at one
+// where nothing listens. A night job's first look at the clock, which the real job makes when
+// macOS loads it, is a stand-in too: the made-up launchctl writes the time of the look into the
+// scratch database with the app's own function. No build and no delivery is ever started. No
+// test runs the script's own `install`, `uninstall` or `restart` subcommand. Every path, job
+// listing and log line below is made up.
+//
+// The last part checks the tools of spikes/10-night-clock.ts, the script that later tries the
+// night clock under real launchd with throwaway jobs. Here nothing of it is run but its own
+// refusals and the text it would hand to macOS: no job is loaded.
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { dataPaths, parseConfig } from "@overnight/core";
-import { JOB_LABEL, jobSettingsFile, NIGHT_JOB_LABELS } from "../src/background.ts";
+import { SKIPPED_NOTHING_APPROVED } from "@overnight/builder";
+import { clockMinus, dataPaths, DELIVER_LEAD_MINUTES, nextSlotAt, NIGHT_TICK_SECONDS, parseConfig } from "@overnight/core";
+import {
+  clockTimes,
+  dataDirProblem,
+  FIRST_CHECK_MESSAGE,
+  inQuietHours,
+  labelProblem,
+  launchctlProblem,
+  NOTHING_APPROVED_LINE,
+  powerEvent,
+  REAL_LABELS,
+  settingsProblem,
+  SPIKE_LABELS,
+  STARTING_MESSAGE,
+  throwawaySettings,
+} from "../../../spikes/10-night-clock.ts";
+import { JOB_LABEL, jobSettingsFile, NIGHT_JOB_LABELS, readJobDataDir, readJobTrigger } from "../src/background.ts";
+import { buildSummary } from "../src/commands/build.ts";
 import { repoRoot } from "../src/context.ts";
+import { buildLockFile, deliverLockFile, takeLock } from "../src/single-instance.ts";
 
 const SCRIPT = path.join(repoRoot(), "scripts", "install-agents.sh");
 const templateFile = (job: Job) => path.join(repoRoot(), "launchd", `com.overnight.${job}.plist.template`);
@@ -118,27 +144,53 @@ describe("launchd template", () => {
 describe("launchd templates for the night", () => {
   const read = (job: Job) => readFileSync(templateFile(job), "utf8");
   const placeholders = (text: string) => [...new Set(text.match(/__[A-Z][A-Z_]*__/g))].sort();
+  /** A template without its XML comments: the settings themselves. */
+  const settingsOf = (job: Job) => read(job).replace(/<!--[\s\S]*?-->/g, "");
 
-  it("use only the placeholders the installer fills in", () => {
+  it("use only the placeholders the installer fills in: the build and deliver jobs take no hour and minute", () => {
     for (const job of ["build", "deliver"] as const) {
-      expect(placeholders(read(job)), job).toEqual(["__DATA_DIR__", "__HOME__", "__HOUR__", "__MINUTE__", "__NODE_DIR__", "__NODE__", "__REPO__"]);
+      expect(placeholders(read(job)), job).toEqual(["__DATA_DIR__", "__HOME__", "__NODE_DIR__", "__NODE__", "__REPO__"]);
     }
     expect(placeholders(read("crew"))).toEqual(["__CREW_ARGUMENTS__", "__DATA_DIR__", "__HOME__", "__NODE_DIR__"]);
   });
 
-  it("name the jobs the way the app does, and run the right command", () => {
+  it("name the jobs the way the app does, and run the right command: build and deliver with the if-due switch", () => {
     expect(read("build")).toContain(`<string>${NIGHT_JOB_LABELS.build}</string>`);
     expect(read("deliver")).toContain(`<string>${NIGHT_JOB_LABELS.deliver}</string>`);
     expect(read("crew")).toContain(`<string>${NIGHT_JOB_LABELS.crew}</string>`);
-    expect(read("build")).toMatch(/<string>__REPO__\/packages\/cli\/src\/main\.ts<\/string>\s*<string>build<\/string>/);
-    expect(read("deliver")).toMatch(/<string>__REPO__\/packages\/cli\/src\/main\.ts<\/string>\s*<string>deliver<\/string>/);
+    // Without the switch the command means "now": a job started every minute would build every minute.
+    expect(settingsOf("build")).toMatch(/<string>__REPO__\/packages\/cli\/src\/main\.ts<\/string>\s*<string>build<\/string>\s*<string>--if-due<\/string>\s*<\/array>/);
+    expect(settingsOf("deliver")).toMatch(/<string>__REPO__\/packages\/cli\/src\/main\.ts<\/string>\s*<string>deliver<\/string>\s*<string>--if-due<\/string>\s*<\/array>/);
   });
 
-  it("say, where the schedule is, what macOS does about a run missed while asleep", () => {
+  it("have macOS wake the build and deliver jobs as often as the night clock expects, and when they are loaded, and never by its calendar", () => {
     for (const job of ["build", "deliver"] as const) {
-      expect(read(job), job).toContain("macOS runs the job once when the Mac next wakes");
-      expect(read(job), job).toContain("launchd.plist(5)");
+      const settings = settingsOf(job);
+      const every = /<key>StartInterval<\/key>\s*<integer>(\d+)<\/integer>/.exec(settings)?.[1];
+      // One number: the template's, and the one Overnight's own clock is built around.
+      expect(Number(every), job).toBe(NIGHT_TICK_SECONDS);
+      expect(settings, job).toMatch(/<key>RunAtLoad<\/key>\s*<true\/>/);
+      expect(settings, job).not.toContain("StartCalendarInterval");
+      expect(settings, job).not.toContain("KeepAlive");
+      expect(settings, job).toMatch(/<key>ExitTimeOut<\/key>\s*<integer>60<\/integer>/);
+      // The comment beside it says the same number, and who decides.
+      expect(read(job), job).toContain(`macOS starts this job every ${NIGHT_TICK_SECONDS} seconds`);
+      expect(read(job), job).toContain("Overnight's own clock does");
+      expect(read(job), job).toContain("the if-due switch");
     }
+  });
+
+  it("have no two hyphens in a row inside a comment, which XML does not allow", () => {
+    for (const job of JOBS) {
+      const comments = read(job).match(/<!--[\s\S]*?-->/g) ?? [];
+      expect(comments.length, job).toBeGreaterThan(0);
+      for (const comment of comments) expect(comment.slice(4, -3), `${job}: ${comment.slice(0, 60)}`).not.toContain("--");
+    }
+  });
+
+  it("say in the gateway's template that it is not a valid settings file until it is filled in", () => {
+    expect(read("crew")).toContain("not a valid settings file");
+    expect(read("crew")).toMatch(/The installer\s+checks the filled-in result/);
   });
 });
 
@@ -166,36 +218,46 @@ describeOnMac("scripts/install-agents.sh", () => {
     });
   });
 
-  it("fills the build and deliver templates into valid plists: once a day, never at load, never kept alive", () => {
+  it("fills the build and deliver templates into valid plists: woken every minute and at load, with the if-due switch, never on macOS's calendar", () => {
     const node = "/opt/My Tools & Co/node <24>/bin/node";
     const repo = "/Users/someone/My Repo \\ $x & more";
     const dataDir = "/Volumes/Data Disk/over night";
-    for (const [job, hour, minute] of [["build", "1", "0"], ["deliver", "6", "30"], ["deliver", "23", "40"]] as const) {
-      const file = path.join(scratch, `filled ${job} ${hour}.plist`);
-      writeFileSync(file, withScript('render_plist "$@"', [job, node, repo, dataDir, home, hour, minute]));
+    for (const job of ["build", "deliver"] as const) {
+      const file = path.join(scratch, `filled ${job}.plist`);
+      writeFileSync(file, withScript('render_plist "$@"', [job, node, repo, dataDir, home]));
       execFileSync("/usr/bin/plutil", ["-lint", file], { timeout: 15_000, stdio: "ignore" });
-      // Exactly these keys: no KeepAlive, and nothing that would start the job at login.
+      // Exactly these keys: no StartCalendarInterval, no KeepAlive.
       expect(plistAsJson(file), job).toEqual({
         Label: label(job),
-        ProgramArguments: [node, `${repo}/packages/cli/src/main.ts`, job],
+        ProgramArguments: [node, `${repo}/packages/cli/src/main.ts`, job, "--if-due"],
         WorkingDirectory: repo,
         // macOS's own folders first: `git` must be the system's. gh, kirocrew and kiro-cli live in ~/.local/bin.
         EnvironmentVariables: { PATH: `/usr/bin:/bin:/usr/sbin:/sbin:/opt/My Tools & Co/node <24>/bin:${home}/.local/bin`, HOME: home },
-        StartCalendarInterval: { Hour: Number(hour), Minute: Number(minute) },
-        RunAtLoad: false,
+        StartInterval: NIGHT_TICK_SECONDS,
+        RunAtLoad: true,
         ExitTimeOut: 60,
         StandardOutPath: `${dataDir}/logs/${job}.launchd.log`,
         StandardErrorPath: `${dataDir}/logs/${job}.launchd.log`,
       });
+      expect(NIGHT_TICK_SECONDS).toBe(60);
+      // An hour and a minute, as older callers passed them, are no longer looked at.
+      expect(withScript('render_plist "$@"', [job, node, repo, dataDir, home, "1", "0"])).toBe(readFileSync(file, "utf8"));
     }
   });
 
-  it("refuses to fill a calendar template without an hour and a minute", () => {
-    for (const extra of [[], ["1"], ["one", "0"], ["1", ""]]) {
-      const ran = runScript('render_plist "$@"', ["build", "/n/node", "/r", "/d", home, ...extra]);
-      expect(ran.status, JSON.stringify(extra)).toBe(1);
-      expect(ran.stderr).toBe("install-agents: The build job needs an hour and a minute.\n");
-    }
+  it("the templates as they are in the repo: listen, build and deliver pass macOS's own check, the gateway's does not until it is filled in", () => {
+    const lint = (job: Job) => {
+      try {
+        execFileSync("/usr/bin/plutil", ["-lint", templateFile(job)], { timeout: 15_000, stdio: "ignore" });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    for (const job of ["listen", "build", "deliver"] as const) expect(lint(job), job).toBe(true);
+    // The whole command stands in for one name, where bare text is not allowed. Its comment says so.
+    expect(lint("crew")).toBe(false);
+    expect(readFileSync(templateFile("crew"), "utf8")).toContain("not a valid settings file");
   });
 
   it("fills the gateway template with whatever command it is given, one word per argument", () => {
@@ -458,6 +520,128 @@ describeOnMac("scripts/install-agents.sh", () => {
     expect(same("America/Boise", "Not/AZone")).toBe(false);
   });
 
+  it("says so, once and only then, when this Mac's clock is not the one Overnight goes by", () => {
+    const note = (mac: string, setting: string) => runScript('MAC="$1"; mac_time_zone() { [[ -n "$MAC" ]] || return 1; printf "%s" "$MAC"; }; print_clock_note "$2" "$3"', [mac, process.execPath, setting]);
+    expect(note("America/New_York", "America/Boise")).toEqual({
+      status: 0,
+      stdout: "  Note: this Mac's clock is set to America/New_York. Overnight goes by its own TZ setting, America/Boise: 01:00 means 01:00 there.\n",
+      stderr: "",
+    });
+    // The same zone, two names for one clock, and a Mac whose zone cannot be read: nothing to say, and nothing refused.
+    for (const mac of ["America/Boise", "America/Denver", ""]) expect(note(mac, "America/Boise"), mac).toEqual({ status: 0, stdout: "", stderr: "" });
+    // The check that used to refuse an install is gone from the script.
+    expect(readFileSync(SCRIPT, "utf8")).not.toContain("require_same_clock");
+  });
+
+  it("reads a value from the tool's report by name, also one further down, and only when it is there as text", () => {
+    const report = JSON.stringify({ timeZone: "America/Boise", paused: true, empty: "", nightClock: { tickSeconds: 60, build: { checkedAt: "2026-10-11T07:00:00.000Z", lastRun: null }, deliver: { checkedAt: null } }, "dotted.name": "not reached by a path" });
+    const value = (name: string) => runScript('report_value "$@"', [process.execPath, report, name]);
+    expect(value("timeZone")).toMatchObject({ status: 0, stdout: "America/Boise" });
+    expect(value("nightClock.build.checkedAt")).toMatchObject({ status: 0, stdout: "2026-10-11T07:00:00.000Z" });
+    // Not there, not text, empty, or a way down through something that is not a list of names.
+    for (const name of ["nightClock.deliver.checkedAt", "nightClock.build.lastRun", "nightClock.build.lastRun.startedAt", "nightClock.crew.checkedAt", "nightClock.tickSeconds", "nightClock", "paused", "empty", "timeZone.length", "nightClock.build.checkedAt.length", "constructor.name", "dotted.name", "", "."]) {
+      expect(value(name), name).toMatchObject({ status: 1, stdout: "" });
+    }
+    expect(runScript('report_value "$@"', [process.execPath, "not a report", "timeZone"])).toMatchObject({ status: 1, stdout: "" });
+  });
+
+  it("writes the time now the way the app writes one, so two of them compare as text", () => {
+    const before = new Date().toISOString();
+    const stamp = withScript('utc_now "$1"', [process.execPath]).trim();
+    const after = new Date().toISOString();
+    expect(stamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(new Date(stamp).toISOString()).toBe(stamp);
+    expect(before <= stamp && stamp <= after).toBe(true);
+    // Without a node that answers it still gives a time of that shape, to the second.
+    expect(withScript('utc_now "$1"', [path.join(scratch, "no such node")]).trim()).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/);
+  });
+
+  /** A made-up launchctl that says a job has a process at the looks named (their numbers, or "all"), and counts its looks. */
+  const LOOKS = `
+    BUSY="$1"; COUNT="$2"; shift 2
+    launchctl() {
+      local looks=$(( $(cat "$COUNT" 2>/dev/null || echo 0) + 1 ))
+      echo "$looks" >"$COUNT"
+      printf '%s = {\\n\\tstate = x\\n' "$2"
+      if [[ "$BUSY" == all || " $BUSY " == *" $looks "* ]]; then printf '\\tpid = 5151\\n'; fi
+      printf '}\\n'
+    }
+    sleep() { echo "slept $1" >>"$COUNT.sleeps"; }
+  `;
+
+  it("takes a night job to be at work only when it has a process on two looks, two seconds apart", () => {
+    const busy = (looks: string) => {
+      counter += 1;
+      const count = path.join(scratch, `busy looks ${counter}`);
+      const ran = runScript(`${LOOKS} night_job_busy build`, [looks, count]);
+      return { busy: ran.status === 0, looks: Number(readFileSync(count, "utf8")), sleeps: existsSync(`${count}.sleeps`) ? readFileSync(`${count}.sleeps`, "utf8") : "" };
+    };
+    expect(busy("all")).toEqual({ busy: true, looks: 2, sleeps: "slept 2\n" });
+    // Its look at the clock, which takes a moment every minute, is not work.
+    expect(busy("1")).toEqual({ busy: false, looks: 2, sleeps: "slept 2\n" });
+    // No process at the first look: no need for a second.
+    expect(busy("")).toEqual({ busy: false, looks: 1, sleeps: "" });
+    expect(busy("2")).toEqual({ busy: false, looks: 1, sleeps: "" });
+    // A job macOS does not list is not at work.
+    expect(runScript("launchctl() { return 113; }; night_job_busy build").status).toBe(1);
+
+    const refused = runScript(`${LOOKS} require_not_busy "$@"; echo went on`, ["all", path.join(scratch, "busy looks refused"), "deliver", "restarting"]);
+    expect(refused).toEqual({ status: 1, stdout: "", stderr: "install-agents: The morning delivery is running right now, and restarting would cut it off. Run this again when it has finished. Nothing was changed.\n" });
+    // When jobs named before it are done by then, it does not claim that nothing was changed.
+    const later = runScript(`${LOOKS} DONE_JOBS=(listen crew); require_not_busy "$@"; echo went on`, ["all", path.join(scratch, "busy looks later"), "build", "installing"]);
+    expect(later).toEqual({ status: 1, stdout: "", stderr: "install-agents: The nightly build is running right now, and installing would cut it off. Run this again when it has finished. The build job was left as it was (already done: listen crew).\n" });
+    expect(runScript(`${LOOKS} require_not_busy "$@"; echo went on`, ["1", path.join(scratch, "busy looks free"), "build", "installing"])).toMatchObject({ status: 0, stdout: "went on\n" });
+  });
+
+  /** A made-up tool whose report gives the look number at which each answer starts: "<look> <checkedAt or null>" per line of $ANSWERS. */
+  const REPORTS = `
+    ANSWERS="$1"; ASKED="$2"; shift 2
+    job_cli() {
+      shift
+      printf '%s\\n' "$*" >>"$ASKED"
+      local looks checked=null from value
+      looks="$(wc -l <"$ASKED" | tr -d ' ')"
+      while read -r from value; do
+        if (( looks >= from )); then checked="$value"; fi
+      done <"$ANSWERS"
+      [[ "$checked" != fails ]] || return 1
+      [[ "$checked" == null || "$checked" == '{}' ]] || checked="\\"$checked\\""
+      printf '{"nightClock":{"build":{"checkedAt":%s},"deliver":{"checkedAt":null}}}\\n' "$checked"
+    }
+    sleep() { echo "slept $1" >>"$ASKED.sleeps"; }
+  `;
+
+  it("waits for a night job's first look at the clock: one written down after the job was started, within 30 seconds", () => {
+    const SINCE = "2026-10-11T07:00:00.000Z";
+    const waited = (answers: string[], job = "build") => {
+      counter += 1;
+      const file = path.join(scratch, `first check ${counter}`);
+      writeFileSync(`${file}.answers`, answers.map((line) => `${line}\n`).join(""));
+      const ran = runScript(`${REPORTS} wait_for_first_check "$@"`, [`${file}.answers`, file, process.execPath, job, SINCE]);
+      const asked = existsSync(file) ? readFileSync(file, "utf8").trimEnd().split("\n") : [];
+      return { came: ran.status === 0, asked: asked.length, sleeps: existsSync(`${file}.sleeps`) ? readFileSync(`${file}.sleeps`, "utf8").trimEnd().split("\n").length : 0, questions: [...new Set(asked)] };
+    };
+    // There at the first look: no waiting at all. Only ever `status --json` is asked.
+    expect(waited(["1 2026-10-11T07:00:00.001Z"])).toEqual({ came: true, asked: 1, sleeps: 0, questions: ["status --json"] });
+    // It comes at the fourth look: three waits of two seconds.
+    expect(waited(["1 null", "4 2026-10-11T07:00:06.500Z"])).toEqual({ came: true, asked: 4, sleeps: 3, questions: ["status --json"] });
+    // A look from before the start, however recent, is not the new job's: the old copy made it.
+    expect(waited(["1 2026-10-11T06:59:59.999Z", "3 2026-10-11T07:00:02.000Z"])).toMatchObject({ came: true, asked: 3 });
+    // Never: a look of ours every two seconds for 30 seconds, and no more.
+    const never = { came: false, asked: 15, sleeps: 14 };
+    expect(waited(["1 null"])).toMatchObject(never);
+    expect(waited(["1 2026-10-11T06:59:59.999Z"])).toMatchObject(never);
+    // The very moment of the start is not after it.
+    expect(waited([`1 ${SINCE}`])).toMatchObject(never);
+    // Something that is not a time written the app's way is not compared at all, even if it would sort later.
+    for (const odd of ["2026-10-11T07:00:01Z", "9999", "tomorrow", "2026-10-12", "{}"]) expect(waited([`1 ${odd}`]), odd).toMatchObject(never);
+    // The tool will not answer: the job would fail the same way, so that is "not yet" too.
+    expect(waited(["1 fails"])).toMatchObject(never);
+    // The other job's look does not count for this one.
+    expect(waited(["1 2026-10-11T07:00:00.001Z"], "deliver")).toMatchObject(never);
+    expect(withScript('printf "%s" "$FIRST_CHECK_WAIT_SECONDS"')).toBe("30");
+  }, 60_000);
+
   it("works out the data folder the way the app does", () => {
     // The app asks the system for the home folder, so point that at the same scratch folder the script gets.
     vi.stubEnv("HOME", home);
@@ -658,13 +842,33 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
   // Stands in for macOS. Records every call; remembers in one file per job whether that made-up
   // job is "loaded"; and answers `print` the way launchctl does: exit 113 when it is not loaded,
   // else a listing. An always-on job has a pid unless it is meant to have died straight away; a
-  // calendar job is listed with no pid, as between two of its runs.
+  // night job is listed with no pid, as between two of its looks at the clock, unless the test
+  // names the looks at which it has one (DRY_BUSY_LOOKS: "all", or their numbers in this run).
+  //
+  // It also stands in for what macOS does with a night job it has just loaded: the job is started
+  // once, and looks at the clock. Only for a settings file that asks for it, as the real one does
+  // (started when loaded, and run with the if-due switch), and unless the test says the job never
+  // looks. No build or delivery is run: the time of the look is written into the scratch database
+  // with the app's own function, which is all a look at the clock that finds nothing due does.
   const DRY_RUN = `
     CALLS="$1"; STATE="$2"; MODE="$3"; SCRATCH="$4"; ENV_FILE="$5"; DATA="$6"; CLI_CALLS="$7"
     shift 7
+    ORDER="$CALLS.order"
+    first_look() {
+      [[ "$(plutil -extract RunAtLoad raw -o - "$2" 2>/dev/null)" == true ]] || return 0
+      [[ "$(plutil -extract ProgramArguments.3 raw -o - "$2" 2>/dev/null)" == --if-due ]] || return 0
+      "$(command -v node)" --input-type=module -e '
+        const [core, database, job] = process.argv.slice(1);
+        const { Store, noteChecked } = await import(core);
+        const store = new Store(database);
+        noteChecked(store, job, new Date());
+        store.close();
+      ' "$REPO/packages/core/src/index.ts" "$DATA/overnight.db" "$1"
+    }
     launchctl() {
       printf '%s\\n' "$*" >>"$CALLS"
-      local job
+      printf 'launchctl %s\\n' "$*" >>"$ORDER"
+      local job looks
       case "$1" in
         bootout)
           job="\${2##*/}"
@@ -677,15 +881,25 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
           fi
           job="$(basename -- "$3" .plist)"
           if [[ "$MODE" != "not-listed" ]]; then echo up >"$STATE.$job"; fi
+          if [[ "$MODE" != "not-listed" && "$MODE" != "never-looks" ]] && [[ "$job" == com.overnight.build || "$job" == com.overnight.deliver ]]; then
+            first_look "\${job##*.}" "$3"
+          fi
           ;;
         print)
           job="\${2##*/}"
           [[ "$(cat "$STATE.$job" 2>/dev/null)" == up ]] || return 113
+          # The looks at this job in this run, counted: $$ is this run's own number.
+          looks=$(( $(cat "$STATE.$job.looks.$$" 2>/dev/null || echo 0) + 1 ))
+          echo "$looks" >"$STATE.$job.looks.$$"
           printf '%s = {\\n' "$2"
           if [[ "$MODE" == "job-dies" ]]; then
             printf '\\tstate = spawn scheduled\\n\\tlast exit code = 2\\n}\\n'
           elif [[ "$job" == com.overnight.build || "$job" == com.overnight.deliver ]]; then
-            printf '\\tstate = not running\\n\\tlast exit code = (never exited)\\n}\\n'
+            if [[ "\${DRY_BUSY_LOOKS:-}" == all || " \${DRY_BUSY_LOOKS:-} " == *" $looks "* ]]; then
+              printf '\\tstate = running\\n\\tpid = 5151\\n\\tlast exit code = 0\\n}\\n'
+            else
+              printf '\\tstate = not running\\n\\tlast exit code = (never exited)\\n}\\n'
+            fi
           else
             printf '\\tstate = running\\n\\tpid = 4242\\n\\tlast exit code = (never exited)\\n}\\n'
           fi
@@ -718,6 +932,7 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
       local node="$1"
       shift
       printf '%s\\n' "$*" >>"$CLI_CALLS"
+      printf 'overnight %s\\n' "$*" >>"$ORDER"
       if [[ "$MODE" == "pause-fails" && "$1" == pause ]]; then
         echo "made-up failure of the pause command" >&2
         return 1
@@ -756,13 +971,15 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
     calls: string[];
     /** What was asked of the `overnight` tool, in order. */
     cli: string[];
+    /** Both of those in one list, in the order they happened: "launchctl ..." and "overnight ...". */
+    order: string[];
     /** What was asked of the stand-in for Kiro Crew's program, in order. */
     kirocrew: string[];
     /** The sandbox commands macOS was "asked" to load (a stand-in answered), one per line. */
     sandboxChecks: string[];
   }
 
-  type DryRunMode = "ok" | "job-dies" | "bootstrap-fails" | "pause-fails" | "bad-setting" | "not-listed";
+  type DryRunMode = "ok" | "job-dies" | "bootstrap-fails" | "pause-fails" | "bad-setting" | "not-listed" | "never-looks";
 
   interface DryRunOptions {
     mode?: DryRunMode;
@@ -871,15 +1088,22 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
       ...options.env,
     });
     const linesOf = (file: string) => (existsSync(file) ? readFileSync(file, "utf8").trimEnd().split("\n") : []);
-    return { ...ran, home: fakeHome, plist: jobSettingsFile(fakeHome), dataDir, calls: linesOf(callsFile), cli: linesOf(cliCallsFile), kirocrew: linesOf(kirocrewCalls), sandboxChecks: linesOf(`${callsFile}.sandbox`) };
+    return { ...ran, home: fakeHome, plist: jobSettingsFile(fakeHome), dataDir, calls: linesOf(callsFile), cli: linesOf(cliCallsFile), order: linesOf(`${callsFile}.order`), kirocrew: linesOf(kirocrewCalls), sandboxChecks: linesOf(`${callsFile}.sandbox`) };
   }
   /** The name the tests written for the listener alone know it by. */
   const dryRunInstall = dryRun;
 
   const plistOf = (run: DryRun, job: Job) => jobSettingsFile(run.home, label(job));
   const targetOf = (job: Job) => `gui/not-a-real-domain/${label(job)}`;
-  /** The launchctl calls of one install of one job: stop the old copy, start the new one, look, show. */
-  const installCalls = (run: DryRun, job: Job) => [`bootout ${targetOf(job)}`, `print ${targetOf(job)}`, `enable ${targetOf(job)}`, `bootstrap gui/not-a-real-domain ${plistOf(run, job)}`, `print ${targetOf(job)}`, `print ${targetOf(job)}`];
+  const isNightJob = (job: Job) => job === "build" || job === "deliver";
+  /** The launchctl calls that put one job in place: stop the old copy, start the new one, look. For a night job, first: is it at work? */
+  const applyCalls = (run: DryRun, job: Job) => [...(isNightJob(job) ? [`print ${targetOf(job)}`] : []), `bootout ${targetOf(job)}`, `print ${targetOf(job)}`, `enable ${targetOf(job)}`, `bootstrap gui/not-a-real-domain ${plistOf(run, job)}`, `print ${targetOf(job)}`];
+  /**
+   * The launchctl calls of one install, or one restart, of one job: for a night job a look at
+   * whether it is at work, before anything is changed; then the job is put in place; then its
+   * status is shown.
+   */
+  const installCalls = (run: DryRun, job: Job) => [...(isNightJob(job) ? [`print ${targetOf(job)}`] : []), ...applyCalls(run, job), `print ${targetOf(job)}`];
 
   /** Run the real tool against a dry run's scratch data folder, the way the installer's stand-in does. */
   function overnight(run: DryRun, ...args: string[]): string {
@@ -891,6 +1115,9 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
       stdio: ["ignore", "pipe", "pipe"],
     });
   }
+  /** What the real tool says about a night job's clock on a dry run's scratch data folder. */
+  const clockOf = (run: DryRun, job: "build" | "deliver") =>
+    (JSON.parse(overnight(run, "status", "--json")) as { nightClock: Record<string, { checkedAt: string | null; state: string; lastRun: unknown; trigger: string | null }> }).nightClock[job];
 
   const TARGET = "gui/not-a-real-domain/com.overnight.listen";
 
@@ -1119,99 +1346,128 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
   /** The system's own folders first, then node's and ~/.local/bin: what the build and deliver jobs run with. */
   const nightPath = (run: DryRun) => `${BARE_PATH}:${NODE_DIR}:${run.home}/.local/bin`;
 
-  it("installs the nightly build alone: once a day at BUILD_TIME, and nothing else is touched", () => {
+  /** The two sentences install prints for the night jobs, with the times the dry run's settings give unless others are named. */
+  const buildLine = (at = "01:00", zone = "America/Boise") =>
+    `Installed. Overnight now checks the time every minute and builds approved ideas at ${at} (${zone}). If the Mac is asleep or off then, it builds once it is awake again. It has checked the time once already.`;
+  const deliverLine = (at = "06:30", buzz = "07:00", zone = "America/Boise") =>
+    `Installed. Overnight now checks the time every minute, and tests, publishes and delivers at ${at} (${zone}), for a buzz on the wrist at ${buzz}. If the Mac is asleep then, it delivers when the Mac is next awake and online, and the wrist buzzes two minutes after the link is ready.`;
+  /** The settings file install writes for a night job: woken every minute and when loaded, run with the if-due switch. */
+  const nightPlist = (run: DryRun, job: "build" | "deliver") => ({
+    Label: label(job),
+    ProgramArguments: [NODE, ENTRY, job, "--if-due"],
+    WorkingDirectory: repoRoot(),
+    // macOS's own folders come first: a program the job starts by name (`git`, `gh`) is the system's.
+    EnvironmentVariables: { PATH: nightPath(run), HOME: run.home },
+    StartInterval: 60,
+    RunAtLoad: true,
+    ExitTimeOut: 60,
+    StandardOutPath: `${run.dataDir}/logs/${job}.launchd.log`,
+    StandardErrorPath: `${run.dataDir}/logs/${job}.launchd.log`,
+  });
+
+  it("installs the nightly build alone: woken every minute, its clock started from now before anything is stopped, its first look waited for, and nothing else is touched", () => {
+    const started = new Date().toISOString();
     const run = dryRun({ jobs: ["build"] });
     expect(run.stderr).toBe("");
     expect(run.status).toBe(0);
-    // Stop any old copy, hand the new one to macOS, check macOS lists it, show its status.
+    // Is it at work (twice: before anything is changed, and when its turn comes)? Stop any old
+    // copy, hand the new one to macOS, check macOS lists it, show its status.
     expect(run.calls).toEqual(installCalls(run, "build"));
     expect(mode(plistOf(run, "build"))).toBe(0o600);
-    expect(plistAsJson(plistOf(run, "build"))).toEqual({
-      Label: "com.overnight.build",
-      ProgramArguments: [NODE, ENTRY, "build"],
-      WorkingDirectory: repoRoot(),
-      // macOS's own folders come first: a program the job starts by name is the system's.
-      EnvironmentVariables: { PATH: nightPath(run), HOME: run.home },
-      StartCalendarInterval: { Hour: 1, Minute: 0 },
-      RunAtLoad: false,
-      ExitTimeOut: 60,
-      StandardOutPath: `${run.dataDir}/logs/build.launchd.log`,
-      StandardErrorPath: `${run.dataDir}/logs/build.launchd.log`,
-    });
+    expect(plistAsJson(plistOf(run, "build"))).toEqual(nightPlist(run, "build"));
     expect(nightPath(run).startsWith("/usr/bin:/bin:/usr/sbin:/sbin:")).toBe(true);
     for (const other of ["listen", "crew", "deliver"] as const) expect(existsSync(plistOf(run, other)), other).toBe(false);
-    // The times are read from the tool, the way the job itself will see them.
-    expect(run.cli).toEqual(["--help", "pause", "status --json", "status --json"]);
+    // The times are read from the tool, the way the job itself will see them; the clock is started
+    // from now; the job's first look is read back; and the mode is read back to tell the operator.
+    expect(run.cli).toEqual(["--help", "pause", "status --json", "build --from-now", "status --json", "status --json"]);
+    // The clock is started from now BEFORE the old copy is stopped, and after the look at whether it is at work.
+    const order = (entry: string) => run.order.indexOf(entry);
+    expect(order("overnight build --from-now")).toBeGreaterThan(order(`launchctl print ${targetOf("build")}`));
+    expect(order("overnight build --from-now")).toBeLessThan(order(`launchctl bootout ${targetOf("build")}`));
+    expect(run.order.filter((entry) => entry.startsWith("launchctl bootout") || entry.endsWith("--from-now"))).toEqual(["overnight build --from-now", `launchctl bootout ${targetOf("build")}`]);
     // Kiro Crew is no business of this job: not asked, and no skill is copied.
     expect(run.kirocrew).toEqual([]);
     expect(existsSync(skillOf(run))).toBe(false);
 
+    // What the tool now says about the build's clock: today's time counts as handled without a
+    // run, the job has looked at the clock since this test began, and macOS wakes it on a timer.
+    const clock = clockOf(run, "build");
+    expect(clock).toMatchObject({ state: "done", lastRun: null, trigger: "timer" });
+    expect((clock?.checkedAt ?? "") > started).toBe(true);
+    expect(clockOf(run, "deliver")).toMatchObject({ state: "no-record", checkedAt: null, trigger: null });
+    // The app's own readers agree with what was written.
+    expect(readJobTrigger("build", run.home)).toBe("timer");
+    expect(readJobDataDir(run.home, NIGHT_JOB_LABELS.build)).toBe(run.dataDir);
+
     const lines = run.stdout.split("\n");
-    expect(lines[0]).toBe("Installed. Overnight now builds approved ideas every day at 01:00.");
+    expect(lines[0]).toBe(buildLine());
+    expect(lines[0]).toBe("Installed. Overnight now checks the time every minute and builds approved ideas at 01:00 (America/Boise). If the Mac is asleep or off then, it builds once it is awake again. It has checked the time once already.");
     expect(lines).toContain(`  settings:     ${plistOf(run, "build")}`);
     expect(lines).toContain('  Note: the "kiro-crew" builder needs the Kiro Crew gateway job too: scripts/install-agents.sh install crew');
+    // This made-up Mac's clock is Overnight's own, so there is nothing to say about clocks.
+    expect(run.stdout).not.toContain("this Mac's clock");
     expect(lines).toContain("Mode: paused (quiet mode). Overnight is listening and saving, not asking or building.");
-    // A calendar job has no process between its runs, and that is not a fault.
+    // A night job has no process between its looks at the clock, and that is not a fault.
     expect(lines).toContain("Overnight nightly build (com.overnight.build)");
     expect(lines).toContain("  state:           not running");
-    expect(lines).toContain("  pid:             none (it runs at its time, not in between)");
-    expect(lines).toContain("  runs at:         01:00 every day, on this Mac's clock");
+    expect(lines).toContain("  pid:             none (it wakes for a moment every minute)");
+    expect(lines).toContain("  wakes every:     60 seconds, and at login. Overnight's own clock decides when it is time");
+    expect(run.stdout).not.toContain("runs at:");
   }, 30_000);
 
-  it("installs the morning delivery 30 minutes before DELIVER_TIME, around midnight too", () => {
+  it("installs the morning delivery the same way, and says when it delivers: 30 minutes before DELIVER_TIME, around midnight too", () => {
     const run = dryRun({ jobs: ["deliver"] });
+    expect(run.stderr).toBe("");
     expect(run.status).toBe(0);
     expect(run.calls).toEqual(installCalls(run, "deliver"));
-    expect(plistAsJson(plistOf(run, "deliver"))).toEqual({
-      Label: "com.overnight.deliver",
-      ProgramArguments: [NODE, ENTRY, "deliver"],
-      WorkingDirectory: repoRoot(),
-      // `git` and `gh` are started by name: the system's folders come first.
-      EnvironmentVariables: { PATH: nightPath(run), HOME: run.home },
-      StartCalendarInterval: { Hour: 6, Minute: 30 },
-      RunAtLoad: false,
-      ExitTimeOut: 60,
-      StandardOutPath: `${run.dataDir}/logs/deliver.launchd.log`,
-      StandardErrorPath: `${run.dataDir}/logs/deliver.launchd.log`,
-    });
-    expect(run.stdout.split("\n")[0]).toBe("Installed. Overnight now tests, publishes and delivers every day at 06:30, for a buzz on the wrist at 07:00.");
-    expect(run.stdout).toContain("  runs at:         06:30 every day, on this Mac's clock");
+    expect(plistAsJson(plistOf(run, "deliver"))).toEqual(nightPlist(run, "deliver"));
+    expect(run.cli).toEqual(["--help", "pause", "status --json", "deliver --from-now", "status --json", "status --json"]);
+    expect(run.order.filter((entry) => entry.startsWith("launchctl bootout") || entry.endsWith("--from-now"))).toEqual(["overnight deliver --from-now", `launchctl bootout ${targetOf("deliver")}`]);
+    expect(clockOf(run, "deliver")).toMatchObject({ state: "done", lastRun: null, trigger: "timer" });
+    expect(clockOf(run, "deliver")?.checkedAt).not.toBeNull();
+    expect(run.stdout.split("\n")[0]).toBe("Installed. Overnight now checks the time every minute, and tests, publishes and delivers at 06:30 (America/Boise), for a buzz on the wrist at 07:00. If the Mac is asleep then, it delivers when the Mac is next awake and online, and the wrist buzzes two minutes after the link is ready.");
+    expect(run.stdout).toContain("  wakes every:     60 seconds, and at login. Overnight's own clock decides when it is time");
 
+    // The times are only told to the person installing: the settings files are the same whatever they are.
     const early = dryRun({ jobs: ["build", "deliver"], env: { DRY_BUILD_TIME: "23:45", DRY_DELIVER_TIME: "00:10" } });
     expect(early.status).toBe(0);
-    expect((plistAsJson(plistOf(early, "build")) as { StartCalendarInterval: unknown }).StartCalendarInterval).toEqual({ Hour: 23, Minute: 45 });
-    expect((plistAsJson(plistOf(early, "deliver")) as { StartCalendarInterval: unknown }).StartCalendarInterval).toEqual({ Hour: 23, Minute: 40 });
-    expect(early.stdout).toContain("Installed. Overnight now builds approved ideas every day at 23:45.");
-    expect(early.stdout).toContain("Installed. Overnight now tests, publishes and delivers every day at 23:40, for a buzz on the wrist at 00:10.");
+    expect(plistAsJson(plistOf(early, "build"))).toEqual(nightPlist(early, "build"));
+    expect(plistAsJson(plistOf(early, "deliver"))).toEqual(nightPlist(early, "deliver"));
+    expect(early.stdout.split("\n").filter((line) => line.startsWith("Installed."))).toEqual([buildLine("23:45"), deliverLine("23:40", "00:10")]);
   }, 30_000);
 
-  it("refuses to schedule the night when this Mac's clock and the TZ setting disagree, and changes nothing", () => {
+  it("installs the night jobs whatever time zone this Mac's clock is set to, and says so once when it is not Overnight's", () => {
+    const note = (mac: string, zone = "America/Boise") => `  Note: this Mac's clock is set to ${mac}. Overnight goes by its own TZ setting, ${zone}: 01:00 means 01:00 there.`;
+    const notes = (run: DryRun) => run.stdout.split("\n").filter((line) => line.includes("this Mac's clock"));
     for (const jobs of [["build"], ["deliver"], [] as Job[]] as Job[][]) {
       const run = dryRun({ jobs, env: { DRY_MAC_ZONE: "America/New_York" } });
-      expect(run.status, jobs.join("+")).toBe(1);
-      expect(run.stderr).toContain("install-agents: This Mac's clock is set to the time zone America/New_York, but Overnight's TZ setting is America/Boise.");
-      expect(run.stderr).toContain("would run at the wrong hour");
-      expect(run.stderr).toContain("Set TZ=America/New_York in");
-      expect(run.stderr).toContain("Nothing was changed.");
-      // Not even the listener, when every job was asked for: nothing is half-installed.
-      expectUntouched(run);
+      expect(run.stderr, jobs.join("+")).toBe("");
+      expect(run.status, jobs.join("+")).toBe(0);
+      // Once, also when both night jobs are installed together.
+      expect(notes(run), jobs.join("+")).toEqual([note("America/New_York")]);
+      for (const job of jobs.length === 0 ? (["build", "deliver"] as const) : (jobs as ("build" | "deliver")[])) expect(plistAsJson(plistOf(run, job)), job).toEqual(nightPlist(run, job));
     }
 
-    // Two names for one clock are no disagreement.
-    const sameClock = dryRun({ jobs: ["build"], env: { DRY_MAC_ZONE: "America/Denver" } });
-    expect(sameClock.status).toBe(0);
-    // The listener and the gateway have no schedule, so the clock is no concern of theirs.
+    // Two names for one clock are no difference, and neither is the same zone on both sides.
+    for (const env of [{ DRY_MAC_ZONE: "America/Denver" }, { DRY_MAC_ZONE: "America/New_York", DRY_TZ: "America/New_York" }] as Record<string, string>[]) {
+      const run = dryRun({ jobs: ["build"], env });
+      expect(run.status).toBe(0);
+      expect(notes(run)).toEqual([]);
+    }
+    // The times are named in Overnight's zone, whichever that is.
+    const eastern = dryRun({ jobs: ["build"], env: { DRY_MAC_ZONE: "America/Boise", DRY_TZ: "America/New_York" } });
+    expect(eastern.stdout.split("\n")[0]).toBe(buildLine("01:00", "America/New_York"));
+    expect(notes(eastern)).toEqual([note("America/Boise", "America/New_York")]);
+    // The listener and the gateway have no time of day, so there is nothing to say for them.
     const listener = dryRun({ jobs: ["listen", "crew"], env: { DRY_MAC_ZONE: "America/New_York" } });
     expect(listener.status).toBe(0);
-    // The setting can be anything, as long as the Mac agrees with it.
-    const eastern = dryRun({ jobs: ["build"], env: { DRY_MAC_ZONE: "America/New_York", DRY_TZ: "America/New_York" } });
-    expect(eastern.status).toBe(0);
-
+    expect(notes(listener)).toEqual([]);
+    // A Mac whose time zone cannot be read: installed all the same, with nothing said about it.
     const unknown = dryRun({ jobs: ["deliver"], env: { DRY_MAC_ZONE: "" } });
-    expect(unknown.status).toBe(1);
-    expect(unknown.stderr).toContain("install-agents: Could not read this Mac's time zone");
-    expectUntouched(unknown);
-  }, 60_000);
+    expect(unknown.stderr).toBe("");
+    expect(unknown.status).toBe(0);
+    expect(notes(unknown)).toEqual([]);
+  }, 120_000);
 
   it("starts the gateway inside Overnight's own sandbox unless told otherwise: real paths, the profile's own values, Kiro Crew's setting checked first", () => {
     // Nothing set means "overnight" (SPEC §6): the stronger fence is the one you get by default.
@@ -1596,18 +1852,22 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
     expect(installed).toEqual(["Installed. Overnight now listens in the background and starts again at login."]);
     expect(existsSync(plistOf(run, "build"))).toBe(false);
     expect(existsSync(plistOf(run, "deliver"))).toBe(false);
+    // Their clocks were not touched either: a job that is not put in place keeps the clock it had.
+    expect(run.cli.filter((call) => call.endsWith("--from-now"))).toEqual([]);
   }, 60_000);
 
   it("installs all four when no job is named: listener, gateway, build, delivery, each checked before any is touched", () => {
     const run = dryRun({ jobs: [] });
     expect(run.stderr).toBe("");
     expect(run.status).toBe(0);
-    const starts = (job: Job) => installCalls(run, job).slice(0, 5);
     expect(run.calls).toEqual([
-      ...starts("listen"),
-      ...starts("crew"),
-      ...starts("build"),
-      ...starts("deliver"),
+      // Before anything is changed: is either night job at work?
+      `print ${targetOf("build")}`,
+      `print ${targetOf("deliver")}`,
+      ...applyCalls(run, "listen"),
+      ...applyCalls(run, "crew"),
+      ...applyCalls(run, "build"),
+      ...applyCalls(run, "deliver"),
       // The status at the end, one job after the other.
       ...JOBS.map((job) => `print ${targetOf(job)}`),
     ]);
@@ -1616,14 +1876,24 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
       execFileSync("/usr/bin/plutil", ["-lint", plistOf(run, job)], { timeout: 15_000, stdio: "ignore" });
       expect((plistAsJson(plistOf(run, job)) as { Label: string }).Label).toBe(label(job));
     }
-    // Quiet mode is stored once, the settings are read once, and the mode is read back once.
-    expect(run.cli).toEqual(["--help", "pause", "status --json", "status --json"]);
+    // Quiet mode is stored once and the settings are read once; each night job's clock is started
+    // from now and its first look read back; and the mode is read back once.
+    expect(run.cli).toEqual(["--help", "pause", "status --json", "build --from-now", "status --json", "deliver --from-now", "status --json", "status --json"]);
+    // Neither clock is touched before the listener and the gateway are in place, and each is started just before its own job is stopped.
+    expect(run.order.filter((entry) => entry.startsWith("launchctl bootout") || entry.endsWith("--from-now"))).toEqual([
+      `launchctl bootout ${targetOf("listen")}`,
+      `launchctl bootout ${targetOf("crew")}`,
+      "overnight build --from-now",
+      `launchctl bootout ${targetOf("build")}`,
+      "overnight deliver --from-now",
+      `launchctl bootout ${targetOf("deliver")}`,
+    ]);
     const lines = run.stdout.split("\n");
     expect(lines.filter((line) => line.startsWith("Installed."))).toEqual([
       "Installed. Overnight now listens in the background and starts again at login.",
       "Installed. The Kiro Crew gateway now runs in the background and starts again at login (build sandbox: overnight, from Overnight's settings). It answers.",
-      "Installed. Overnight now builds approved ideas every day at 01:00.",
-      "Installed. Overnight now tests, publishes and delivers every day at 06:30, for a buzz on the wrist at 07:00.",
+      buildLine(),
+      deliverLine(),
     ]);
     // With the gateway installed alongside, there is nothing to remind about.
     expect(run.stdout).not.toContain("Note:");
@@ -1632,7 +1902,14 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
       expect(lines).toContain(title);
     }
     // What the installed tool then says about the night, read back the way the installer reads it.
-    expect(JSON.parse(overnight(run, "status", "--json"))).toMatchObject({ buildSandbox: "overnight", nightJobs: { build: true, deliver: true, crew: true }, gatewayAnswers: false, paused: true });
+    expect(JSON.parse(overnight(run, "status", "--json"))).toMatchObject({
+      buildSandbox: "overnight",
+      nightJobs: { build: true, deliver: true, crew: true },
+      gatewayAnswers: false,
+      paused: true,
+      jobsBelongHere: true,
+      nightClock: { tickSeconds: 60, build: { trigger: "timer", state: "done", fresh: true }, deliver: { trigger: "timer", state: "done", fresh: true } },
+    });
   }, 30_000);
 
   it("leaves every job that is not named exactly as it was", () => {
@@ -1670,14 +1947,232 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
     expect(run.kirocrew.filter((call) => call === "status")).toEqual([]);
   }, 30_000);
 
-  it("does not claim success when macOS does not list a calendar job after taking it", () => {
+  it("does not claim success when macOS does not list a night job after taking it", () => {
     const run = dryRun({ jobs: ["build"], mode: "not-listed" });
     expect(run.status).toBe(1);
     expect(run.stdout).not.toContain("Installed.");
     expect(run.stderr).toContain("install-agents: The settings file is in place, but macOS does not list the job, so it will not run at its time.");
-    // One look, not two: a calendar job is not expected to have a process to wait for.
-    expect(run.calls.map((call) => call.split(" ")[0])).toEqual(["bootout", "print", "enable", "bootstrap", "print", "print"]);
+    // One look after the start, not two, and no waiting for a look at the clock by a job that is not there.
+    expect(run.calls.map((call) => call.split(" ")[0])).toEqual(["print", "print", "bootout", "print", "enable", "bootstrap", "print", "print"]);
+    expect(run.cli).toEqual(["--help", "pause", "status --json", "build --from-now"]);
   }, 30_000);
+
+  // ---------- the night jobs' own clock ----------
+
+  it("does not claim success when a night job is in place but never looks at the clock: it waits 30 seconds, says so, and points at its status", () => {
+    for (const job of ["build", "deliver"] as const) {
+      const run = dryRun({ jobs: [job], mode: "never-looks" });
+      expect(run.status, job).toBe(1);
+      expect(run.stdout).not.toContain("Installed.");
+      expect(run.stderr).toBe(`install-agents: The job is in place, but it has not checked the time yet, so it may not be running. See: scripts/install-agents.sh status ${job}\n`);
+      // Its state is shown first, like any job that did not come up. The job itself is in place.
+      expect(run.stdout).toContain(`(${label(job)})`);
+      expect(run.stdout).toContain("  pid:             none (it wakes for a moment every minute)");
+      expect(plistAsJson(plistOf(run, job))).toEqual(nightPlist(run, job));
+      // A look every two seconds for 30 seconds, and no more.
+      expect(run.cli).toEqual(["--help", "pause", "status --json", `${job} --from-now`, ...Array.from({ length: 15 }, () => "status --json")]);
+      expect(clockOf(run, job)).toMatchObject({ checkedAt: null, state: "done" });
+    }
+
+    // A look the old copy made before it was stopped does not count for the new one.
+    const first = dryRun({ jobs: ["build"] });
+    expect(first.status).toBe(0);
+    const before = clockOf(first, "build")?.checkedAt;
+    expect(before).not.toBeNull();
+    const again = dryRun({ jobs: ["build"], into: first, mode: "never-looks" });
+    expect(again.status).toBe(1);
+    expect(again.stderr).toContain("install-agents: The job is in place, but it has not checked the time yet, so it may not be running.");
+    expect(clockOf(again, "build")?.checkedAt).toBe(before);
+    expect(again.cli.slice(first.cli.length).filter((call) => call === "status --json")).toHaveLength(16);
+  }, 120_000);
+
+  it("asks the real tool the way the job does, and takes its look at the clock for the first one", () => {
+    // The one place the real `build --if-due` is run. Its settings put the build's time six hours
+    // away, so there is nothing due and the look does nothing but write its own time down: no
+    // build, no lock, no log, nothing asked of the internet.
+    const run = dryRun({ jobs: ["listen"] });
+    expect(run.status).toBe(0);
+    const zone = "America/Boise";
+    const local = (at: Date) => new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(at);
+    const env = { PATH: `${NODE_DIR}:${BARE_PATH}`, HOME: run.home, OVERNIGHT_DATA_DIR: run.dataDir, KIROCREW_PORT: "9", TZ: zone, BUILD_TIME: local(new Date(Date.now() + 6 * 3_600_000)), DELIVER_TIME: local(new Date(Date.now() + 12 * 3_600_000)) };
+    const tool = (...args: string[]) => execFileSync(process.execPath, [ENTRY, ...args], { encoding: "utf8", timeout: 30_000, env, stdio: ["ignore", "pipe", "pipe"] });
+    expect(tool("build", "--from-now")).toMatch(/^The build clock starts from now: the next build is /);
+    const since = withScript('utc_now "$1"', [process.execPath]).trim();
+    const waiting = (job: string) =>
+      runScript(DRY_RUN, [path.join(scratch, "if-due calls.txt"), path.join(scratch, "if-due state"), "ok", scratch, path.join(path.dirname(run.home), "made-up .env"), run.dataDir, path.join(scratch, "if-due cli.txt"), "wait_for_first_check", process.execPath, job, since], {
+        PATH: `${NODE_DIR}:${BARE_PATH}`,
+        HOME: run.home,
+      }).status;
+    // Not yet: `--from-now` writes no look down.
+    expect(waiting("build")).toBe(1);
+    expect(tool("build", "--if-due")).toBe("");
+    expect(waiting("build")).toBe(0);
+    expect(waiting("deliver")).toBe(1);
+    // Nothing was built or logged by that look: no run is on record, and the build has no log yet.
+    expect(existsSync(path.join(run.dataDir, "logs", "build.log"))).toBe(false);
+    expect(JSON.parse(tool("status", "--json"))).toMatchObject({ nightClock: { build: { state: "done", lastRun: null } } });
+  }, 60_000);
+
+  it("changes nothing when the job's clock cannot be started from now: here a build holds the build lock", () => {
+    const first = dryRun({ jobs: ["build"] });
+    expect(first.status).toBe(0);
+    const before = { text: readFileSync(plistOf(first, "build"), "utf8"), changed: statSync(plistOf(first, "build")).mtimeMs, clock: clockOf(first, "build") };
+
+    // The lock a real `overnight build` holds while it builds, also one started by hand, which
+    // macOS knows nothing about. Held here by this test, and given back straight after.
+    const release = takeLock(buildLockFile({ root: first.dataDir }));
+    expect(release).not.toBeNull();
+    let again: DryRun;
+    try {
+      again = dryRun({ jobs: ["build"], into: first });
+    } finally {
+      release?.();
+    }
+    expect(again.status).toBe(1);
+    expect(again.stdout).not.toContain("Installed.");
+    // The tool's own refusal, then the installer's.
+    expect(again.stderr).toBe(
+      'A build is running right now on this data folder. Try again when it has finished. Nothing was changed.\ninstall-agents: Could not start the build job\'s clock ("overnight build --from-now" failed; its message is above). Nothing was changed.\n',
+    );
+    // Two looks at whether the job is at work, and then nothing: not stopped, not rewritten, not started.
+    expect(again.calls.slice(first.calls.length)).toEqual([`print ${targetOf("build")}`, `print ${targetOf("build")}`]);
+    expect(again.cli.slice(first.cli.length)).toEqual(["--help", "status --json", "build --from-now"]);
+    expect(readFileSync(plistOf(again, "build"), "utf8")).toBe(before.text);
+    expect(statSync(plistOf(again, "build")).mtimeMs).toBe(before.changed);
+    expect(clockOf(again, "build")).toEqual(before.clock);
+
+    // The delivery's lock is another one: with only that held, the build job installs.
+    const other = takeLock(deliverLockFile({ root: first.dataDir }));
+    try {
+      expect(dryRun({ jobs: ["build"], into: first }).status).toBe(0);
+    } finally {
+      other?.();
+    }
+  }, 60_000);
+
+  it("refuses to install or restart a night job that is at work, before anything is changed, and removes one all the same", () => {
+    const installed = dryRun({ jobs: [] });
+    expect(installed.status).toBe(0);
+    const snapshot = () => Object.fromEntries(JOBS.map((job) => [job, { text: readFileSync(plistOf(installed, job), "utf8"), changed: statSync(plistOf(installed, job)).mtimeMs }]));
+    const before = snapshot();
+    let seen = installed.calls.length;
+    let asked = installed.cli.length;
+    const busy = (action: "cmd_install" | "cmd_restart", jobs: Job[]) => dryRun({ jobs, into: installed, action, env: { DRY_BUSY_LOOKS: "all" } });
+
+    for (const [job, work] of [["build", "nightly build"], ["deliver", "morning delivery"]] as const) {
+      for (const [action, doing] of [["cmd_install", "installing"], ["cmd_restart", "restarting"]] as const) {
+        const run = busy(action, [job]);
+        expect(run.status, `${action} ${job}`).toBe(1);
+        expect(run.stderr).toBe(`install-agents: The ${work} is running right now, and ${doing} would cut it off. Run this again when it has finished. Nothing was changed.\n`);
+        // Two looks, two seconds apart, and nothing else asked of macOS.
+        expect(run.calls.slice(seen)).toEqual([`print ${targetOf(job)}`, `print ${targetOf(job)}`]);
+        // The clock was not started from now either.
+        expect(run.cli.slice(asked).filter((call) => call.endsWith("--from-now"))).toEqual([]);
+        seen = run.calls.length;
+        asked = run.cli.length;
+      }
+    }
+    // With every job named, the listener and the gateway are not touched either: a build that is
+    // going runs on that gateway.
+    for (const action of ["cmd_install", "cmd_restart"] as const) {
+      const run = busy(action, []);
+      expect(run.status, action).toBe(1);
+      expect(run.stderr).toContain("install-agents: The nightly build is running right now");
+      expect(run.stderr).toContain("Nothing was changed.");
+      expect(run.calls.slice(seen).filter((call) => !call.startsWith("print "))).toEqual([]);
+      seen = run.calls.length;
+    }
+    expect(snapshot()).toEqual(before);
+
+    // Its look at the clock, a moment every minute, is not work: seen once and gone two seconds later.
+    const moment = dryRun({ jobs: ["build"], into: installed, env: { DRY_BUSY_LOOKS: "1 3" } });
+    expect(moment.stderr).toBe("");
+    expect(moment.status).toBe(0);
+    seen = moment.calls.length;
+
+    // Found at work only when its turn comes, after the listener was done: said as it is.
+    const late = dryRun({ jobs: ["listen", "build"], into: installed, env: { DRY_BUSY_LOOKS: "2 3" } });
+    expect(late.status).toBe(1);
+    expect(late.stdout).toContain("Installed. Overnight now listens in the background and starts again at login.");
+    expect(late.stderr).toBe("install-agents: The nightly build is running right now, and installing would cut it off. Run this again when it has finished. The build job was left as it was (already done: listen).\n");
+    expect(late.calls.slice(seen).filter((call) => call.includes(label("build")))).toEqual([`print ${targetOf("build")}`, `print ${targetOf("build")}`, `print ${targetOf("build")}`]);
+    seen = late.calls.length;
+    // The same on a restart of every job: the listener and the gateway were started again by then.
+    const lateRestart = dryRun({ jobs: [], into: installed, action: "cmd_restart", env: { DRY_BUSY_LOOKS: "2 3" } });
+    expect(lateRestart.status).toBe(1);
+    expect(lateRestart.stdout.split("\n").filter((line) => line.startsWith("Restarted"))).toEqual(["Restarted: Overnight listener.", "Restarted: Kiro Crew gateway."]);
+    expect(lateRestart.stderr).toBe("install-agents: The nightly build is running right now, and restarting would cut it off. Run this again when it has finished. The build job was left as it was (already done: listen crew).\n");
+    expect(lateRestart.calls.slice(seen).filter((call) => call.startsWith("bootout"))).toEqual([`bootout ${targetOf("listen")}`, `bootout ${targetOf("crew")}`]);
+    seen = lateRestart.calls.length;
+
+    // Removing a job is how a run is stopped on purpose, so it is not refused.
+    const removed = dryRun({ jobs: ["build"], into: installed, action: "cmd_uninstall", env: { DRY_BUSY_LOOKS: "all" } });
+    expect(removed.status).toBe(0);
+    expect(removed.stdout).toBe("Removed. Overnight no longer builds at night. Saved data was not touched.\n");
+    expect(removed.calls.slice(seen)).toEqual([`bootout ${targetOf("build")}`, `print ${targetOf("build")}`]);
+    expect(existsSync(plistOf(removed, "build"))).toBe(false);
+  }, 120_000);
+
+  /** A build or deliver settings file the way Milestone 2's installer wrote one: on macOS's calendar. Made up, in that layout. */
+  const calendarPlist = (run: DryRun, job: "build" | "deliver", hour: number, minute: number) =>
+    [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+      "<!-- Made up for the tests, in the shape the older installer wrote. -->",
+      '<plist version="1.0">',
+      "<dict>",
+      `  <key>Label</key>\n  <string>${label(job)}</string>`,
+      `  <key>ProgramArguments</key>\n  <array>\n    <string>${NODE}</string>\n    <string>${ENTRY}</string>\n    <string>${job}</string>\n  </array>`,
+      `  <key>StartCalendarInterval</key>\n  <dict>\n    <key>Hour</key>\n    <integer>${hour}</integer>\n    <key>Minute</key>\n    <integer>${minute}</integer>\n  </dict>`,
+      "  <key>RunAtLoad</key>\n  <false/>",
+      `  <key>StandardOutPath</key>\n  <string>${run.dataDir}/logs/${job}.launchd.log</string>`,
+      "</dict>",
+      "</plist>",
+      "",
+    ].join("\n");
+
+  it("moves a job that is still on macOS's calendar to Overnight's own clock, and until then shows it for what it is", () => {
+    // A Mac as Milestone 2 left it: the job loaded, its settings file the calendar kind.
+    const old = dryRun({ jobs: ["build", "deliver"] });
+    expect(old.status).toBe(0);
+    writeFileSync(plistOf(old, "build"), calendarPlist(old, "build", 1, 0));
+    writeFileSync(plistOf(old, "deliver"), calendarPlist(old, "deliver", 6, 30));
+    expect(readJobTrigger("build", old.home)).toBe("calendar");
+
+    // Status says which kind each job is, and how to move it.
+    const shown = runScript(DRY_RUN, [path.join(scratch, "old calls.txt"), path.join(path.dirname(old.home), "job state"), "ok", scratch, path.join(path.dirname(old.home), "made-up .env"), old.dataDir, path.join(scratch, "old cli.txt"), "cmd_status", "build", "deliver"], {
+      PATH: `${NODE_DIR}:${BARE_PATH}`,
+      HOME: old.home,
+    });
+    expect(shown.status).toBe(0);
+    const lines = shown.stdout.split("\n");
+    expect(lines).toContain("  runs at:         01:00 every day, on macOS's calendar (the old way, which ran an hour late on Oct 11). Move it with: scripts/install-agents.sh install build");
+    expect(lines).toContain("  runs at:         06:30 every day, on macOS's calendar (the old way, which ran an hour late on Oct 11). Move it with: scripts/install-agents.sh install deliver");
+    expect(lines.filter((line) => line.startsWith("  pid:"))).toEqual(["  pid:             none (it runs at its time, not in between)", "  pid:             none (it runs at its time, not in between)"]);
+    expect(shown.stdout).not.toContain("wakes every:");
+
+    // A restart leaves it the kind it is: such a job is not started when loaded, so no look at the clock is waited for.
+    const seen = old.cli.length;
+    const restarted = dryRun({ jobs: ["build"], into: old, action: "cmd_restart" });
+    expect(restarted.stderr).toBe("");
+    expect(restarted.status).toBe(0);
+    expect(restarted.cli.slice(seen)).toEqual([]);
+    expect(restarted.stdout).toContain("  runs at:         01:00 every day, on macOS's calendar");
+    expect(readJobTrigger("build", restarted.home)).toBe("calendar");
+
+    // Install moves it: today's time is written down as handled before the calendar job is
+    // stopped, so the calendar and the timer never both have a claim on the same day.
+    const moved = dryRun({ jobs: ["build"], into: old });
+    expect(moved.stderr).toBe("");
+    expect(moved.status).toBe(0);
+    expect(moved.order.slice(restarted.order.length).filter((entry) => entry.startsWith("launchctl bootout") || entry.endsWith("--from-now"))).toEqual(["overnight build --from-now", `launchctl bootout ${targetOf("build")}`]);
+    expect(plistAsJson(plistOf(moved, "build"))).toEqual(nightPlist(moved, "build"));
+    expect(readJobTrigger("build", moved.home)).toBe("timer");
+    expect(clockOf(moved, "build")).toMatchObject({ state: "done", lastRun: null, trigger: "timer" });
+    // The deliver job was not named, and is still the calendar kind: half moved is a state the two can be in.
+    expect(readJobTrigger("deliver", moved.home)).toBe("calendar");
+    expect(readFileSync(plistOf(moved, "deliver"), "utf8")).toBe(calendarPlist(old, "deliver", 6, 30));
+  }, 120_000);
 
   it("removes one job and leaves the others in place and running", () => {
     const installed = dryRun({ jobs: [] });
@@ -1708,11 +2203,24 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
     const installed = dryRun({ jobs: ["listen", "build"] });
     let seen = installed.calls.length;
 
+    const plistBefore = readFileSync(plistOf(installed, "build"), "utf8");
     const one = dryRun({ jobs: ["build"], into: installed, action: "cmd_restart" });
+    expect(one.stderr).toBe("");
     expect(one.status).toBe(0);
+    // Is it at work (twice)? Stop it, start it, check macOS lists it, show its status.
     expect(one.calls.slice(seen)).toEqual(installCalls(one, "build"));
     expect(one.stdout.split("\n")[0]).toBe("Restarted: Overnight nightly build.");
-    seen = one.calls.length;
+    // A restart waits for the job's first look at the clock too, and asks the tool nothing else:
+    // the clock is left as it is, so a run that is due is still due.
+    expect(one.cli.slice(installed.cli.length)).toEqual(["status --json"]);
+    expect(readFileSync(plistOf(one, "build"), "utf8")).toBe(plistBefore);
+
+    // Started again, but it never looks at the clock: not called restarted.
+    const blind = dryRun({ jobs: ["build"], into: installed, action: "cmd_restart", mode: "never-looks" });
+    expect(blind.status).toBe(1);
+    expect(blind.stdout).not.toContain("Restarted:");
+    expect(blind.stderr).toBe("install-agents: The job is in place, but it has not checked the time yet, so it may not be running. See: scripts/install-agents.sh status build\n");
+    seen = blind.calls.length;
 
     const missing = dryRun({ jobs: ["crew"], into: installed, action: "cmd_restart" });
     expect(missing.status).toBe(1);
@@ -1754,4 +2262,237 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
     expect(silent.stderr).toContain("install-agents: The Kiro Crew gateway job is in place and has a process, but the gateway did not answer within 60 seconds");
     expect(silent.stderr).toContain(`${silent.dataDir}/logs/crew.launchd.log`);
   }, 60_000);
+});
+
+describe("spikes/10-night-clock.ts (its own tools only: no job is loaded, and nothing is asked of macOS's launchd)", () => {
+  // A made-up user number: these are only the words a call would be made of.
+  const target = (name: string) => `gui/501/${name}`;
+
+  it("refuses the four real jobs by name, whatever would be asked of macOS about them", () => {
+    expect([...REAL_LABELS].sort()).toEqual(["com.overnight.build", "com.overnight.crew", "com.overnight.deliver", "com.overnight.listen"]);
+    expect(REAL_LABELS).toEqual([JOB_LABEL, ...Object.values(NIGHT_JOB_LABELS)]);
+    for (const real of REAL_LABELS) {
+      expect(labelProblem(real), real).toContain("is one of the four real jobs");
+      expect(labelProblem(real.toUpperCase()), real).toContain("is one of the four real jobs");
+      for (const action of ["print", "bootout", "bootstrap"]) expect(launchctlProblem([action, target(real)], "/Users/someone"), `${action} ${real}`).toContain("is one of the four real jobs");
+      // A settings file named after a real job, wherever it lies.
+      expect(launchctlProblem(["bootstrap", "gui/501", `/made-up/scratch/spike/${real}.plist`], "/Users/someone"), real).toContain("is one of the four real jobs");
+      // Anywhere in the call, not only first.
+      expect(launchctlProblem(["print", target(SPIKE_LABELS.build), target(real)], "/Users/someone"), real).toContain("is one of the four real jobs");
+    }
+    // A job of Overnight's that does not exist yet would be one of the family too.
+    expect(labelProblem("com.overnight.dashboard")).toContain("the real jobs' family of names");
+    expect(labelProblem("com.example.other")).toBe('"com.example.other" is not one of this script\'s two throwaway jobs.');
+    expect(labelProblem("")).not.toBeNull();
+    // Its own two names are the only ones it takes, and they are not in the family.
+    for (const own of Object.values(SPIKE_LABELS)) {
+      expect(labelProblem(own), own).toBeNull();
+      expect(own.startsWith("com.overnight."), own).toBe(false);
+    }
+    expect(Object.keys(SPIKE_LABELS)).toEqual(["build", "deliver"]);
+  });
+
+  it("makes three kinds of launchctl call and no other, and never names a file among the installed settings files", () => {
+    const fakeHome = path.join(scratch, "spike home");
+    const agents = path.join(fakeHome, "Library", "LaunchAgents");
+    mkdirSync(agents, { recursive: true });
+    const own = target(SPIKE_LABELS.build);
+    const ownFile = path.join(scratch, "spike data", "spike", `${SPIKE_LABELS.deliver}.plist`);
+    expect(launchctlProblem(["print", own], fakeHome)).toBeNull();
+    expect(launchctlProblem(["bootout", own], fakeHome)).toBeNull();
+    expect(launchctlProblem(["bootstrap", "gui/501", ownFile], fakeHome)).toBeNull();
+    for (const action of ["kickstart", "disable", "enable", "remove", "unload", "load", "kill", "submit", ""]) {
+      expect(launchctlProblem([action, own], fakeHome), action).toContain("is not something this script does");
+    }
+    expect(launchctlProblem([], fakeHome)).not.toBeNull();
+    // The installed jobs' folder: by its own name, and through a link to it.
+    const refused = "That settings file is among the installed jobs' own (~/Library/LaunchAgents). This script never touches that folder.";
+    expect(launchctlProblem(["bootstrap", "gui/501", path.join(agents, `${SPIKE_LABELS.build}.plist`)], fakeHome)).toBe(refused);
+    const link = path.join(scratch, "spike link to agents");
+    if (lstatSync(link, { throwIfNoEntry: false }) === undefined) symlinkSync(agents, link);
+    expect(launchctlProblem(["bootstrap", "gui/501", path.join(link, `${SPIKE_LABELS.build}.plist`)], fakeHome)).toBe(refused);
+    // A word it cannot check stops the call, and so does a call that names no job at all.
+    expect(launchctlProblem(["print", "system/com.example.something"], fakeHome)).toContain("which this script does not know how to check");
+    expect(launchctlProblem(["bootstrap", "gui/501", "relative.plist"], fakeHome)).toContain("which this script does not know how to check");
+    expect(launchctlProblem(["bootout", "gui/501"], fakeHome)).toBe("The launchctl call names no job.");
+  });
+
+  it("refuses a real data folder however it is spelled, and anything inside or above one, inside the repo, or already in use", () => {
+    const fakeHome = path.join(scratch, "spike facts home");
+    const real = path.join(fakeHome, ".overnight");
+    const repo = path.join(scratch, "spike facts repo");
+    const fromEnv = path.join(scratch, "spike env data");
+    const fromJob = path.join(scratch, "spike job data");
+    for (const folder of [real, repo, fromEnv, fromJob]) mkdirSync(folder, { recursive: true });
+    const facts = { home: fakeHome, repo, envFileText: `# made up for this test\nOVERNIGHT_DATA_DIR=${fromEnv}\n`, jobFolders: [fromJob] };
+    const isReal = "OVERNIGHT_DATA_DIR is a real data folder, or inside one. This script only works on a scratch folder of its own.";
+
+    // The default one, the one the repo's .env names, the one an installed job names, and inside each.
+    for (const folder of [real, "~/.overnight", `${real}/`, path.join(real, "inside"), fromEnv, path.join(fromEnv, "a", "b"), fromJob, path.join(fromJob, "logs")]) {
+      expect(dataDirProblem(folder, facts), folder).toBe(isReal);
+    }
+    // Through a link, and by macOS's other name for the same place.
+    const link = path.join(scratch, "spike link to data");
+    if (lstatSync(link, { throwIfNoEntry: false }) === undefined) symlinkSync(real, link);
+    expect(dataDirProblem(link, facts)).toBe(isReal);
+    expect(dataDirProblem(path.join(link, "inside"), facts)).toBe(isReal);
+    const otherName = `/System/Volumes/Data${realpathSync(real)}`;
+    if (process.platform === "darwin" && existsSync(otherName)) expect(dataDirProblem(otherName, facts)).toBe(isReal);
+    // A real data folder that has not been made yet is refused by its place.
+    const fresh = { ...facts, home: path.join(scratch, "spike facts home not made") };
+    expect(dataDirProblem(path.join(fresh.home, ".overnight"), fresh)).toBe(isReal);
+
+    // Above one: the home folder itself.
+    for (const above of [fakeHome, "~", scratch]) expect(dataDirProblem(above, facts), above).toBe("OVERNIGHT_DATA_DIR has a real data folder inside it. This script only works on a scratch folder of its own.");
+    expect(dataDirProblem(path.join(repo, "data"), facts)).toBe("OVERNIGHT_DATA_DIR is inside the repo. Data never goes there: it could end up committed.");
+    expect(dataDirProblem(repo, facts)).toContain("is inside the repo");
+
+    for (const none of [undefined, "", "   "]) expect(dataDirProblem(none, facts)).toContain("OVERNIGHT_DATA_DIR is not set.");
+    for (const relative of ["scratch/data", "./data", "~someone/data"]) expect(dataDirProblem(relative, facts), relative).toBe("OVERNIGHT_DATA_DIR must be a full path, or start with ~/.");
+
+    // The measurement starts from an empty database: a folder with anything in it, or a file, will not do.
+    const inUse = "OVERNIGHT_DATA_DIR must be a new or an empty folder: the measurement starts from an empty database.";
+    const used = path.join(scratch, "spike used data");
+    mkdirSync(used, { recursive: true });
+    writeFileSync(path.join(used, "overnight.db"), "made up for this test\n");
+    expect(dataDirProblem(used, facts)).toBe(inUse);
+    expect(dataDirProblem(path.join(used, "overnight.db"), facts)).toBe(inUse);
+    const linkToEmpty = path.join(scratch, "spike link to empty");
+    const empty = path.join(scratch, "spike empty data");
+    mkdirSync(empty, { recursive: true });
+    if (lstatSync(linkToEmpty, { throwIfNoEntry: false }) === undefined) symlinkSync(empty, linkToEmpty);
+    expect(dataDirProblem(linkToEmpty, facts)).toBe(inUse);
+
+    // What it takes: a folder that is not there yet, or an empty one, of its own.
+    expect(dataDirProblem(path.join(scratch, "spike new data"), facts)).toBeNull();
+    expect(dataDirProblem(empty, facts)).toBeNull();
+    expect(dataDirProblem("~/.overnight-night-clock", facts)).toBeNull();
+    expect(existsSync(path.join(scratch, "spike new data"))).toBe(false);
+  });
+
+  it("sets the build's time a few whole minutes ahead, and the delivery's own time twelve hours from it", () => {
+    // 14:00:50 in Boise.
+    const now = new Date("2026-10-11T20:00:50.000Z");
+    const times = clockTimes(now, "America/Boise", 3);
+    expect(times).toEqual({ buildTime: "14:03", buildAt: new Date("2026-10-11T20:03:00.000Z"), deliverTime: "02:33" });
+    expect(clockMinus(times.deliverTime, DELIVER_LEAD_MINUTES)).toBe("02:03");
+    // As Overnight's own clock reads those two settings: the next build is at that minute, the next delivery twelve hours later.
+    const config = { timeZone: "America/Boise", buildTime: times.buildTime, deliverTime: times.deliverTime };
+    expect(nextSlotAt("build", now, config)).toEqual(times.buildAt);
+    expect(nextSlotAt("deliver", now, config)).toEqual(new Date(times.buildAt.getTime() + 12 * 3_600_000));
+    // Between two and three minutes away, never less than a whole minute: the first look has to come first.
+    expect(clockTimes(new Date("2026-10-11T20:00:00.000Z"), "America/Boise", 2).buildTime).toBe("14:02");
+    expect(clockTimes(new Date("2026-10-11T20:00:59.999Z"), "America/Boise", 2).buildTime).toBe("14:02");
+    // Around midnight, and in a zone that is not on the hour.
+    expect(clockTimes(new Date("2026-10-12T05:58:10.000Z"), "America/Boise", 3)).toMatchObject({ buildTime: "00:01", deliverTime: "12:31" });
+    expect(clockTimes(now, "Asia/Kolkata", 2)).toMatchObject({ buildTime: "01:32", deliverTime: "14:02" });
+    for (const bad of [0, 1, 61, 2.5, Number.NaN]) expect(() => clockTimes(now, "America/Boise", bad), String(bad)).toThrow("--minutes must be a whole number from 2 to 60");
+    expect(() => clockTimes(now, "Not/AZone", 3)).toThrow('"Not/AZone" is not a time zone this Mac knows.');
+  });
+
+  it("keeps away from the hours of the real night", () => {
+    const quiet = (time: string) => inQuietHours(new Date(`2026-10-11T${time}:00.000-06:00`), "America/Boise");
+    expect(["00:44", "00:45", "01:00", "02:29", "02:30", "06:14", "06:15", "06:30", "07:44", "07:45", "12:00", "23:59"].map(quiet)).toEqual([false, true, true, true, false, false, true, true, true, false, false, false]);
+  });
+
+  it("reads a sleep or a wake out of a line of macOS's power log, and nothing out of any other line", () => {
+    // Made-up lines in the layout `pmset -g log` prints.
+    expect(powerEvent("2026-10-11 14:59:51 -0600 Sleep               \tEntering Sleep state due to 'Clamshell Sleep':TCPKeepAlive=active Using AC (Charge:80%) 494 secs  ")).toEqual({
+      at: new Date("2026-10-11T20:59:51.000Z"),
+      text: "Sleep: Entering Sleep state due to 'Clamshell Sleep'",
+    });
+    expect(powerEvent("2026-10-11 15:08:05 -0600 Wake                \tDarkWake to FullWake from Deep Idle [CDNVA] : due to UserActivity Assertion Using AC (Charge:80%)")).toEqual({
+      at: new Date("2026-10-11T21:08:05.000Z"),
+      text: "Wake: DarkWake to FullWake from Deep Idle [CDNVA] due to UserActivity Assertion",
+    });
+    expect(powerEvent("2026-10-11 01:02:03 +0530 DarkWake            \tDarkWake from Deep Idle [CDN] : due to EC.LidOpen/Lid Open Using BATT (Charge:71%) 12 secs")).toEqual({
+      at: new Date("2026-10-10T19:32:03.000Z"),
+      text: "DarkWake: DarkWake from Deep Idle [CDN] due to EC.LidOpen/Lid Open",
+    });
+    // Other kinds of line name programs, and are not looked at.
+    for (const other of ["2026-10-11 14:59:51 -0600 Assertions          \tPID 123(a made-up program) Created PreventUserIdleSystemSleep", "2026-10-11 14:59:51 -0600 Notification        \tDisplay is turned off", "Time stamp                Domain              \tMessage", "not a line of that log", ""]) {
+      expect(powerEvent(other), other).toBeNull();
+    }
+    // Anything odd in the words is dropped, and they are cut to a length.
+    const long = powerEvent(`2026-10-11 14:59:51 -0600 Sleep \t${"<made-up> {words}; ".repeat(20)}`);
+    expect(long?.text).toMatch(/^Sleep: [A-Za-z0-9 '[\]._/-]{1,90}$/);
+  });
+
+  it("looks for the lines the tool itself writes: the build's summary, and the night clock's two messages", () => {
+    expect(buildSummary({ built: [], failed: [], skipped: SKIPPED_NOTHING_APPROVED })).toBe(NOTHING_APPROVED_LINE);
+    const clock = readFileSync(path.join(repoRoot(), "packages", "cli", "src", "commands", "night-tick.ts"), "utf8");
+    expect(clock).toContain(`"${STARTING_MESSAGE}"`);
+    expect(clock).toContain(`"${FIRST_CHECK_MESSAGE}"`);
+  });
+
+  (process.platform === "darwin" ? it : it.skip)("turns the installer's filled-in settings into the throwaway ones: the name is swapped, six settings are added, and nothing else changes", () => {
+    const node = process.execPath;
+    const dataDir = path.join(scratch, "spike data & <more>");
+    const fakeHome = path.join(dataDir, "spike", "home");
+    const without = (text: string) => text.replace(/<!--[\s\S]*?-->/g, "");
+    for (const job of ["build", "deliver"] as const) {
+      // The real template, filled in by the real installer function (nothing is installed).
+      const rendered = withScript('render_plist "$@"', [job, node, repoRoot(), dataDir, fakeHome]);
+      const options = { job, dataDir, timeZone: "America/Boise", buildTime: "14:03", deliverTime: "02:33" };
+      const expected = { ...options, node, home: fakeHome };
+      const text = throwawaySettings(rendered, options);
+      const file = path.join(scratch, `spike ${job}.plist`);
+      writeFileSync(file, text);
+      execFileSync("/usr/bin/plutil", ["-lint", file], { timeout: 15_000, stdio: "ignore" });
+      const settings = plistAsJson(file) as Record<string, unknown>;
+      expect(settings, job).toEqual({
+        Label: SPIKE_LABELS[job],
+        ProgramArguments: [node, ENTRY, job, "--if-due"],
+        WorkingDirectory: repoRoot(),
+        EnvironmentVariables: {
+          PATH: `${BARE_PATH}:${path.dirname(node)}:${fakeHome}/.local/bin`,
+          // A made-up home inside the scratch folder: no login is in the job's reach.
+          HOME: fakeHome,
+          OVERNIGHT_DATA_DIR: dataDir,
+          TZ: "America/Boise",
+          BUILD_TIME: "14:03",
+          DELIVER_TIME: "02:33",
+          PAUSED: "false",
+          // A port nothing listens on: the real gateway is never asked.
+          KIROCREW_PORT: "9",
+        },
+        StartInterval: NIGHT_TICK_SECONDS,
+        RunAtLoad: true,
+        ExitTimeOut: 60,
+        StandardOutPath: `${dataDir}/logs/${job}.launchd.log`,
+        StandardErrorPath: `${dataDir}/logs/${job}.launchd.log`,
+      });
+      expect(settingsProblem(settings, expected), job).toBeNull();
+      // The real job's name is nowhere in the settings themselves.
+      expect(without(text), job).not.toContain(label(job));
+      // Line for line the installer's text, but for the one name and the twelve added lines.
+      const before = rendered.split("\n");
+      const after = text.split("\n");
+      expect(after.filter((line) => !before.includes(line)), job).toHaveLength(13);
+      expect(before.filter((line) => !after.includes(line)), job).toEqual([`  <string>${label(job)}</string>`]);
+
+      // Each thing that would make it something else is named.
+      const environment = settings.EnvironmentVariables as Record<string, string>;
+      const wrong = (change: Record<string, unknown>) => settingsProblem({ ...settings, ...change }, expected);
+      expect(wrong({ Label: label(job) })).toBe("its job name is not the throwaway one");
+      expect(wrong({ ProgramArguments: [node, ENTRY, job] })).toBe(`it does not run "overnight ${job} --if-due"`);
+      expect(wrong({ StartInterval: 30 })).toBe("macOS would not wake it every 60 seconds");
+      expect(wrong({ RunAtLoad: false })).toBe("macOS would not start it when it is loaded");
+      expect(wrong({ StartCalendarInterval: { Hour: 1, Minute: 0 } })).toBe("it is on macOS's calendar, or kept alive");
+      expect(wrong({ KeepAlive: true })).toBe("it is on macOS's calendar, or kept alive");
+      expect(wrong({ StandardOutPath: "/made-up/real data/logs/build.launchd.log" })).toBe("what it prints would not go to the scratch folder");
+      expect(wrong({ EnvironmentVariables: { ...environment, HOME: "/Users/someone" } })).toBe("its environment is not the made-up home and the six added settings");
+      expect(wrong({ EnvironmentVariables: { ...environment, OVERNIGHT_DATA_DIR: "/Users/someone/.overnight" } })).toBe("its environment is not the made-up home and the six added settings");
+      expect(wrong({ EnvironmentVariables: { ...environment, KIROCREW_PORT: "5476" } })).toBe("its environment is not the made-up home and the six added settings");
+      expect(wrong({ EnvironmentVariables: { ...environment, PATH: `${fakeHome}/.local/bin:${BARE_PATH}` } })).toBe("its PATH is not the night jobs' own");
+      expect(settingsProblem(null, expected)).toBe("it is not a settings file");
+      expect(settingsProblem(settings, { ...expected, job: job === "build" ? "deliver" : "build" })).toBe("its job name is not the throwaway one");
+
+      // Text that is not shaped the way the installer writes it is not guessed at.
+      expect(() => throwawaySettings("<plist/>", options)).toThrow(`The filled-in ${job} settings do not name their job exactly once`);
+      expect(() => throwawaySettings(rendered.replace("<key>HOME</key>", "<key>NOT_HOME</key>"), options)).toThrow(`The filled-in ${job} settings do not give HOME exactly once`);
+      // The listener's settings are never taken for a night job's.
+      expect(() => throwawaySettings(withScript('render_plist "$@"', ["listen", node, repoRoot(), dataDir, fakeHome]), options)).toThrow("do not name their job exactly once");
+    }
+  });
 });

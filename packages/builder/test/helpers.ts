@@ -217,6 +217,8 @@ export class FakeCrew {
   /** Set to false to stand in for a Crew whose history cannot be written. */
   writeHistory = true;
   credits: number | null = 3.6;
+  /** The credits Crew records for a run that was cancelled. Null: it records none (not measured yet for the real one). */
+  creditsWhenCancelled: number | null = null;
   #nextId = 0x76be9f71;
   #running: Array<{ job: FakeCrewJob; marker: string; markerWritten: boolean; startedMs: number; endsAtMs: number }> = [];
   readonly #clock: Clock;
@@ -267,6 +269,7 @@ export class FakeCrew {
     rmSync(run.marker, { force: true });
     const row = { run_id: "e1b21a2415cf", job_id: run.job.id, trigger: "manual", started_at: run.startedMs / 1000, finished_at: this.#clock.ms() / 1000, status: "cancelled", error: "Cancelled by user" };
     appendFileSync(path.join(this.home, "cron-history", "_index.jsonl"), `${JSON.stringify(row)}\n`);
+    if (this.creditsWhenCancelled !== null) this.#writeUsage(run.job.id, this.creditsWhenCancelled);
     return 200;
   };
 
@@ -306,12 +309,15 @@ export class FakeCrew {
         const row = { run_id: "e1b21a2415cf", job_id: run.job.id, trigger: "manual", started_at: run.startedMs / 1000, finished_at: this.#clock.ms() / 1000, duration_ms: this.#clock.ms() - run.startedMs, status: this.historyStatus, summary: "made-up summary", error: "" };
         appendFileSync(path.join(this.home, "cron-history", "_index.jsonl"), `${JSON.stringify(row)}\n`);
       }
-      if (this.credits !== null) {
-        const day = new Date(this.#clock.ms()).toISOString().slice(0, 10);
-        mkdirSync(path.join(this.home, "usage", "tokens"), { recursive: true });
-        appendFileSync(path.join(this.home, "usage", "tokens", `${day}.jsonl`), `${JSON.stringify({ _type: "tokens", slot: `cron:${run.job.id}:1b0dad96`, model: "", credits: this.credits })}\n`);
-      }
+      if (this.credits !== null) this.#writeUsage(run.job.id, this.credits);
     }
+  }
+
+  /** One row in Crew's usage file for the day on the test clock, as Crew writes them. */
+  #writeUsage(jobId: string, credits: number): void {
+    const day = new Date(this.#clock.ms()).toISOString().slice(0, 10);
+    mkdirSync(path.join(this.home, "usage", "tokens"), { recursive: true });
+    appendFileSync(path.join(this.home, "usage", "tokens", `${day}.jsonl`), `${JSON.stringify({ _type: "tokens", slot: `cron:${jobId}:1b0dad96`, model: "", credits })}\n`);
   }
 
   isRunning(id: string): boolean {

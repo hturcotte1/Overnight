@@ -4,13 +4,15 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { deliver, DELIVER_ALREADY_RUNNING, DELIVER_ONE_LIMIT_MS, deliverLimitMs, deliverSummary, disposeQuietly } from "../src/commands/deliver.ts";
 import type { DeliverDeps } from "../src/commands/deliver.ts";
+import type { NightRunMarks } from "../src/commands/night-tick.ts";
+import { SLEPT_LINE } from "../src/sleep-watch.ts";
 import { STOP_EXIT_CODES, STOP_SIGNAL_NAMES } from "../src/stop-signals.ts";
 import { addIdea, at, capture, moveIdea, SAMPLE_IDEAS, testContext } from "./helpers.ts";
 import { LAST_RESORT_LINE } from "../src/last-resort.ts";
-import { aborted, collectingLogger, fakeDeliver, fakeLastResort, fakeLocks, fakeStopSignals, never } from "./night-fakes.ts";
+import { aborted, collectingLogger, fakeDeliver, fakeKeepAwake, fakeLastResort, fakeLocks, fakeMarks, fakeSleepWatch, fakeStopSignals, never } from "./night-fakes.ts";
 import type { DeliverFakes } from "./night-fakes.ts";
 
-function setUp(options: { env?: Record<string, string>; fakes?: DeliverFakes; locks?: ReturnType<typeof fakeLocks>; limitMs?: number; stopWaitMs?: number } = {}) {
+function setUp(options: { env?: Record<string, string>; fakes?: DeliverFakes; locks?: ReturnType<typeof fakeLocks>; limitMs?: number; stopWaitMs?: number; onRun?: NightRunMarks; keepAwake?: DeliverDeps["keepAwake"] } = {}) {
   const context = testContext(options.env);
   const out = capture();
   const err = capture();
@@ -21,6 +23,8 @@ function setUp(options: { env?: Record<string, string>; fakes?: DeliverFakes; lo
   const stop = fakeStopSignals({ waitMs: options.stopWaitMs });
   // The same for errors nobody caught: made up, and "ending the process" only notes the exit code.
   const lastResort = fakeLastResort();
+  // And for the Mac having slept: no timer is set, a test says when.
+  const sleep = fakeSleepWatch();
   const deps: DeliverDeps = {
     ...context,
     logger: log.logger,
@@ -30,9 +34,12 @@ function setUp(options: { env?: Record<string, string>; fakes?: DeliverFakes; lo
     writeError: err.write,
     watchStopSignals: stop.watch,
     watchLastResort: lastResort.watch,
+    watchForSleep: sleep.watch,
     limitMs: options.limitMs,
+    ...(options.onRun === undefined ? {} : { onRun: options.onRun }),
+    ...(options.keepAwake === undefined ? {} : { keepAwake: options.keepAwake }),
   };
-  return { context, out, err, log, fakes, locks, stop, lastResort, deps, run: () => deliver(deps) };
+  return { context, out, err, log, fakes, locks, stop, lastResort, sleep, deps, run: () => deliver(deps) };
 }
 
 describe("overnight deliver", () => {
@@ -70,6 +77,26 @@ describe("overnight deliver", () => {
     expect(deliverSummary({ delivered: ["idea_a"], failed: [], notified: [], stopped: true })).toBe(
       "This morning: 1 delivered (idea_a), 0 failed, 0 told about a failure. Stopped before the morning was done: the rest waits for the next run.",
     );
+  });
+
+  it("says when a page was pushed but not seen live: the link went out, and may not open for a few minutes", async () => {
+    expect(deliverSummary({ delivered: ["idea_a", "idea_b"], failed: [], notified: [], notSeenLive: ["idea_a"] })).toBe(
+      "This morning: 2 delivered (idea_a, idea_b), 0 failed, 0 told about a failure. 1 pushed but not seen live yet (idea_a): the link usually starts working a few minutes later.",
+    );
+    // Before the sentence about a morning that was cut short, and on one line whatever the ids hold.
+    expect(deliverSummary({ delivered: [], failed: [], notified: [], notSeenLive: ["idea_a", "idea\nb"], stopped: true })).toBe(
+      "This morning: 0 delivered, 0 failed, 0 told about a failure. 2 pushed but not seen live yet (idea_a, idea b): the link usually starts working a few minutes later. Stopped before the morning was done: the rest waits for the next run.",
+    );
+    expect(deliverSummary({ delivered: ["idea_a"], failed: [], notified: [], notSeenLive: [] })).toBe("This morning: 1 delivered (idea_a), 0 failed, 0 told about a failure.");
+
+    const t = setUp({ fakes: fakeDeliver({ run: () => ({ delivered: ["idea_a"], failed: [], notified: [], notSeenLive: ["idea_a"] }) }) });
+    expect(await t.run()).toBe(0);
+    expect(t.out.lines).toEqual(["This morning: 1 delivered (idea_a), 0 failed, 0 told about a failure. 1 pushed but not seen live yet (idea_a): the link usually starts working a few minutes later."]);
+    expect(t.log.lines.at(-1)).toMatchObject({ message: "overnight deliver finished", delivered: 1, notSeenLive: 1 });
+    // The count is in the log every morning, also when it is none.
+    const usual = setUp();
+    await usual.run();
+    expect(usual.log.lines.at(-1)).toMatchObject({ message: "overnight deliver finished", notSeenLive: 0 });
   });
 
   it("leaves the pause switch to the deliver step: paused or not, the morning is handed over", async () => {
@@ -213,6 +240,203 @@ describe("overnight deliver", () => {
     ).not.toThrow();
     expect(() => disposeQuietly({})).not.toThrow();
     expect(() => disposeQuietly(null)).not.toThrow();
+  });
+});
+
+describe("overnight deliver with the night clock's marks and a hold on the Mac's sleep", () => {
+  const stoppable = () => fakeDeliver({ run: async (deps) => (await aborted(deps.signal), { delivered: [], failed: [], notified: [], stopped: true }) });
+  const underWay = async (t: ReturnType<typeof setUp>) => {
+    await expect.poll(() => t.fakes.runDeps.length).toBe(1);
+  };
+  /** The same order list for the locks, the deliver step, the marks and the hold. */
+  function clocked(options: Parameters<typeof setUp>[0] = {}) {
+    const order: string[] = [];
+    const fakes = options.fakes ?? fakeDeliver();
+    fakes.order = order;
+    const marks = fakeMarks(order);
+    const awake = fakeKeepAwake(order);
+    const t = setUp({ ...options, fakes, locks: options.locks ?? fakeLocks({ order }), onRun: marks.marks, keepAwake: awake.keepAwake });
+    return { ...t, order, marks, awake };
+  }
+
+  it("marks the start once the Bee gateway is made and before any work, holds the Mac awake for the morning, and marks the end before the lock goes", async () => {
+    const t = clocked();
+    expect(await t.run()).toBe(0);
+    expect(t.order).toEqual(["lock deliver.lock", "load deliver", "create bee", "mark started", "keep awake", "runDeliver", "mark ended finished", "let sleep", "dispose bee", "release deliver.lock"]);
+    expect(t.awake.loggers).toEqual([t.log.logger]);
+    expect(t.awake.held()).toBe(0);
+  });
+
+  it("without them it runs as it always did: plain `overnight deliver` means now, and asks no clock", async () => {
+    const t = setUp();
+    expect(await t.run()).toBe(0);
+    expect(t.fakes.order).toEqual(["lock deliver.lock", "load deliver", "create bee", "runDeliver", "dispose bee", "release deliver.lock"]);
+  });
+
+  it("calls a morning finished whatever was delivered or failed, and cut short when the deliver step says it was stopped", async () => {
+    const usual = clocked({ fakes: fakeDeliver({ run: () => ({ delivered: ["idea_a"], failed: ["idea_b"], notified: ["idea_b"] }) }) });
+    expect(await usual.run()).toBe(0);
+    expect(usual.marks.ended).toEqual(["finished"]);
+    // The step came back early by itself, with no signal to this command: still not a finished morning.
+    const stoppedInside = clocked({ fakes: fakeDeliver({ run: () => ({ delivered: [], failed: [], notified: [], stopped: true }) }) });
+    expect(await stoppedInside.run()).toBe(0);
+    expect(stoppedInside.marks.ended).toEqual(["cut-short"]);
+  });
+
+  it("marks nothing and holds nothing when the morning never begins: lock held, lock unusable, packages will not load, stopped while loading", async () => {
+    const held = clocked({ locks: fakeLocks({ held: ["deliver.lock"] }) });
+    expect(await held.run()).toBe(1);
+    const broken = clocked({ locks: fakeLocks({ broken: ["deliver.lock"] }) });
+    expect(await broken.run()).toBe(1);
+    const noPackage = clocked();
+    noPackage.deps.loadFactories = () => Promise.reject(new Error("Cannot find package '@overnight/deliver'"));
+    expect(await noPackage.run()).toBe(1);
+    const stopped = clocked();
+    const load = stopped.deps.loadFactories;
+    stopped.deps.loadFactories = async () => {
+      stopped.stop.send("SIGTERM");
+      return load();
+    };
+    expect(await stopped.run()).toBe(143);
+    for (const t of [held, broken, noPackage, stopped]) {
+      expect(t.marks.started()).toBe(0);
+      expect(t.marks.ended).toEqual([]);
+      expect(t.order).not.toContain("keep awake");
+      expect(t.fakes.runDeps).toEqual([]);
+      expect(t.sleep.watching()).toBe(0);
+    }
+  });
+
+  it("delivers nothing when the start cannot be written down, and still stops the gateway and lets go of the lock", async () => {
+    const t = clocked();
+    t.deps.onRun = {
+      started: () => {
+        throw new Error("database is locked\n    at somewhere");
+      },
+      ended: (how) => void t.order.push(`mark ended ${how}`),
+    };
+    expect(await t.run()).toBe(1);
+    expect(t.fakes.runDeps).toEqual([]);
+    expect(t.order).toEqual(["lock deliver.lock", "load deliver", "create bee", "dispose bee", "release deliver.lock"]);
+    expect(t.err.lines).toEqual(['"overnight deliver" could not finish. database is locked']);
+  });
+
+  it("marks the morning cut short when it is stopped by a signal, throws, runs past its limit, or does not come back", async () => {
+    const signalled = clocked({ fakes: stoppable() });
+    const first = signalled.run();
+    await underWay(signalled);
+    signalled.stop.send("SIGTERM");
+    expect(await first).toBe(143);
+    const threw = clocked({
+      fakes: fakeDeliver({
+        run: () => {
+          throw new Error("the made-up deliver step fell over");
+        },
+      }),
+    });
+    expect(await threw.run()).toBe(1);
+    const tooLong = clocked({ fakes: fakeDeliver({ run: () => never() }), limitMs: 20 });
+    expect(await tooLong.run()).toBe(1);
+    const overdue = clocked({ fakes: fakeDeliver({ run: () => never() }), stopWaitMs: 30 });
+    const last = overdue.run();
+    await underWay(overdue);
+    overdue.stop.send("SIGINT");
+    expect(await last).toBe(130);
+    for (const t of [signalled, threw, tooLong, overdue]) {
+      expect(t.marks.ended).toEqual(["cut-short"]);
+      expect(t.order.slice(-4)).toEqual(["mark ended cut-short", "let sleep", "dispose bee", "release deliver.lock"]);
+      expect(t.awake.held()).toBe(0);
+    }
+  });
+
+  it("still stops the gateway and lets go of the lock when a mark, or the hold itself, throws on the way out", async () => {
+    const t = clocked();
+    t.deps.onRun = {
+      started: () => {},
+      ended: () => {
+        throw new Error("made-up: the end could not be written");
+      },
+    };
+    t.deps.keepAwake = () => ({
+      stop: () => {
+        throw new Error("made-up: the hold would not let go");
+      },
+    });
+    expect(await t.run()).toBe(0);
+    expect(t.order.slice(-2)).toEqual(["dispose bee", "release deliver.lock"]);
+  });
+});
+
+describe("overnight deliver and a Mac that slept through part of the morning", () => {
+  const stoppable = () => fakeDeliver({ run: async (deps) => (await aborted(deps.signal), { delivered: ["idea_a"], failed: [], notified: [], stopped: true }) });
+  const underWay = async (t: ReturnType<typeof setUp>) => {
+    await expect.poll(() => t.fakes.runDeps.length).toBe(1);
+  };
+
+  it("watches from the start of the morning to its end, and never fires by itself", async () => {
+    const t = setUp();
+    expect(await t.run()).toBe(0);
+    expect(t.sleep.started()).toBe(1);
+    expect(t.sleep.watching()).toBe(0);
+    expect(t.log.text()).not.toContain("went to sleep");
+  });
+
+  it("tells the deliver step to stop as a stop signal would, says so once in the log, marks the morning cut short, and exits 0", async () => {
+    const order: string[] = [];
+    const marks = fakeMarks(order);
+    const fakes = stoppable();
+    fakes.order = order;
+    const t = setUp({ fakes, locks: fakeLocks({ order }), onRun: marks.marks });
+    const running = t.run();
+    await underWay(t);
+    expect(t.fakes.runDeps[0]?.signal?.aborted).toBe(false);
+    t.sleep.fire(95_000);
+    expect(t.fakes.runDeps[0]?.signal?.aborted).toBe(true);
+    expect(await running).toBe(0);
+    expect(t.log.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: SLEPT_LINE, gapSeconds: 95 }]);
+    expect(t.log.lines.at(-1)).toMatchObject({ message: "overnight deliver finished", delivered: 1, stoppedBySleep: true });
+    expect(t.log.lines.at(-1)).not.toHaveProperty("stoppedBySignal");
+    expect(order).toEqual(["lock deliver.lock", "load deliver", "create bee", "mark started", "runDeliver", "mark ended cut-short", "dispose bee", "release deliver.lock"]);
+    expect(t.out.lines).toEqual(["This morning: 1 delivered (idea_a), 0 failed, 0 told about a failure. Stopped before the morning was done: the rest waits for the next run."]);
+    expect(t.err.lines).toEqual([]);
+    expect(t.stop.handlers()).toBe(0);
+  });
+
+  it("marks the morning cut short even if the deliver step comes back from it without saying it was stopped", async () => {
+    const marks = fakeMarks();
+    const t = setUp({ fakes: fakeDeliver({ run: async (deps) => (await aborted(deps.signal), { delivered: [], failed: [], notified: [] }) }), onRun: marks.marks });
+    const running = t.run();
+    await underWay(t);
+    t.sleep.fire();
+    expect(await running).toBe(0);
+    expect(marks.ended).toEqual(["cut-short"]);
+  });
+
+  it("starts nothing when the sleep is noticed while its packages are still loading: the slot stays due", async () => {
+    const marks = fakeMarks();
+    const t = setUp({ onRun: marks.marks });
+    const load = t.deps.loadFactories;
+    t.deps.loadFactories = async () => {
+      t.sleep.fire();
+      return load();
+    };
+    expect(await t.run()).toBe(0);
+    expect(t.fakes.runDeps).toEqual([]);
+    expect(marks.started()).toBe(0);
+    expect(t.fakes.order).toEqual(["lock deliver.lock", "load deliver", "release deliver.lock"]);
+  });
+
+  it("stops waiting for a deliver step that does not come back after it, says so, and exits 1", async () => {
+    const marks = fakeMarks();
+    const t = setUp({ fakes: fakeDeliver({ run: () => never() }), stopWaitMs: 30, onRun: marks.marks });
+    const running = t.run();
+    await underWay(t);
+    t.sleep.fire();
+    expect(await running).toBe(1);
+    expect(t.err.lines).toEqual(['"overnight deliver" was told to stop, and the deliver step had not stopped 20 seconds later. Ending anyway.']);
+    expect(t.log.lines.at(-1)).toMatchObject({ level: "error", message: "overnight deliver: the deliver step did not stop in time after the Mac's sleep was noticed; ending anyway" });
+    expect(marks.ended).toEqual(["cut-short"]);
+    expect(t.fakes.order.slice(-2)).toEqual(["dispose bee", "release deliver.lock"]);
   });
 });
 

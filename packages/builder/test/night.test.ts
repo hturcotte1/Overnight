@@ -1,12 +1,13 @@
 // Synthetic test data: all text in this file is made up for the tests. None of it is Bee data.
 // The night flow on an in-memory store, temp folders and scripted backends.
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { budgetReachedText, buildBudget, finishedBuildDir, HIGHEST_BUILD_CREDIT_LIMIT } from "@overnight/core";
 import type { Config, DataPaths, Store } from "@overnight/core";
-import { afterEach, describe, expect, it } from "vitest";
-import { buildOne, failInterruptedBuilds, INTERRUPTED_REASON, runBuildNight, SKIPPED_NOTHING_APPROVED, SKIPPED_PAUSED } from "../src/index.ts";
-import type { BuildDeps } from "../src/index.ts";
-import { approvedIdea, collectingLogger, fakeBackend, memoryStore, MINUTE, movableClock, T0, tempDir, testConfig, testPaths } from "./helpers.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildOne, failInterruptedBuilds, INTERRUPTED_REASON, runBuildNight, SKIPPED_NOTHING_APPROVED, SKIPPED_PAUSED, STOPPED_REASON } from "../src/index.ts";
+import type { BuildBackend, BuildDeps, BuildJob, BuildOutcome } from "../src/index.ts";
+import { approvedIdea, collectingLogger, fakeBackend, leaveBuild, memoryStore, MINUTE, movableClock, SECOND, T0, tempDir, testConfig, testPaths } from "./helpers.ts";
 import type { Clock, FakeBackend } from "./helpers.ts";
 
 interface Rig {
@@ -554,5 +555,432 @@ describe("the workspaces folder", () => {
     // Nothing was written through the link.
     expect(readdirSync(elsewhere)).toEqual([]);
     expect(rig.primary.jobs).toHaveLength(0);
+  });
+});
+
+describe("a finished build is moved out of the build jobs' reach", () => {
+  /** What the app's page says: tells one build from another. */
+  const page = (dir: string) => readFileSync(path.join(dir, "dist", "index.html"), "utf8");
+  /** A backend that builds an app whose page carries `mark`. */
+  const builds = (name: BuildBackend["name"], mark: string, during: (job: BuildJob) => void = () => {}) =>
+    fakeBackend(name, [
+      (job) => {
+        during(job);
+        leaveBuild(job.workspace);
+        writeFileSync(path.join(job.workspace, "dist", "index.html"), `<!doctype html><title>${mark}</title>`);
+        return { ok: true, backend: name, ms: 1 };
+      },
+    ]);
+
+  it("ends in built/<id>, with nothing left in workspaces/, as soon as the idea is recorded as built", async () => {
+    const rig = makeRig({ primary: builds("kiro-crew", "made tonight") });
+    const idea = approvedIdea(rig.store);
+    expect(await runBuildNight(rig.deps)).toEqual({ built: [idea.id], failed: [], skipped: "" });
+
+    const sealed = path.join(rig.paths.built, idea.id);
+    expect(page(sealed)).toContain("made tonight");
+    expect(readdirSync(sealed).sort()).toEqual(["BUILD_STATUS.json", "brief.md", "dist"]);
+    expect(readdirSync(rig.paths.workspaces)).toEqual([]);
+    // That is where the morning looks first.
+    expect(finishedBuildDir(rig.paths, idea.id)).toBe(sealed);
+    expect(rig.store.getIdea(idea.id)?.state).toBe("built");
+    expect(rig.lines.join("\n")).not.toContain("could not be moved");
+  });
+
+  it("is moved only after the idea is recorded as built: while the builder runs, the folder is the workspace", async () => {
+    let seenWhileBuilding: string[] = [];
+    const rig = makeRig({ primary: builds("kiro-crew", "made tonight", () => (seenWhileBuilding = readdirSync(rig.paths.built))) });
+    const idea = approvedIdea(rig.store);
+    await runBuildNight(rig.deps);
+    expect(seenWhileBuilding).toEqual([]);
+    expect(rig.primary.jobs[0]?.workspace).toBe(path.join(rig.paths.workspaces, idea.id));
+  });
+
+  it("seals the build that build-now made, too", async () => {
+    const rig = makeRig({ primary: builds("kiro-crew", "made by hand") });
+    const idea = approvedIdea(rig.store);
+    expect((await buildOne(idea.id, rig.deps)).ok).toBe(true);
+    expect(page(path.join(rig.paths.built, idea.id))).toContain("made by hand");
+    expect(existsSync(path.join(rig.paths.workspaces, idea.id))).toBe(false);
+  });
+
+  it("seals the other builder's result when the first one failed, and keeps the failed try's folder", async () => {
+    const rig = makeRig({ primary: fakeBackend("kiro-crew", ["failed"]), fallback: builds("kiro-cli", "made by the other builder") });
+    const idea = approvedIdea(rig.store);
+    expect((await runBuildNight(rig.deps)).built).toEqual([idea.id]);
+
+    expect(page(path.join(rig.paths.built, idea.id))).toContain("made by the other builder");
+    // The first try's folder was moved aside in workspaces/, as before: it is not a finished build.
+    const left = readdirSync(rig.paths.workspaces);
+    expect(left).toHaveLength(1);
+    expect(left[0]).toMatch(new RegExp(`^${idea.id}\\.old-`));
+    expect(readdirSync(rig.paths.built)).toEqual([idea.id]);
+  });
+
+  it("leaves a failed build in workspaces/: only a finished build is sealed", async () => {
+    const rig = makeRig({ primary: fakeBackend("kiro-crew", ["failed"]), fallback: null });
+    const idea = approvedIdea(rig.store);
+    expect((await runBuildNight(rig.deps)).failed).toEqual([idea.id]);
+    expect(readdirSync(rig.paths.built)).toEqual([]);
+    expect(readdirSync(rig.paths.workspaces)).toEqual([idea.id]);
+  });
+
+  it("moves an older finished build of the same idea aside before the new build starts, and never deletes it", async () => {
+    let sealedWhileBuilding: string[] | null = null;
+    const rig = makeRig({ primary: builds("kiro-crew", "the new build", () => (sealedWhileBuilding = readdirSync(rig.paths.built))) });
+    const idea = approvedIdea(rig.store);
+    // A finished build already kept under this idea's id (left by an earlier life of this data folder).
+    const older = path.join(rig.paths.built, idea.id);
+    mkdirSync(path.join(older, "dist"), { recursive: true });
+    writeFileSync(path.join(older, "dist", "index.html"), "<!doctype html><title>the older build</title>");
+
+    expect((await runBuildNight(rig.deps)).built).toEqual([idea.id]);
+    // 20261010T070000Z: the build night's own clock.
+    const aside = `${idea.id}.old-20261010T070000Z`;
+    // Already out of the way while the builder ran: the morning could not have picked it up in between.
+    expect(sealedWhileBuilding).toEqual([aside]);
+    expect(readdirSync(rig.paths.built).sort()).toEqual([idea.id, aside]);
+    expect(page(path.join(rig.paths.built, idea.id))).toContain("the new build");
+    expect(page(path.join(rig.paths.built, aside))).toContain("the older build");
+  });
+
+  it("does not start a try when the older finished build cannot be moved aside", async () => {
+    const rig = makeRig();
+    const idea = approvedIdea(rig.store);
+    const elsewhere = tempDir();
+    symlinkSync(elsewhere, path.join(rig.paths.built, idea.id));
+
+    expect(await runBuildNight(rig.deps)).toEqual({ built: [], failed: [idea.id], skipped: "" });
+    expect(rig.primary.jobs).toHaveLength(0);
+    expect(rig.fallback.jobs).toHaveLength(0);
+    expect(rig.store.getIdea(idea.id)).toMatchObject({
+      state: "build_failed",
+      failureReason: "Kiro Crew: the workspace folder could not be prepared. Kiro CLI: the workspace folder could not be prepared",
+    });
+    // No workspace was made, and nothing was written through the link.
+    expect(readdirSync(rig.paths.workspaces)).toEqual([]);
+    expect(readdirSync(elsewhere)).toEqual([]);
+    expect(lstatSync(path.join(rig.paths.built, idea.id)).isSymbolicLink()).toBe(true);
+    const errors = rig.lines.filter((line) => line.includes("could not move an older finished build aside, so the build was not started"));
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toContain('"level":"error"');
+    expect(errors[0]).toContain("a link stands where the idea's finished build is kept");
+  });
+
+  it("leaves the idea built, with an error in the log, when the finished build cannot be moved", async () => {
+    const elsewhere = tempDir();
+    // Something puts a link where the finished build goes, after the try began.
+    const rig = makeRig({ primary: builds("kiro-crew", "made tonight", (job) => symlinkSync(elsewhere, path.join(rig.paths.built, job.ideaId))) });
+    const idea = approvedIdea(rig.store);
+
+    expect(await runBuildNight(rig.deps)).toEqual({ built: [idea.id], failed: [], skipped: "" });
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "built", failureReason: null });
+    // The app stays where it was built, and that is where the morning finds it.
+    const workspace = path.join(rig.paths.workspaces, idea.id);
+    expect(page(workspace)).toContain("made tonight");
+    expect(finishedBuildDir(rig.paths, idea.id)).toBe(workspace);
+    expect(readdirSync(elsewhere)).toEqual([]);
+    const errors = rig.lines.filter((line) => line.includes("a finished build could not be moved out of the builders' reach; the morning uses it where it is"));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('"level":"error"');
+    expect(errors[0]).toContain(`"ideaId":"${idea.id}"`);
+  });
+});
+
+/** October 2026 in Boise, the month every test below runs in unless it says otherwise. */
+const OCTOBER = { start: "2026-10-01T06:00:00.000Z", end: "2026-11-01T06:00:00.000Z" };
+const NOVEMBER = { start: "2026-11-01T06:00:00.000Z", end: "2026-12-01T07:00:00.000Z" };
+const counted = (store: Store, month = OCTOBER) => store.buildCreditsBetween(month.start, month.end);
+
+/** A backend whose tries have a cost: each answer is spread over a built or a failed outcome. */
+function costly(name: BuildBackend["name"], answers: Array<{ ok: boolean; credits?: number; agentMs?: number; reason?: string; couldNotStart?: boolean }>, clock?: Clock): FakeBackend {
+  let call = 0;
+  return fakeBackend(name, [
+    (job): BuildOutcome => {
+      const { ok, reason, couldNotStart, ...cost } = answers[Math.min(call, answers.length - 1)] ?? { ok: true };
+      call += 1;
+      // The agent's time passes on the night's own clock.
+      if (clock !== undefined && cost.agentMs !== undefined) clock.advance(cost.agentMs);
+      if (!ok) return { ok: false, backend: name, ms: 55, reason: reason ?? "the builder reported that the build failed", couldNotStart: couldNotStart ?? false, ...cost };
+      leaveBuild(job.workspace);
+      return { ok: true, backend: name, ms: 1234, ...cost };
+    },
+  ]);
+}
+
+describe("what builds cost: one row in the month's ledger for each try that started an agent", () => {
+  it("counts the builder's own figure when it gave one", async () => {
+    const rig = makeRig({ primary: costly("kiro-crew", [{ ok: true, credits: 3.6, agentMs: 2 * MINUTE }]) });
+    const idea = approvedIdea(rig.store);
+    expect((await runBuildNight(rig.deps)).built).toEqual([idea.id]);
+    expect(counted(rig.store)).toEqual({ credits: 3.6, estimated: 0, tries: 1 });
+    const line = rig.lines.map((entry) => JSON.parse(entry) as Record<string, unknown>).find((entry) => entry.message === "build try counted");
+    expect(line).toMatchObject({ level: "info", ideaId: idea.id, backend: "kiro-crew", credits: 3.6, measured: true });
+  });
+
+  it("counts an estimate from how long the agent ran when the builder gave no figure: 2 credits a minute", async () => {
+    const rig = makeRig({ primary: costly("kiro-cli", [{ ok: true, agentMs: 7 * MINUTE + 30 * SECOND }]), fallback: null });
+    approvedIdea(rig.store);
+    await runBuildNight(rig.deps);
+    expect(counted(rig.store)).toEqual({ credits: 15, estimated: 15, tries: 1 });
+  });
+
+  it("counts a try that failed, ran out of time or was stopped: it used credits too", async () => {
+    const rig = makeRig({
+      config: { MAX_BUILDS_PER_NIGHT: "5" },
+      primary: costly("kiro-crew", [
+        { ok: false, credits: 2.5, agentMs: 3 * MINUTE },
+        { ok: false, agentMs: 45 * MINUTE, reason: "the build ran past its time limit of 45 minutes" },
+        { ok: false, agentMs: 20 * SECOND, reason: STOPPED_REASON },
+      ]),
+      fallback: null,
+    });
+    approvedIdea(rig.store, { title: "App A", approvedAt: "2026-10-09T17:00:00.000Z" });
+    approvedIdea(rig.store, { title: "App B", approvedAt: "2026-10-09T18:00:00.000Z" });
+    approvedIdea(rig.store, { title: "App C", approvedAt: "2026-10-09T19:00:00.000Z" });
+    expect((await runBuildNight(rig.deps)).failed).toHaveLength(3);
+    // 2.5 measured, then 90 and 0.7 estimated.
+    expect(counted(rig.store)).toEqual({ credits: 93.2, estimated: 90.7, tries: 3 });
+  });
+
+  it("writes two rows when the other builder ran as well, each under its own builder's figure", async () => {
+    const rig = makeRig({ primary: costly("kiro-crew", [{ ok: false, credits: 1.25, agentMs: 4 * MINUTE }]), fallback: costly("kiro-cli", [{ ok: true, agentMs: 90 * SECOND }]) });
+    const idea = approvedIdea(rig.store);
+    expect((await runBuildNight(rig.deps)).built).toEqual([idea.id]);
+    expect(counted(rig.store)).toEqual({ credits: 4.25, estimated: 3, tries: 2 });
+    const tries = rig.lines.map((entry) => JSON.parse(entry) as Record<string, unknown>).filter((entry) => entry.message === "build try counted");
+    expect(tries.map((entry) => [entry.backend, entry.credits, entry.measured])).toEqual([
+      ["kiro-crew", 1.25, true],
+      ["kiro-cli", 3, false],
+    ]);
+  });
+
+  it("writes no row for a try that started no agent", async () => {
+    // Neither builder could start; then a try whose workspace could not even be made; then a night stopped before it began.
+    const neither = makeRig({ primary: fakeBackend("kiro-crew", ["cannot-start"]), fallback: fakeBackend("kiro-cli", ["cannot-start"]) });
+    approvedIdea(neither.store);
+    expect((await runBuildNight(neither.deps)).failed).toHaveLength(1);
+    expect(counted(neither.store)).toEqual({ credits: 0, estimated: 0, tries: 0 });
+
+    const noWorkspace = makeRig({ primary: costly("kiro-crew", [{ ok: true, credits: 3 }]) });
+    approvedIdea(noWorkspace.store);
+    rmSync(noWorkspace.paths.workspaces, { recursive: true });
+    writeFileSync(noWorkspace.paths.workspaces, "in the way");
+    expect((await runBuildNight(noWorkspace.deps)).failed).toHaveLength(1);
+    expect(counted(noWorkspace.store).tries).toBe(0);
+
+    const signedOut = makeRig({ primary: costly("kiro-crew", [{ ok: true, credits: 3 }]) });
+    signedOut.deps.renewSignIn = async () => ({ ok: false, reason: "Kiro is signed out on this Mac (to fix it, run: kiro-cli login)" });
+    approvedIdea(signedOut.store);
+    await runBuildNight(signedOut.deps);
+    expect(counted(signedOut.store).tries).toBe(0);
+    expect([neither, noWorkspace, signedOut].flatMap((rig) => rig.lines).filter((line) => line.includes("build try counted"))).toEqual([]);
+  });
+
+  it("counts a try in the month it ended in", async () => {
+    const rig = makeRig({ fallback: null });
+    // 11:50 pm on Oct 31 in Boise; the agent runs for twenty minutes, into November.
+    rig.clock.set("2026-11-01T05:50:00.000Z");
+    rig.deps.backends.primary = costly("kiro-crew", [{ ok: true, credits: 4, agentMs: 20 * MINUTE }], rig.clock);
+    approvedIdea(rig.store);
+    expect((await runBuildNight(rig.deps)).built).toHaveLength(1);
+    expect(counted(rig.store, OCTOBER).tries).toBe(0);
+    expect(counted(rig.store, NOVEMBER)).toEqual({ credits: 4, estimated: 0, tries: 1 });
+  });
+
+  it("does not fail a build when the ledger cannot be written: the result stands and the error is logged", async () => {
+    const rig = makeRig({ primary: costly("kiro-crew", [{ ok: true, credits: 3.6, agentMs: 2 * MINUTE }]) });
+    const idea = approvedIdea(rig.store);
+    const write = vi.spyOn(rig.store, "recordBuildCost").mockImplementation(() => {
+      throw new Error("made-up ledger failure");
+    });
+    expect(await runBuildNight(rig.deps)).toEqual({ built: [idea.id], failed: [], skipped: "" });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(rig.store.getIdea(idea.id)?.state).toBe("built");
+    expect(rig.fallback.jobs).toHaveLength(0);
+    const errors = rig.lines.filter((line) => line.includes("could not record what a build try cost; the build's result stands"));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('"level":"error"');
+    expect(rig.lines.join("\n")).not.toContain("build try counted");
+  });
+
+  it("does not believe a figure no build could have used, and counts the estimate in its place", async () => {
+    for (const figure of [-1, Number.NaN, Number.POSITIVE_INFINITY, HIGHEST_BUILD_CREDIT_LIMIT + 0.5, 1e306]) {
+      // The figure comes from a file a build job can write.
+      const rig = makeRig({ primary: costly("kiro-crew", [{ ok: true, credits: figure, agentMs: 3 * MINUTE }]) });
+      const idea = approvedIdea(rig.store);
+      expect((await runBuildNight(rig.deps)).built, String(figure)).toEqual([idea.id]);
+      expect(counted(rig.store), String(figure)).toEqual({ credits: 6, estimated: 6, tries: 1 });
+      expect(rig.lines.filter((line) => line.includes("was not one a build could have used; counting an estimate instead")), String(figure)).toHaveLength(1);
+    }
+    // The highest figure the ledger takes is believed.
+    const atTheTop = makeRig({ primary: costly("kiro-crew", [{ ok: true, credits: HIGHEST_BUILD_CREDIT_LIMIT, agentMs: MINUTE }]) });
+    approvedIdea(atTheTop.store);
+    await runBuildNight(atTheTop.deps);
+    expect(counted(atTheTop.store)).toEqual({ credits: HIGHEST_BUILD_CREDIT_LIMIT, estimated: 0, tries: 1 });
+
+    // With no time to estimate from either, nothing is counted, and the log says so.
+    const nothingToGoOn = makeRig({ primary: costly("kiro-crew", [{ ok: true, credits: -1 }]) });
+    approvedIdea(nothingToGoOn.store);
+    expect((await runBuildNight(nothingToGoOn.deps)).built).toHaveLength(1);
+    expect(counted(nothingToGoOn.store).tries).toBe(0);
+    expect(nothingToGoOn.lines.filter((line) => line.includes("could not count what a build try cost"))).toHaveLength(1);
+  });
+});
+
+describe("the month's ceiling on build credits (MAX_BUILD_CREDITS_PER_MONTH)", () => {
+  /** Put credits in the ledger as if an earlier build had used them. The idea they belong to is not one that waits for a build. */
+  function used(rig: Rig, credits: number, at = "2026-10-05T07:10:00.000Z"): string {
+    const heardAt = "2026-10-04T22:00:00.000Z";
+    const earlier = rig.store.createIdea({ title: "Built earlier", pitch: "p", quote: "q", confidence: 0.9, conversationKey: rig.store.resolveConversation({ uuid: `conv-earlier-${at}` }, heardAt).key, detectorRunId: null }, heardAt);
+    rig.store.recordBuildCost({ ideaId: earlier.id, at, backend: "kiro-crew", credits, measured: true });
+    return earlier.id;
+  }
+
+  it("says where the month stands on the night's first log line", async () => {
+    const rig = makeRig({ config: { MAX_BUILD_CREDITS_PER_MONTH: "250" } });
+    used(rig, 12.3);
+    await runBuildNight(rig.deps);
+    const started = rig.lines.map((entry) => JSON.parse(entry) as Record<string, unknown>).find((entry) => entry.message === "build night started");
+    expect(started).toMatchObject({ approved: 0, retries: 0, limit: 2, building: 0, creditsThisMonth: 12.3, creditLimit: 250 });
+  });
+
+  it("builds nothing and moves no idea once the month's credits are used up, and says why in core's words", async () => {
+    const rig = makeRig();
+    used(rig, 412.3);
+    const idea = approvedIdea(rig.store);
+    const before = rig.store.getIdea(idea.id);
+
+    const result = await runBuildNight(rig.deps);
+    expect(result).toEqual({
+      built: [],
+      failed: [],
+      skipped: "this month's build credits are used up (412.3 of 400 counted): approved ideas wait until Nov 1, or until MAX_BUILD_CREDITS_PER_MONTH in .env is raised",
+    });
+    expect(result.skipped).toBe(budgetReachedText(buildBudget(rig.store, rig.config, rig.clock.now()), rig.config.timeZone));
+    expect(rig.primary.jobs).toHaveLength(0);
+    expect(rig.fallback.jobs).toHaveLength(0);
+    // Not a state change, not a slug, not a folder: the idea waits exactly as it was.
+    expect(rig.store.getIdea(idea.id)).toEqual(before);
+    expect(readdirSync(rig.paths.workspaces)).toEqual([]);
+    expect(counted(rig.store).tries).toBe(1);
+    const warned = rig.lines.map((entry) => JSON.parse(entry) as Record<string, unknown>).find((entry) => entry.message === "build night stopped early: the month's ceiling on build credits is reached");
+    expect(warned).toMatchObject({ level: "warn", built: 0, failed: 0, creditsThisMonth: 412.3, creditLimit: 400 });
+  });
+
+  it("is reached at exactly the limit, and not one tenth of a credit before", async () => {
+    const at = makeRig({ config: { MAX_BUILD_CREDITS_PER_MONTH: "50" } });
+    used(at, 50);
+    approvedIdea(at.store);
+    expect((await runBuildNight(at.deps)).built).toEqual([]);
+    expect(at.primary.jobs).toHaveLength(0);
+
+    const under = makeRig({ config: { MAX_BUILD_CREDITS_PER_MONTH: "50" } });
+    used(under, 49.9);
+    const idea = approvedIdea(under.store);
+    expect((await runBuildNight(under.deps)).built).toEqual([idea.id]);
+  });
+
+  it("is asked before each idea and never during one: the build that takes the month over the line finishes, the next one waits", async () => {
+    const rig = makeRig({ config: { MAX_BUILD_CREDITS_PER_MONTH: "5", MAX_BUILDS_PER_NIGHT: "5" }, primary: costly("kiro-crew", [{ ok: true, credits: 6.5, agentMs: 3 * MINUTE }]) });
+    const first = approvedIdea(rig.store, { title: "App A", approvedAt: "2026-10-09T17:00:00.000Z" });
+    const second = approvedIdea(rig.store, { title: "App B", approvedAt: "2026-10-09T18:00:00.000Z" });
+    const third = approvedIdea(rig.store, { title: "App C", approvedAt: "2026-10-09T19:00:00.000Z" });
+
+    const result = await runBuildNight(rig.deps);
+    expect(result.built).toEqual([first.id]);
+    expect(result.failed).toEqual([]);
+    expect(result.skipped).toBe("this month's build credits are used up (6.5 of 5 counted): approved ideas wait until Nov 1, or until MAX_BUILD_CREDITS_PER_MONTH in .env is raised");
+    expect(rig.primary.jobs.map((job) => job.ideaId)).toEqual([first.id]);
+    for (const waiting of [second, third]) expect(rig.store.getIdea(waiting.id)).toMatchObject({ state: "approved", slug: null });
+
+    // The next month they are built.
+    rig.clock.set("2026-11-01T08:00:00.000Z");
+    expect((await runBuildNight(rig.deps)).built).toEqual([second.id]);
+  });
+
+  it("does not count last month's credits, or next month's", async () => {
+    const rig = makeRig({ config: { MAX_BUILD_CREDITS_PER_MONTH: "10" } });
+    // The last moment of September in Boise, and the first of November.
+    used(rig, 500, "2026-10-01T05:59:59.999Z");
+    used(rig, 500, "2026-11-01T06:00:00.000Z");
+    const idea = approvedIdea(rig.store);
+    expect((await runBuildNight(rig.deps)).built).toEqual([idea.id]);
+  });
+
+  it("never builds when the limit is 0, and says that the setting is why", async () => {
+    const rig = makeRig({ config: { MAX_BUILD_CREDITS_PER_MONTH: "0" } });
+    const idea = approvedIdea(rig.store);
+    const result = await runBuildNight(rig.deps);
+    expect(result).toEqual({ built: [], failed: [], skipped: "MAX_BUILD_CREDITS_PER_MONTH in .env is 0, so nothing is built: approved ideas wait until it is raised" });
+    expect(rig.primary.jobs).toHaveLength(0);
+    expect(rig.store.getIdea(idea.id)?.state).toBe("approved");
+    expect(await buildOne(idea.id, rig.deps)).toMatchObject({ ok: false, couldNotStart: true, reason: result.skipped });
+  });
+
+  it("says nothing about the month when nothing is waiting, or when the night's own limit already stops it", async () => {
+    const nothing = makeRig();
+    used(nothing, 412.3);
+    expect((await runBuildNight(nothing.deps)).skipped).toBe(SKIPPED_NOTHING_APPROVED);
+
+    const full = makeRig({ config: { MAX_BUILDS_PER_NIGHT: "0" } });
+    used(full, 412.3);
+    approvedIdea(full.store);
+    expect((await runBuildNight(full.deps)).skipped).toBe("1 approved idea waits for another night (limit 0 a night)");
+  });
+
+  it("builds anyway when the ledger cannot be read, and logs the error: a fault in the ceiling must not cost a night", async () => {
+    const rig = makeRig({ config: { MAX_BUILDS_PER_NIGHT: "5" } });
+    used(rig, 412.3);
+    const first = approvedIdea(rig.store, { title: "App A", approvedAt: "2026-10-09T17:00:00.000Z" });
+    const second = approvedIdea(rig.store, { title: "App B", approvedAt: "2026-10-09T18:00:00.000Z" });
+    const read = vi.spyOn(rig.store, "buildCreditsBetween").mockImplementation(() => {
+      throw new Error("made-up ledger failure");
+    });
+
+    expect(await runBuildNight(rig.deps)).toEqual({ built: [first.id, second.id], failed: [], skipped: "" });
+    // Once for the night's first line (which then serves the first idea), once before the second idea.
+    expect(read).toHaveBeenCalledTimes(2);
+    const errors = rig.lines.map((entry) => JSON.parse(entry) as Record<string, unknown>).filter((entry) => entry.message === "could not read the build budget; building anyway");
+    expect(errors).toHaveLength(2);
+    expect(errors[0]).toMatchObject({ level: "error", error: "made-up ledger failure" });
+    // The first line leaves the figure out and still names the limit.
+    const started = rig.lines.map((entry) => JSON.parse(entry) as Record<string, unknown>).find((entry) => entry.message === "build night started");
+    expect(started).toMatchObject({ creditLimit: 400 });
+    expect(started).not.toHaveProperty("creditsThisMonth");
+  });
+
+  it("build-now refuses with the same sentence, and starts nothing", async () => {
+    const rig = makeRig();
+    used(rig, 412.3);
+    const idea = approvedIdea(rig.store);
+    const outcome = await buildOne(idea.id, rig.deps);
+    expect(outcome).toEqual({
+      ok: false,
+      backend: "kiro-crew",
+      ms: 0,
+      reason: "this month's build credits are used up (412.3 of 400 counted): approved ideas wait until Nov 1, or until MAX_BUILD_CREDITS_PER_MONTH in .env is raised",
+      couldNotStart: true,
+    });
+    expect(rig.primary.jobs).toHaveLength(0);
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "approved", slug: null });
+    expect(rig.lines.join("\n")).toContain("build-now refused: the month's ceiling on build credits is reached");
+  });
+
+  it("build-now says paused before it says anything about the month, and builds when the ledger cannot be read", async () => {
+    const paused = makeRig();
+    used(paused, 412.3);
+    const waiting = approvedIdea(paused.store);
+    paused.store.setPaused(true, paused.clock.iso());
+    expect(await buildOne(waiting.id, paused.deps)).toMatchObject({ ok: false, reason: expect.stringContaining("paused") });
+
+    const rig = makeRig();
+    used(rig, 412.3);
+    const idea = approvedIdea(rig.store);
+    vi.spyOn(rig.store, "buildCreditsBetween").mockImplementation(() => {
+      throw new Error("made-up ledger failure");
+    });
+    expect(await buildOne(idea.id, rig.deps)).toMatchObject({ ok: true, backend: "kiro-crew" });
+    expect(rig.lines.join("\n")).toContain("could not read the build budget; building anyway");
   });
 });

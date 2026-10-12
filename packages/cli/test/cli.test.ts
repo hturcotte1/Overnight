@@ -3,8 +3,8 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ConfigError, dataPaths, parseConfig, silentLogger } from "@overnight/core";
-import type { BeeGateway, LoginState } from "@overnight/core";
+import { closedRun, ConfigError, currentSlot, dataPaths, noteChecked, noticedRun, parseConfig, readCheckedAt, readLastNightRun, readNightRun, silentLogger, startedRun, writeNightRun } from "@overnight/core";
+import type { BeeGateway, ClockedJob, LoginState } from "@overnight/core";
 import { readListenerState } from "../src/background.ts";
 import { processIo, runCli } from "../src/cli.ts";
 import type { CliIo } from "../src/cli.ts";
@@ -19,20 +19,22 @@ import { PAUSED_QUEUE_NOTE } from "../src/commands/queue.ts";
 import { openContext, repoRoot } from "../src/context.ts";
 import type { Context } from "../src/context.ts";
 import { watchLastResort } from "../src/last-resort.ts";
-import { takeListenLock, takeLock } from "../src/single-instance.ts";
+import { lockHeld, takeListenLock, takeLock } from "../src/single-instance.ts";
+import { watchForSleep } from "../src/sleep-watch.ts";
 import { watchStopSignals } from "../src/stop-signals.ts";
 import { USAGE } from "../src/usage.ts";
 import { realDeliverSteps } from "../src/wiring.ts";
-import { addIdea, at, capture, fixedNow, moveIdea, SAMPLE_IDEAS, testContext } from "./helpers.ts";
-import { aborted, fakeBuild, fakeDeliver, fakeLastResort, fakeLocks, fakeStopSignals } from "./night-fakes.ts";
+import { addIdea, at, capture, fixedNow, moveIdea, NOON, SAMPLE_IDEAS, testContext } from "./helpers.ts";
+import { aborted, collectingLogger, fakeBuild, fakeDeliver, fakeKeepAwake, fakeLastResort, fakeLocks, fakeSleepWatch, fakeStopSignals } from "./night-fakes.ts";
 
 /**
  * A command line whose every outside part is a fake. `open`, the Bee check, the listener parts,
  * the builder, the deliver step, the locks, the look at the Kiro Crew gateway and preflight's
  * questions fail the test if a command reaches for them without the test having offered them.
  * The look at the real lock file and the real ~/Library/LaunchAgents is faked too, and stop
- * signals and errors nobody caught are made-up ones: no real one is listened to. A rehearsal is
- * refused unless the test allows it. `settings` are the test's own.
+ * signals and errors nobody caught are made-up ones: no real one is listened to. Nothing really
+ * holds the Mac awake, sets a timer to watch for its sleep, asks the internet or waits. A
+ * rehearsal is refused unless the test allows it. `settings` are the test's own.
  */
 function harness(overrides: Partial<CliIo> = {}, settings: Record<string, string> = {}) {
   const out = capture();
@@ -40,6 +42,8 @@ function harness(overrides: Partial<CliIo> = {}, settings: Record<string, string
   const context = testContext(settings);
   // The command line closes the store when it is done. Keep it open so the test can look inside.
   const close = vi.spyOn(context.store, "close").mockImplementation(() => {});
+  const awake = fakeKeepAwake();
+  const sleepWatch = fakeSleepWatch();
   const io: Partial<CliIo> = {
     write: out.write,
     writeError: err.write,
@@ -66,9 +70,17 @@ function harness(overrides: Partial<CliIo> = {}, settings: Record<string, string
     deliverSteps: () => Promise.reject(new Error("this test did not expect the deliver step on its own")),
     givenDataDir: () => undefined,
     rehearsalFolderProblem: () => "Not started: this test did not expect a rehearsal.",
+    jobLockHeld: () => false,
+    powerSource: async () => "mains",
+    isOnline: () => Promise.reject(new Error("this test did not expect a look at the internet")),
+    sleep: () => Promise.reject(new Error("this test did not expect to wait")),
+    keepAwake: awake.keepAwake,
+    watchForSleep: sleepWatch.watch,
+    jobTriggers: () => ({ build: null, deliver: null }),
+    jobsBelongHere: () => null,
     ...overrides,
   };
-  return { out, err, context, close, run: (...argv: string[]) => runCli(argv, io) };
+  return { out, err, context, close, awake, sleepWatch, run: (...argv: string[]) => runCli(argv, io) };
 }
 
 describe("overnight (command line)", () => {
@@ -193,8 +205,10 @@ describe("overnight (command line)", () => {
     expect(JSON.parse(h.out.lines.at(-1) ?? "")).toHaveLength(2);
   });
 
-  it("lists the night's commands in the usage text", () => {
-    for (const command of ["  build  ", "  deliver  ", "  build-now <ideaId>  ", "  queue --approved --json  "]) expect(USAGE).toContain(command);
+  it("lists the night's commands in the usage text, with the switch the background jobs use and the one the installer uses", () => {
+    for (const command of ["  build [--if-due]  ", "  deliver [--if-due]  ", "  build --from-now, deliver --from-now\n", "  build-now <ideaId>  ", "  queue --approved --json  "]) expect(USAGE).toContain(command);
+    expect(USAGE).toContain("Start that job's clock from now: nothing missed before now is run. The\n                              installer uses it.");
+    expect(USAGE).toContain("With --if-due it first asks Overnight's own clock whether it is time");
   });
 
   it("lists the rehearsal in the usage text: both forms, the stand-in for Bee, and the folder it refuses", () => {
@@ -204,29 +218,45 @@ describe("overnight (command line)", () => {
     expect(USAGE).toContain("rehearsal-bee.log");
     expect(USAGE).toContain("never run on the real data folder");
     expect(USAGE).toContain("OVERNIGHT_DATA_DIR");
+    // The four commands that refuse a rehearsal folder in turn.
+    expect(USAGE).toContain("listen, build, deliver and\n                              build-now in turn refuse a data folder that holds a rehearsal idea.");
   });
 
   it("lists preflight and the stop behaviour in the usage text", () => {
     expect(USAGE).toContain("  preflight  ");
+    expect(USAGE).toContain("Thirteen checks of what tonight's run needs");
+    expect(USAGE).toContain("whether they keep\n                              their own time");
     expect(USAGE).toContain("Exit code 0 only if");
     expect(USAGE).toContain("stop cleanly on Ctrl-C or a stop signal");
+    expect(USAGE).toContain("Mac slept through part of a run");
   });
 
-  it("shows the night's readiness in status: jobs, gateway, sandbox mode from the settings, and never loads the builder", async () => {
+  it("shows the night's readiness in status: jobs, their clock, gateway, sandbox mode, power, and never loads the builder", async () => {
     // The harness's builder rejects if anything loads it.
     const gatewayAnswers = vi.fn<CliIo["gatewayAnswers"]>(async () => true);
-    const h = harness({ gatewayAnswers, nightJobsState: () => ({ build: true, deliver: true, crew: true }) });
+    const powerSource = vi.fn<CliIo["powerSource"]>(async () => "battery");
+    const jobLockHeld = vi.fn<CliIo["jobLockHeld"]>(() => false);
+    const jobsBelongHere = vi.fn<CliIo["jobsBelongHere"]>(() => true);
+    const h = harness({ gatewayAnswers, powerSource, jobLockHeld, jobsBelongHere, nightJobsState: () => ({ build: true, deliver: true, crew: true }), jobTriggers: () => ({ build: "timer", deliver: "timer" }) });
+    // Both jobs asked the clock a minute before the harness's noon.
+    for (const job of ["build", "deliver"] as const) noteChecked(h.context.store, job, new Date(at(-60)));
     expect(await h.run("status")).toBe(0);
     expect(gatewayAnswers).toHaveBeenCalledTimes(1);
-    expect(h.out.lines.slice(-7)).toEqual([
+    expect(powerSource).toHaveBeenCalledTimes(1);
+    expect(h.out.lines.slice(-9)).toEqual([
       "  Next build         Oct 10, 1:00 AM (kiro-crew first)",
       "  Next deliver       Oct 10, 6:30 AM, for the link on the wrist at 07:00",
       "  Night jobs         build, deliver and Kiro Crew gateway installed",
+      "  Night clock        build and deliver check the time every minute, in America/Boise",
       "  Kiro Crew gateway  answers",
       "  Build sandbox      overnight (the Kiro Crew gateway runs inside Overnight's own sandbox, proved by a probe each night)",
+      "  Power              battery: Overnight keeps the Mac awake while the lid is open. With the lid closed nothing runs until it is opened",
       "  Tonight            nothing to build so far: no approved idea is waiting",
       "  Full check         npx overnight preflight",
     ]);
+    // Whether each job is running is asked of its own lock in this data folder, and the jobs' folder of this one.
+    expect(jobLockHeld.mock.calls.map(([file]) => file)).toEqual([path.join(h.context.paths.root, "build.lock"), path.join(h.context.paths.root, "deliver.lock")]);
+    expect(jobsBelongHere).toHaveBeenCalledWith(h.context.paths);
 
     // What scripts/install-agents.sh reads.
     expect(await h.run("status", "--json")).toBe(0);
@@ -237,6 +267,9 @@ describe("overnight (command line)", () => {
       buildSandbox: "overnight",
       nightJobs: { build: true, deliver: true, crew: true },
       gatewayAnswers: true,
+      power: "battery",
+      jobsBelongHere: true,
+      nightClock: { tickSeconds: 60, build: { checkedAt: at(-60), trigger: "timer", fresh: true }, deliver: { checkedAt: at(-60), trigger: "timer", fresh: true } },
     });
   });
 
@@ -307,10 +340,18 @@ describe("overnight (command line)", () => {
       headlessShellPresent: async () => true,
       nightJobs: () => ({ build: true, deliver: true, crew: true }),
       crewJobSandbox: () => "overnight",
+      nightJobTriggers: () => ({ build: "timer", deliver: "timer" }),
+      nightJobRunning: () => false,
+      gatewayProfileCopy: () => "same",
       ...overrides,
     });
+    /** Both night jobs asked the clock a minute before the harness's noon. Only that clock makes these "moments ago". */
+    const awake = (h: ReturnType<typeof harness>) => {
+      for (const job of ["build", "deliver"] as const) noteChecked(h.context.store, job, new Date(at(-60)));
+      return h;
+    };
     const preflightProbes = vi.fn<CliIo["preflightProbes"]>(async () => probes());
-    const ready = harness({ preflightProbes });
+    const ready = awake(harness({ preflightProbes }));
     expect(await ready.run("preflight")).toBe(0);
     expect(preflightProbes).toHaveBeenCalledWith({ config: ready.context.config, paths: ready.context.paths });
     expect(ready.out.lines[0]).toBe(PREFLIGHT_TITLE);
@@ -318,10 +359,15 @@ describe("overnight (command line)", () => {
     expect(ready.close).toHaveBeenCalledTimes(1);
 
     // Paused, by the stored switch: the first line is a cross and the exit code is 1.
-    const paused = harness({ preflightProbes: async () => probes() });
+    const paused = awake(harness({ preflightProbes: async () => probes() }));
     expect(await paused.run("pause")).toBe(0);
     expect(await paused.run("preflight")).toBe(1);
     expect(paused.out.lines[2]).toBe("  \u2717 Overnight is paused, so nothing is asked or built. Fix: npx overnight resume");
+
+    // The clock it goes by is the command line's: by the real one, those heartbeats are long ago.
+    const realClock = awake(harness({ preflightProbes: async () => probes(), now: () => new Date() }));
+    expect(await realClock.run("preflight")).toBe(1);
+    expect(realClock.out.text()).toContain("have not checked the time since");
 
     // It takes no switches and no words.
     expect(await harness().run("preflight", "--json")).toBe(2);
@@ -369,6 +415,33 @@ describe("overnight (command line)", () => {
     // BUILD_SANDBOX comes from the settings and is passed down to the Kiro Crew builder.
     expect(fakes.nightDeps[0]?.backends.primary).toMatchObject({ name: "kiro-crew", sandboxMode: "crew" });
     expect(h.close).toHaveBeenCalledTimes(1);
+    // The night was held awake and watched for a sleep, and both were let go of.
+    expect(h.awake.order).toEqual(["keep awake", "let sleep"]);
+    expect(h.sleepWatch.started()).toBe(1);
+    expect(h.sleepWatch.watching()).toBe(0);
+  });
+
+  it("plain build and plain deliver mean now: they run whatever the night clock's record says, and neither read nor write it", async () => {
+    const build = fakeBuild();
+    const deliver = fakeDeliver();
+    const h = harness({ buildFactories: build.load, deliverFactories: deliver.load, takeJobLock: fakeLocks().takeLock });
+    // Today's slot of each job is on record as run and closed. Run through the clock, nothing would start.
+    const now = new Date(NOON);
+    const closed = (job: ClockedJob) => closedRun(startedRun(noticedRun(currentSlot(job, now, h.context.config), now), now), "done", now);
+    for (const job of ["build", "deliver"] as const) writeNightRun(h.context.store, job, closed(job), now);
+    const setValue = vi.spyOn(h.context.store, "setValue");
+    const getValue = vi.spyOn(h.context.store, "getValue");
+
+    expect(await h.run("build")).toBe(0);
+    expect(await h.run("deliver")).toBe(0);
+    expect(build.nightDeps).toHaveLength(1);
+    expect(deliver.runDeps).toHaveLength(1);
+    expect(setValue).not.toHaveBeenCalled();
+    expect(getValue.mock.calls.filter(([key]) => key.startsWith("night."))).toEqual([]);
+    for (const job of ["build", "deliver"] as const) {
+      expect(readNightRun(h.context.store, job)).toEqual(closed(job));
+      expect(readCheckedAt(h.context.store, job)).toBeNull();
+    }
   });
 
   it("builds nothing while paused, and exits 0: the builder is still called, and it is the one that says \"paused\"", async () => {
@@ -394,6 +467,9 @@ describe("overnight (command line)", () => {
     expect(locks.files).toEqual([path.join(h.context.paths.root, "deliver.lock")]);
     expect(fakes.order).toEqual(["lock deliver.lock", "load deliver", "create bee", "runDeliver", "dispose bee", "release deliver.lock"]);
     expect(h.close).toHaveBeenCalledTimes(1);
+    expect(h.awake.order).toEqual(["keep awake", "let sleep"]);
+    expect(h.sleepWatch.started()).toBe(1);
+    expect(h.sleepWatch.watching()).toBe(0);
   });
 
   it("exits 1 when a build or a deliver is already running", async () => {
@@ -434,6 +510,10 @@ describe("overnight (command line)", () => {
     ]);
     expect(h.out.lines.at(-1)).toBe("Link: https://example.invalid/apps/whose-turn-to-pay/");
     expect(h.close).toHaveBeenCalledTimes(1);
+    // One hold and one watch for the whole command.
+    expect(h.awake.order).toEqual(["keep awake", "let sleep"]);
+    expect(h.sleepWatch.started()).toBe(1);
+    expect(h.sleepWatch.watching()).toBe(0);
   });
 
   it("refuses build-now while paused, before loading or locking anything", async () => {
@@ -533,6 +613,232 @@ describe("overnight (command line)", () => {
   });
 });
 
+describe("overnight build and deliver with --if-due and --from-now (command line)", () => {
+  /** Boise, on the night of Oct 10: 1:00 am is 07:00Z and 6:30 am is 12:30Z. The harness's own clock reads noon on Oct 9. */
+  const BUILD_TIME = "2026-10-10T07:00:00.000Z";
+  const DELIVER_TIME = "2026-10-10T12:30:00.000Z";
+
+  /** A command line on a made-up clock, with a job log kept in memory and made only when asked for. */
+  function clocked(overrides: Partial<CliIo> = {}) {
+    let clock = Date.parse(NOON);
+    const logs = { build: collectingLogger("build"), deliver: collectingLogger("deliver") };
+    const jobLogger = vi.fn<CliIo["jobLogger"]>((_paths, name) => logs[name].logger);
+    const order: string[] = [];
+    const locks = fakeLocks({ order });
+    const online = { answer: true, asked: 0 };
+    const waits: number[] = [];
+    const h = harness({
+      now: () => new Date(clock),
+      jobLogger,
+      takeJobLock: locks.takeLock,
+      isOnline: async () => ((online.asked += 1), online.answer),
+      sleep: async (ms) => {
+        waits.push(ms);
+        clock += ms;
+      },
+      ...overrides,
+    });
+    return { ...h, logs, jobLogger, order, locks, online, waits, at: (iso: string) => void (clock = Date.parse(iso)), later: (ms: number) => void (clock += ms) };
+  }
+
+  it("takes each switch on build and deliver only, and never both at once", async () => {
+    const open = vi.fn<() => Context>();
+    for (const command of ["build", "deliver"]) {
+      const both = harness({ open });
+      expect(await both.run(command, "--if-due", "--from-now")).toBe(2);
+      expect(both.err.lines[0]).toBe("Use --if-due or --from-now, not both.");
+      expect(both.err.text()).toContain(USAGE);
+    }
+    // No other command has a clock to ask or to start.
+    for (const argv of [["status", "--if-due"], ["status", "--from-now"], ["build-now", "idea_a", "--if-due"], ["listen", "--if-due"], ["preflight", "--from-now"], ["queue", "--approved", "--json", "--if-due"], ["rehearse", "run", "idea_a", "--if-due"]]) {
+      const h = harness({ open });
+      expect(await h.run(...argv), argv.join(" ")).toBe(2);
+      expect(h.err.lines[0], argv.join(" ")).toContain("does not understand: --");
+    }
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("--from-now starts that job's clock, prints when its first run is, and loads, logs and holds nothing", async () => {
+    const t = clocked();
+    expect(await t.run("build", "--from-now")).toBe(0);
+    expect(await t.run("deliver", "--from-now")).toBe(0);
+    expect(t.out.lines).toEqual(["The build clock starts from now: the next build is Oct 10, 1:00 AM (America/Boise).", "The deliver clock starts from now: the next deliver is Oct 10, 6:30 AM (America/Boise)."]);
+    expect(t.err.lines).toEqual([]);
+    expect(readNightRun(t.context.store, "build")).toMatchObject({ day: "2026-10-09", closedAs: "first-check", closedAt: NOON });
+    expect(readNightRun(t.context.store, "deliver")).toMatchObject({ day: "2026-10-09", closedAs: "first-check", closedAt: NOON });
+    // Each under its own job lock, let go again. No builder, no log file, no hold, no look at the internet.
+    expect(t.order).toEqual(["lock build.lock", "release build.lock", "lock deliver.lock", "release deliver.lock"]);
+    expect(t.jobLogger).not.toHaveBeenCalled();
+    expect(t.awake.order).toEqual([]);
+    expect(t.online.asked).toBe(0);
+    expect(t.close).toHaveBeenCalledTimes(2);
+  });
+
+  it("--from-now refuses on the error stream, with exit code 1, while that job is running", async () => {
+    // The installer sends standard output nowhere and shows the error stream: the reason must be there.
+    const t = clocked({ takeJobLock: () => null });
+    expect(await t.run("build", "--from-now")).toBe(1);
+    expect(await t.run("deliver", "--from-now")).toBe(1);
+    expect(t.out.lines).toEqual([]);
+    expect(t.err.lines).toEqual([
+      "A build is running right now on this data folder. Try again when it has finished. Nothing was changed.",
+      "A deliver is running right now on this data folder. Try again when it has finished. Nothing was changed.",
+    ]);
+    expect(readNightRun(t.context.store, "build")).toBeNull();
+  });
+
+  it("--if-due with nothing due: one heartbeat, exit 0, and not a line, a lock or a log file", async () => {
+    const t = clocked();
+    await t.run("build", "--from-now");
+    await t.run("deliver", "--from-now");
+    t.out.lines.length = 0;
+    t.order.length = 0;
+    for (let minute = 1; minute <= 5; minute += 1) {
+      t.later(60_000);
+      expect(await t.run("build", "--if-due")).toBe(0);
+      expect(await t.run("deliver", "--if-due")).toBe(0);
+    }
+    expect(t.out.lines).toEqual([]);
+    expect(t.err.lines).toEqual([]);
+    expect(t.order).toEqual([]);
+    expect(t.jobLogger).not.toHaveBeenCalled();
+    expect(t.online.asked).toBe(0);
+    expect(t.waits).toEqual([]);
+    // What scripts/install-agents.sh waits for after it starts a job: the time of its last check.
+    expect(readCheckedAt(t.context.store, "build")).toBe(at(300));
+    expect(await t.run("status", "--json")).toBe(0);
+    expect(JSON.parse(t.out.lines.at(-1) ?? "")).toMatchObject({ nightClock: { tickSeconds: 60, build: { checkedAt: at(300), state: "done" }, deliver: { checkedAt: at(300), state: "done" } } });
+  });
+
+  it("build --if-due at the build's time: asks the internet, runs the night once under the one lock, holds the Mac awake, and writes the start and the end", async () => {
+    const fakes = fakeBuild({ night: () => ({ built: ["idea_a"], failed: [], skipped: "" }) });
+    const t = clocked({ buildFactories: fakes.load });
+    fakes.order = t.order;
+    await t.run("build", "--from-now");
+    t.out.lines.length = 0;
+    t.order.length = 0;
+    t.at("2026-10-10T06:59:30.000Z");
+    expect(await t.run("build", "--if-due")).toBe(0);
+    expect(fakes.nightDeps).toEqual([]);
+
+    t.at("2026-10-10T07:00:30.000Z");
+    expect(await t.run("build", "--if-due")).toBe(0);
+    expect(t.online.asked).toBe(1);
+    expect(t.waits).toEqual([]);
+    // The lock is taken once, by the check, and the build runs under that same one.
+    expect(t.order).toEqual(["lock build.lock", "load builder", "runBuildNight", "release build.lock"]);
+    expect(t.out.lines).toEqual(["Tonight's build: 1 built (idea_a), 0 failed."]);
+    expect(t.awake.order).toEqual(["keep awake", "let sleep"]);
+    // The job's log was made once, when there was something to log, and holds the clock's line and the build's own.
+    expect(t.jobLogger.mock.calls).toEqual([[t.context.paths, "build"]]);
+    expect(t.logs.build.lines.map((line) => line.message)).toEqual(["night clock: starting", "overnight build starting", "overnight build finished"]);
+    expect(t.logs.build.lines[0]).toMatchObject({ level: "info", job: "build", slotDay: "2026-10-10", lateMinutes: 0 });
+    expect(fakes.nightDeps[0]?.logger).toBe(t.logs.build.logger);
+    const done = { day: "2026-10-10", slotAt: BUILD_TIME, noticedAt: "2026-10-10T07:00:30.000Z", startedAt: "2026-10-10T07:00:30.000Z", closedAt: "2026-10-10T07:00:30.000Z", closedAs: "done", waiting: null };
+    expect(readNightRun(t.context.store, "build")).toEqual(done);
+    expect(readLastNightRun(t.context.store, "build")).toEqual(done);
+
+    // The minutes after it: nothing more.
+    t.later(60_000);
+    expect(await t.run("build", "--if-due")).toBe(0);
+    expect(fakes.nightDeps).toHaveLength(1);
+    expect(t.out.lines).toHaveLength(1);
+  });
+
+  it("build --if-due after a sleep waits a minute in place first, and without the internet waits for it", async () => {
+    const fakes = fakeBuild();
+    const t = clocked({ buildFactories: fakes.load });
+    await t.run("build", "--from-now");
+    // Awake again at 3:00 am, on a network with no way out.
+    t.online.answer = false;
+    t.at("2026-10-10T09:00:00.000Z");
+    expect(await t.run("build", "--if-due")).toBe(0);
+    expect(t.waits).toEqual([60_000]);
+    expect(fakes.loads).toBe(0);
+    expect(readNightRun(t.context.store, "build")).toMatchObject({ day: "2026-10-10", waiting: "offline", startedAt: null });
+    expect(t.logs.build.lines.map((line) => line.message)).toEqual(["night clock: waiting for the internet"]);
+
+    t.online.answer = true;
+    t.later(60_000);
+    expect(await t.run("build", "--if-due")).toBe(0);
+    expect(fakes.nightDeps).toHaveLength(1);
+    expect(t.logs.build.lines[1]).toMatchObject({ level: "warn", message: "night clock: starting", lateMinutes: 122 });
+    expect(readNightRun(t.context.store, "build")).toMatchObject({ closedAs: "done", waiting: null });
+  });
+
+  it("build --if-due marks the night cut short when it is stopped, and exits with the signal's code", async () => {
+    const stop = fakeStopSignals();
+    const fakes = fakeBuild({ night: async (deps) => (await aborted(deps.signal), { built: [], failed: [], skipped: "stopped" }) });
+    const t = clocked({ buildFactories: fakes.load, watchStopSignals: stop.watch });
+    await t.run("build", "--from-now");
+    t.at("2026-10-10T06:59:30.000Z");
+    await t.run("build", "--if-due");
+    t.at("2026-10-10T07:00:30.000Z");
+    const running = t.run("build", "--if-due");
+    await expect.poll(() => fakes.nightDeps.length).toBe(1);
+    // While it runs, the record says so: started, not closed.
+    expect(readNightRun(t.context.store, "build")).toMatchObject({ startedAt: "2026-10-10T07:00:30.000Z", closedAt: null });
+    stop.send("SIGTERM");
+    expect(await running).toBe(143);
+    expect(readNightRun(t.context.store, "build")).toMatchObject({ closedAs: "cut-short" });
+    expect(t.order.at(-1)).toBe("release build.lock");
+  });
+
+  it("deliver --if-due waits for a build that holds the build lock in this data folder, then runs the morning with the marks and the hold", async () => {
+    const fakes = fakeDeliver({ run: () => ({ delivered: ["idea_a"], failed: [], notified: [] }) });
+    const buildRunning = { now: true };
+    const jobLockHeld = vi.fn<CliIo["jobLockHeld"]>(() => buildRunning.now);
+    const t = clocked({ deliverFactories: fakes.load, jobLockHeld });
+    fakes.order = t.order;
+    await t.run("deliver", "--from-now");
+    t.out.lines.length = 0;
+    t.order.length = 0;
+    t.at("2026-10-10T12:29:30.000Z");
+    expect(await t.run("deliver", "--if-due")).toBe(0);
+    expect(jobLockHeld).not.toHaveBeenCalled();
+
+    t.at("2026-10-10T12:30:30.000Z");
+    expect(await t.run("deliver", "--if-due")).toBe(0);
+    expect(jobLockHeld.mock.calls.every(([file]) => file === path.join(t.context.paths.root, "build.lock"))).toBe(true);
+    expect(fakes.loads).toBe(0);
+    expect(readNightRun(t.context.store, "deliver")).toMatchObject({ day: "2026-10-10", slotAt: DELIVER_TIME, waiting: "build-running" });
+    expect(t.logs.deliver.lines.map((line) => line.message)).toEqual(["night clock: waiting for the build to finish"]);
+
+    buildRunning.now = false;
+    t.later(60_000);
+    t.order.length = 0;
+    expect(await t.run("deliver", "--if-due")).toBe(0);
+    expect(t.order).toEqual(["lock deliver.lock", "load deliver", "create bee", "runDeliver", "dispose bee", "release deliver.lock"]);
+    expect(t.out.lines).toEqual(["This morning: 1 delivered (idea_a), 0 failed, 0 told about a failure."]);
+    expect(t.awake.order).toEqual(["keep awake", "let sleep"]);
+    // Once for the check that had a wait to log, once for the one that ran. Never for the checks that found nothing due.
+    expect(t.jobLogger.mock.calls).toEqual([
+      [t.context.paths, "deliver"],
+      [t.context.paths, "deliver"],
+    ]);
+    expect(readNightRun(t.context.store, "deliver")).toMatchObject({ startedAt: "2026-10-10T12:31:30.000Z", closedAs: "done", waiting: null });
+  });
+
+  it("--if-due leaves the slot due when the work cannot begin, and says nothing every minute when another process has the lock", async () => {
+    // The builder will not load: said once per check, and tried again by the next one.
+    const t = clocked({ buildFactories: () => Promise.reject(new Error("Cannot find package '@overnight/builder'")) });
+    await t.run("build", "--from-now");
+    t.at("2026-10-10T07:00:30.000Z");
+    expect(await t.run("build", "--if-due")).toBe(1);
+    expect(t.err.lines).toEqual([`"overnight build" could not finish. Cannot find package '@overnight/builder'`]);
+    expect(readNightRun(t.context.store, "build")).toMatchObject({ day: "2026-10-10", startedAt: null, closedAt: null });
+
+    // A build started by hand holds the lock: the check ends quietly, with exit code 0.
+    const busy = clocked({ takeJobLock: fakeLocks({ held: ["build.lock"] }).takeLock });
+    writeNightRun(busy.context.store, "build", closedRun(noticedRun(currentSlot("build", new Date(NOON), busy.context.config), new Date(NOON)), "first-check", new Date(NOON)), new Date(NOON));
+    busy.at("2026-10-10T07:00:30.000Z");
+    expect(await busy.run("build", "--if-due")).toBe(0);
+    expect(busy.err.lines).toEqual([]);
+    expect(busy.out.lines).toEqual([]);
+    expect(busy.jobLogger).not.toHaveBeenCalled();
+  });
+});
+
 describe("opening the data", () => {
   let scratch: string | null = null;
   afterEach(() => {
@@ -569,6 +875,8 @@ describe("opening the data", () => {
     expect(processIo.takeJobLock).toBe(takeLock);
     expect(processIo.watchStopSignals).toBe(watchStopSignals);
     expect(processIo.watchLastResort).toBe(watchLastResort);
+    expect(processIo.watchForSleep).toBe(watchForSleep);
+    expect(processIo.jobLockHeld).toBe(lockHeld);
     // A rehearsal's deliver step is @overnight/deliver alone, never the factories that make the Bee gateway.
     expect(processIo.deliverSteps).toBe(realDeliverSteps);
     // Nothing on the command line reads the environment for a setting any more.
@@ -579,7 +887,7 @@ describe("opening the data", () => {
     // Only built here, never run: no Bee, Kiro, Kiro Crew or GitHub call is made by this test.
     const context = testContext();
     const probes = await processIo.preflightProbes({ config: context.config, paths: context.paths });
-    for (const name of ["beeLoginState", "kiroSignedIn", "gatewayAnswers", "crewSettingsProblem", "installedSkill", "sandboxProbe", "buildRunning", "ghLoggedIn", "pagesRepoReachable", "headlessShellPresent", "nightJobs", "crewJobSandbox"] as const) {
+    for (const name of ["beeLoginState", "kiroSignedIn", "gatewayAnswers", "crewSettingsProblem", "installedSkill", "sandboxProbe", "buildRunning", "ghLoggedIn", "pagesRepoReachable", "headlessShellPresent", "nightJobs", "crewJobSandbox", "nightJobTriggers", "nightJobRunning", "gatewayProfileCopy"] as const) {
       expect(typeof probes[name], name).toBe("function");
     }
     context.store.close();
@@ -594,6 +902,7 @@ describe("opening the data", () => {
       crewSettingsProblem: () => null,
       installedSkillFile: () => "/made-up/SKILL.md",
       BUILD_SKILL_FILE: "/made-up/build-skill.md",
+      CREW_GATEWAY_SANDBOX_PROFILE: "/made-up/crew-gateway.sb",
       runStandaloneSandboxProbe: async (deps: Record<string, unknown> & { logger: { info: (message: string) => void } }) => {
         seen.push(deps);
         deps.logger.info("a made-up probe line");
@@ -623,6 +932,8 @@ describe("opening the data", () => {
       expect(logged).toMatchObject([{ name: "preflight", message: "a made-up probe line" }]);
       // No build is running on a folder nobody has used: there is no build lock at all.
       expect(probes.buildRunning()).toBe(false);
+      expect(probes.nightJobRunning("build")).toBe(false);
+      expect(probes.nightJobRunning("deliver")).toBe(false);
     } finally {
       vi.doUnmock("@overnight/builder");
       vi.resetModules();

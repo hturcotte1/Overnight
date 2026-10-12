@@ -801,8 +801,11 @@ describe("start and stop", () => {
 
     const asked = startedRig({ options: { keepAwake: true }, spawnKeepAwake });
     await vi.waitFor(() => expect(asked.rig.bee.streams).toHaveLength(1));
-    // Tied to our own process, so the helper goes away by itself if we die.
-    expect(spawned).toEqual([{ command: "/usr/bin/caffeinate", args: ["-s", "-w", String(process.pid)] }]);
+    // `-i` with `-s`: awake on battery too, not only while plugged in. Tied to our own process,
+    // so the helper goes away by itself if we die.
+    expect(spawned).toEqual([{ command: "/usr/bin/caffeinate", args: ["-i", "-s", "-w", String(process.pid)] }]);
+    expect(messagesIn(asked.rig, "keeping the Mac awake while this runs")).toHaveLength(1);
+    expect(messagesIn(asked.rig, "keeping the Mac awake while plugged in")).toEqual([]);
     expect(kills).toBe(0);
     await asked.rig.listener.stop();
     await asked.running;
@@ -813,5 +816,6 @@ describe("start and stop", () => {
     await notAsked.rig.listener.stop();
     expect(spawned).toHaveLength(1);
     expect(kills).toBe(1);
+    expect(notAsked.rig.logs().filter((line) => line.message.startsWith("keeping the Mac awake"))).toEqual([]);
   });
 });

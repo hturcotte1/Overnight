@@ -22,8 +22,13 @@ export interface BuildOptions {
   signal?: AbortSignal;
 }
 
+// What a try cost, for the month's ledger (core's build-budget.ts), is on both kinds of outcome:
+// a build that failed, ran out of time or was stopped used credits too.
+//   credits   Kiro credits the builder itself recorded for this try. Left out when it recorded none.
+//   agentMs   How long the agent ran in this try. Left out when no agent was started: such a try
+//             costs nothing and is not counted.
 export type BuildOutcome =
-  | { ok: true; backend: string; ms: number; credits?: number }
+  | { ok: true; backend: string; ms: number; credits?: number; agentMs?: number }
   | {
       ok: false;
       backend: string;
@@ -32,6 +37,8 @@ export type BuildOutcome =
       reason: string;
       /** True when the backend could not even begin (not installed, gateway down, sandbox check failed). */
       couldNotStart: boolean;
+      credits?: number;
+      agentMs?: number;
     };
 
 export interface BuildBackend {

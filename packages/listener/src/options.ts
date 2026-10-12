@@ -64,7 +64,7 @@ export interface ListenerOptions {
   wakeGapMs: number;
   /** stop() waits this long for work in progress, then returns anyway. launchd kills a job 30 seconds after asking it to stop. */
   stopGraceMs: number;
-  /** Hold the Mac awake while the listener runs (only works while plugged in). */
+  /** Hold the Mac awake while the listener runs, on battery too. Nothing holds it awake on battery once its lid is closed. */
   keepAwake: boolean;
   /** Stop cleanly on SIGTERM and SIGINT. The CLI turns this on; tests leave it off. */
   handleSignals: boolean;

@@ -3,16 +3,18 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { BUILD_INTERRUPTED_REASON } from "@overnight/core";
 import { runBuildNight, SKIPPED_PAUSED } from "@overnight/builder";
-import { build, BUILD_ALREADY_RUNNING, BUILD_PAUSED_LINE, BUILD_SKIPPED_PAUSED, buildNightLimitMs, buildNightLines, buildSummary, chooseBackends, formatDuration } from "../src/commands/build.ts";
+import { build, BUILD_ALREADY_RUNNING, BUILD_PAUSED_LINE, BUILD_SKIPPED_PAUSED, buildNightLimitMs, buildNightLines, buildSummary, chooseBackends, formatDuration, quietly } from "../src/commands/build.ts";
 import type { BuildDeps } from "../src/commands/build.ts";
+import type { NightRunMarks } from "../src/commands/night-tick.ts";
 import { DeadlinePassed, withDeadline } from "../src/deadline.ts";
 import { LAST_RESORT_LINE } from "../src/last-resort.ts";
+import { SLEPT_LINE } from "../src/sleep-watch.ts";
 import { STOP_EXIT_CODES, STOP_OVERDUE, STOP_SIGNAL_NAMES, watchStopSignals } from "../src/stop-signals.ts";
 import { addIdea, at, capture, moveIdea, SAMPLE_IDEAS, testContext } from "./helpers.ts";
-import { aborted, collectingLogger, fakeBuild, fakeLastResort, fakeLocks, fakeStopSignals, never } from "./night-fakes.ts";
+import { aborted, collectingLogger, fakeBuild, fakeKeepAwake, fakeLastResort, fakeLocks, fakeMarks, fakeSleepWatch, fakeStopSignals, never } from "./night-fakes.ts";
 import type { BuildFakes, FakeBackend } from "./night-fakes.ts";
 
-function setUp(options: { env?: Record<string, string>; fakes?: BuildFakes; locks?: ReturnType<typeof fakeLocks>; limitMs?: number; stopWaitMs?: number } = {}) {
+function setUp(options: { env?: Record<string, string>; fakes?: BuildFakes; locks?: ReturnType<typeof fakeLocks>; limitMs?: number; stopWaitMs?: number; onRun?: NightRunMarks; keepAwake?: BuildDeps["keepAwake"] } = {}) {
   const context = testContext(options.env);
   const out = capture();
   const err = capture();
@@ -24,6 +26,8 @@ function setUp(options: { env?: Record<string, string>; fakes?: BuildFakes; lock
   const stop = fakeStopSignals({ waitMs: options.stopWaitMs });
   // The same for errors nobody caught: made up, and "ending the process" only notes the exit code.
   const lastResort = fakeLastResort();
+  // And for the Mac having slept: no timer is set, a test says when.
+  const sleep = fakeSleepWatch();
   const deps: BuildDeps<FakeBackend> = {
     ...context,
     logger: log.logger,
@@ -33,9 +37,12 @@ function setUp(options: { env?: Record<string, string>; fakes?: BuildFakes; lock
     writeError: err.write,
     watchStopSignals: stop.watch,
     watchLastResort: lastResort.watch,
+    watchForSleep: sleep.watch,
     limitMs: options.limitMs,
+    ...(options.onRun === undefined ? {} : { onRun: options.onRun }),
+    ...(options.keepAwake === undefined ? {} : { keepAwake: options.keepAwake }),
   };
-  return { context, out, err, log, fakes, locks, stop, lastResort, deps, run: () => build(deps) };
+  return { context, out, err, log, fakes, locks, stop, lastResort, sleep, deps, run: () => build(deps) };
 }
 
 /** A fake builder that keeps the builder's own promise about a pause: it starts nothing and says "paused". */
@@ -359,6 +366,242 @@ describe("overnight build and an error nobody caught", () => {
   });
 });
 
+describe("overnight build with the night clock's marks and a hold on the Mac's sleep", () => {
+  /** A builder that keeps its promise: at a stop it comes back at once, with what it has. */
+  const stoppable = () => fakeBuild({ night: async (deps) => (await aborted(deps.signal), { built: [], failed: ["idea_b"], skipped: "stopped" }) });
+  const underWay = async (t: ReturnType<typeof setUp>) => {
+    await expect.poll(() => t.fakes.nightDeps.length).toBe(1);
+  };
+  /** The same order list for the locks, the builder, the marks and the hold. */
+  function clocked(options: Parameters<typeof setUp>[0] = {}) {
+    const order: string[] = [];
+    const fakes = options.fakes ?? fakeBuild();
+    fakes.order = order;
+    const marks = fakeMarks(order);
+    const awake = fakeKeepAwake(order);
+    const t = setUp({ ...options, fakes, locks: options.locks ?? fakeLocks({ order }), onRun: marks.marks, keepAwake: awake.keepAwake });
+    return { ...t, order, marks, awake };
+  }
+
+  it("marks the start once the builder is loaded and before any work, holds the Mac awake for the night, and marks the end before the lock goes", async () => {
+    const t = clocked();
+    expect(await t.run()).toBe(0);
+    expect(t.order).toEqual(["lock build.lock", "load builder", "mark started", "keep awake", "runBuildNight", "mark ended finished", "let sleep", "release build.lock"]);
+    // The hold's own line goes to the build log.
+    expect(t.awake.loggers).toEqual([t.log.logger]);
+    expect(t.awake.held()).toBe(0);
+    expect(t.out.lines).toEqual(["Tonight's build: 0 built, 0 failed."]);
+  });
+
+  it("without them it runs as it always did: plain `overnight build` means now, and asks no clock", async () => {
+    const t = setUp();
+    expect(await t.run()).toBe(0);
+    expect(t.fakes.order).toEqual(["lock build.lock", "load builder", "runBuildNight", "release build.lock"]);
+  });
+
+  it("calls a night finished whatever was built, failed or skipped, also while paused: the slot was handled", async () => {
+    for (const night of [() => ({ built: ["idea_a"], failed: ["idea_b"], skipped: "" }), () => ({ built: [], failed: [], skipped: "paused" }), () => ({ built: [], failed: [], skipped: "nothing approved" })]) {
+      const t = clocked({ fakes: fakeBuild({ night }) });
+      expect(await t.run()).toBe(0);
+      expect(t.marks.ended).toEqual(["finished"]);
+    }
+  });
+
+  it("marks nothing and holds nothing when the night never begins: lock held, lock unusable, builder will not load, stopped while loading", async () => {
+    const held = clocked({ locks: fakeLocks({ held: ["build.lock"] }) });
+    expect(await held.run()).toBe(1);
+    const broken = clocked({ locks: fakeLocks({ broken: ["build.lock"] }) });
+    expect(await broken.run()).toBe(1);
+    const noBuilder = clocked();
+    noBuilder.deps.loadFactories = () => Promise.reject(new Error("Cannot find package '@overnight/builder'"));
+    expect(await noBuilder.run()).toBe(1);
+    const stopped = clocked();
+    const load = stopped.deps.loadFactories;
+    stopped.deps.loadFactories = async () => {
+      stopped.stop.send("SIGTERM");
+      return load();
+    };
+    expect(await stopped.run()).toBe(143);
+    for (const t of [held, broken, noBuilder, stopped]) {
+      expect(t.marks.started()).toBe(0);
+      expect(t.marks.ended).toEqual([]);
+      expect(t.order).not.toContain("keep awake");
+      expect(t.fakes.nightDeps).toEqual([]);
+      // A watch that was started was stopped again.
+      expect(t.sleep.watching()).toBe(0);
+    }
+  });
+
+  it("builds nothing when the start cannot be written down: the night is not begun, and nothing is marked as ended", async () => {
+    const t = clocked();
+    t.deps.onRun = {
+      started: () => {
+        throw new Error("database is locked\n    at somewhere");
+      },
+      ended: (how) => void t.order.push(`mark ended ${how}`),
+    };
+    expect(await t.run()).toBe(1);
+    expect(t.fakes.nightDeps).toEqual([]);
+    expect(t.order).toEqual(["lock build.lock", "load builder", "release build.lock"]);
+    expect(t.err.lines).toEqual(['"overnight build" could not finish. database is locked']);
+    expect(t.log.lines.at(-1)).toMatchObject({ level: "error", message: "overnight build stopped on an error", reason: "database is locked" });
+  });
+
+  it("marks the night cut short when it is stopped by a signal", async () => {
+    const t = clocked({ fakes: stoppable() });
+    const running = t.run();
+    await underWay(t);
+    t.stop.send("SIGTERM");
+    expect(await running).toBe(143);
+    expect(t.order).toEqual(["lock build.lock", "load builder", "mark started", "keep awake", "runBuildNight", "mark ended cut-short", "let sleep", "release build.lock"]);
+  });
+
+  it("marks the night cut short when the builder throws, runs past its last-resort limit, or does not come back after a stop signal", async () => {
+    const threw = clocked({
+      fakes: fakeBuild({
+        night: () => {
+          throw new Error("the made-up builder fell over");
+        },
+      }),
+    });
+    expect(await threw.run()).toBe(1);
+    const tooLong = clocked({ fakes: fakeBuild({ night: () => never() }), limitMs: 20 });
+    expect(await tooLong.run()).toBe(1);
+    const overdue = clocked({ fakes: fakeBuild({ night: () => never() }), stopWaitMs: 30 });
+    const running = overdue.run();
+    await underWay(overdue);
+    overdue.stop.send("SIGINT");
+    expect(await running).toBe(130);
+    for (const t of [threw, tooLong, overdue]) {
+      expect(t.marks.ended).toEqual(["cut-short"]);
+      expect(t.order.slice(-3)).toEqual(["mark ended cut-short", "let sleep", "release build.lock"]);
+      expect(t.awake.held()).toBe(0);
+    }
+  });
+
+  it("still lets go of the hold and the lock when a mark, or the hold itself, throws on the way out", async () => {
+    const t = clocked();
+    t.deps.onRun = {
+      started: () => {},
+      ended: () => {
+        throw new Error("made-up: the end could not be written");
+      },
+    };
+    expect(await t.run()).toBe(0);
+    expect(t.order.slice(-2)).toEqual(["let sleep", "release build.lock"]);
+
+    const order: string[] = [];
+    const stuck = setUp({
+      locks: fakeLocks({ order }),
+      keepAwake: () => ({
+        stop: () => {
+          throw new Error("made-up: the hold would not let go");
+        },
+      }),
+    });
+    expect(await stuck.run()).toBe(0);
+    expect(order.at(-1)).toBe("release build.lock");
+    // A tidy-up step that throws is one step, not the end of the tidying.
+    expect(() =>
+      quietly(() => {
+        throw new Error("made-up: could not tidy up");
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("overnight build and a Mac that slept through part of the night", () => {
+  const stoppable = () => fakeBuild({ night: async (deps) => (await aborted(deps.signal), { built: [], failed: ["idea_b"], skipped: "stopped" }) });
+  const underWay = async (t: ReturnType<typeof setUp>) => {
+    await expect.poll(() => t.fakes.nightDeps.length).toBe(1);
+  };
+
+  it("watches from the start of the night to its end, and never fires by itself", async () => {
+    const t = setUp();
+    expect(await t.run()).toBe(0);
+    expect(t.sleep.started()).toBe(1);
+    expect(t.sleep.watching()).toBe(0);
+    expect(t.log.text()).not.toContain("went to sleep");
+    // The watch is stopped on the ways out that are not a clean end, too.
+    const held = setUp({ locks: fakeLocks({ held: ["build.lock"] }) });
+    await held.run();
+    expect(held.sleep.started()).toBe(0);
+    const threw = setUp({
+      fakes: fakeBuild({
+        night: () => {
+          throw new Error("the made-up builder fell over");
+        },
+      }),
+    });
+    await threw.run();
+    expect(threw.sleep.watching()).toBe(0);
+  });
+
+  it("tells the builder to stop as a stop signal would, says so once in the log, marks the night cut short, and exits 0", async () => {
+    const order: string[] = [];
+    const marks = fakeMarks(order);
+    const fakes = stoppable();
+    fakes.order = order;
+    const t = setUp({ fakes, locks: fakeLocks({ order }), onRun: marks.marks });
+    const running = t.run();
+    await underWay(t);
+    expect(t.fakes.nightDeps[0]?.signal?.aborted).toBe(false);
+    // The lid was closed for two hours and has just been opened.
+    t.sleep.fire(7_200_400);
+    expect(t.fakes.nightDeps[0]?.signal?.aborted).toBe(true);
+    // Nothing went wrong that a person has to fix.
+    expect(await running).toBe(0);
+    expect(t.log.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: SLEPT_LINE, gapSeconds: 7200 }]);
+    expect(t.log.lines.at(-1)).toMatchObject({ message: "overnight build finished", failed: 1, skipped: "stopped", stoppedBySleep: true });
+    expect(t.log.lines.at(-1)).not.toHaveProperty("stoppedBySignal");
+    expect(order).toEqual(["lock build.lock", "load builder", "mark started", "runBuildNight", "mark ended cut-short", "release build.lock"]);
+    // What the builder did get done is still said, in its own words.
+    expect(t.out.lines).toEqual(["Tonight's build: 0 built, 1 failed (idea_b); stopped."]);
+    expect(t.err.lines).toEqual([]);
+    expect(t.stop.exits).toEqual([]);
+    expect(t.stop.handlers()).toBe(0);
+  });
+
+  it("starts nothing when the sleep is noticed while the builder is still loading: the slot stays due", async () => {
+    const order: string[] = [];
+    const marks = fakeMarks(order);
+    const t = setUp({ locks: fakeLocks({ order }), onRun: marks.marks });
+    const load = t.deps.loadFactories;
+    t.deps.loadFactories = async () => {
+      t.sleep.fire();
+      return load();
+    };
+    expect(await t.run()).toBe(0);
+    expect(t.fakes.nightDeps).toEqual([]);
+    expect(marks.started()).toBe(0);
+    expect(order).toEqual(["lock build.lock", "release build.lock"]);
+  });
+
+  it("stops waiting for a builder that does not come back after it, says so, and exits 1", async () => {
+    const order: string[] = [];
+    const marks = fakeMarks(order);
+    const t = setUp({ fakes: fakeBuild({ night: () => never() }), stopWaitMs: 30, onRun: marks.marks });
+    const running = t.run();
+    await underWay(t);
+    t.sleep.fire();
+    expect(await running).toBe(1);
+    expect(t.err.lines).toEqual(['"overnight build" was told to stop, and the builder had not stopped 20 seconds later. Ending anyway.']);
+    expect(t.log.lines.at(-1)).toMatchObject({ level: "error", message: "overnight build: the builder did not stop in time after the Mac's sleep was noticed; ending anyway" });
+    expect(marks.ended).toEqual(["cut-short"]);
+    expect(t.fakes.order.at(-1)).toBe("release build.lock");
+  });
+
+  it("ends with the signal's code when a stop signal comes too", async () => {
+    const t = setUp({ fakes: fakeBuild({ night: () => never() }), stopWaitMs: 30 });
+    const running = t.run();
+    await underWay(t);
+    t.sleep.fire();
+    t.stop.send("SIGTERM");
+    expect(await running).toBe(143);
+    expect(t.log.lines.at(-1)).toMatchObject({ level: "error", message: "overnight build: the builder did not stop in time after the stop signal; ending anyway" });
+  });
+});
+
 describe("watching for stop signals", () => {
   it("aborts once, calls back once, and reports the first signal and its exit code", () => {
     const stop = fakeStopSignals();
@@ -407,6 +650,35 @@ describe("watching for stop signals", () => {
     second.send("SIGTERM");
     expect(await patient.settle(aborted(patient.signal).then(() => "came back"))).toBe("came back");
     patient.close();
+  });
+
+  it("can stop the work without a signal: aborted and waited for the same way, with no signal's exit code", async () => {
+    const stop = fakeStopSignals({ waitMs: 20 });
+    const stops: string[] = [];
+    const watch = stop.watch({ onStop: (name) => void stops.push(name) });
+    // Before it: work is handed through as always.
+    expect(await watch.settle(Promise.resolve("done"))).toBe("done");
+    watch.stopWork();
+    expect(watch.signal.aborted).toBe(true);
+    // Nothing asked the process to end.
+    expect(watch.received()).toBeNull();
+    expect(watch.exitCode()).toBeNull();
+    expect(stops).toEqual([]);
+    // Work that comes back in time is handed through; work that does not is given up on.
+    expect(await watch.settle(Promise.resolve("back in time"))).toBe("back in time");
+    expect(await watch.settle(never<string>())).toBe(STOP_OVERDUE);
+    // A signal after it is still the first signal.
+    stop.send("SIGTERM");
+    expect(watch.exitCode()).toBe(143);
+    expect(stops).toEqual(["SIGTERM"]);
+    expect(stop.exits).toEqual([]);
+    watch.close();
+
+    // After close it does nothing.
+    const closed = fakeStopSignals().watch();
+    closed.close();
+    closed.stopWork();
+    expect(closed.signal.aborted).toBe(false);
   });
 
   it("can be aborted without a signal, which is not a stop signal", () => {

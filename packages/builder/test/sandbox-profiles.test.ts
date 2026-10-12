@@ -8,12 +8,13 @@
 // started, or where a tool is not installed.
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess, SpawnSyncReturns } from "node:child_process";
-import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { CREW_GATEWAY_SANDBOX_PROFILE, KIRO_CLI_SANDBOX_PROFILE } from "../src/index.ts";
-import { BEE_COPY, DECOY_MARK, DECOY_PATTERN, judgeProbe, LIST_TESTS, listTestTargets, probeCommand, startDecoy, writeTestTargets } from "../src/probe.ts";
+import { dataPaths } from "@overnight/core";
+import { CREW_GATEWAY_SANDBOX_PROFILE, KIRO_CLI_SANDBOX_PROFILE, sealWorkspace } from "../src/index.ts";
+import { BEE_COPY, BUILT_MARKER_FILE, BUILT_TESTS, DECOY_MARK, DECOY_PATTERN, judgeProbe, LIST_TESTS, listTestTargets, probeCommand, startDecoy, takeMadeFiles, WRITE_TEST_FILE, WRITE_TESTS, writeTestTargets, writeTries } from "../src/probe.ts";
 import { profileParams, SANDBOX_VALUE_NAMES } from "../src/sandbox-values.ts";
 import { tempDir } from "./helpers.ts";
 
@@ -50,6 +51,8 @@ function world(layout: "split" | "usual" = "split") {
   const kiroHome = path.join(home, ".kiro");
   const crewHome = path.join(kiroHome, "crew");
   const workspace = path.join(data, "workspaces", ID);
+  /** Where finished builds are kept: out of every build job's reach. */
+  const built = path.join(data, "built");
   const buildTmp = path.join(data, "tmp", "build");
   const probe = path.join(data, "tmp", "build-probe");
   const support = path.join(home, "Library", "Application Support", "kiro-cli");
@@ -88,6 +91,9 @@ function world(layout: "split" | "usual" = "split") {
     detector: path.join(data, "kiro-detector", "settings.json"),
     spikes: path.join(data, "spikes", "raw.jsonl"),
     otherBrief: path.join(data, "ideas", "idea_other", "brief.md"),
+    // a finished build, and the file the nightly check keeps beside the finished builds
+    sealedApp: path.join(built, "idea_sealed", "dist", "index.html"),
+    builtMarker: path.join(built, BUILT_MARKER_FILE),
     report: path.join(data, "reports", "idea_other.json"),
     pagesConfig: path.join(data, "pages", ".git", "config"),
     deliverRun: path.join(data, "tmp", "deliver", "run.txt"),
@@ -160,6 +166,7 @@ function world(layout: "split" | "usual" = "split") {
     globalBee: files.globalBee,
     inDocuments: path.join(home, "Documents", "tool.sh"),
     inData: path.join(data, "tool.sh"),
+    inBuilt: path.join(built, "idea_sealed", "tool.sh"),
   };
   for (const program of Object.values(programs)) {
     writeFileSync(program, SCRIPT);
@@ -214,7 +221,7 @@ function world(layout: "split" | "usual" = "split") {
     writeFileSync(copy, `${readFileSync(profileFile, "utf8")}\n${extraRules}\n`);
     return inside(copy);
   };
-  return { root, home, data, repo, nodeDir, npmCache, kiroHome, crewHome, workspace, buildTmp, probe, support, files, programs, binaries, loosened, gateway: inside(CREW_GATEWAY_SANDBOX_PROFILE), kiro: inside(KIRO_CLI_SANDBOX_PROFILE) };
+  return { root, home, data, repo, nodeDir, npmCache, kiroHome, crewHome, workspace, built, buildTmp, probe, support, files, programs, binaries, loosened, gateway: inside(CREW_GATEWAY_SANDBOX_PROFILE), kiro: inside(KIRO_CLI_SANDBOX_PROFILE) };
 }
 type World = ReturnType<typeof world>;
 type Inside = World["gateway"];
@@ -262,7 +269,7 @@ function protectedPlaces(w: World): Record<string, string> {
 /** What both profiles must hide, for reading and for writing. */
 const HIDDEN = [
   // Overnight's own data, and logins
-  ...(["database", "wal", "lock", "log", "detector", "spikes", "otherBrief", "report", "pagesConfig", "deliverRun", "usualDatabase", "usualLog", "ssh", "aws", "gh", "keychain", "env"] as const),
+  ...(["database", "wal", "lock", "log", "detector", "spikes", "otherBrief", "sealedApp", "builtMarker", "report", "pagesConfig", "deliverRun", "usualDatabase", "usualLog", "ssh", "aws", "gh", "keychain", "env"] as const),
   // the rest of the home folder: closed by default
   ...(["document", "desktop", "download", "browser", "otherAppCache", "homeFile", "zshenv", "gitconfig", "claudeSession", "claudeJson", "claudeApp", "repoSource", "envExample", "repoBee", "globalBee", "globalBeeModule", "ghProgram", "ghState"] as const),
 ] as const;
@@ -290,6 +297,8 @@ function expectCommonFence(w: World, box: Inside): void {
     path.join(w.data, "ideas"),
     path.join(w.data, "logs"),
     path.join(w.data, "pages"),
+    w.built,
+    path.join(w.built, "idea_sealed"),
     path.join(w.home, ".config", "gh"),
     path.join(w.home, "Library", "Keychains"),
     // closed by default: everything a person keeps in a home folder
@@ -330,7 +339,7 @@ function expectCommonFence(w: World, box: Inside): void {
   // Running: only where a build may read. A file that cannot be read could otherwise still be run.
   expect(box.canRun(w.programs.inWorkspace), "run a program in the workspace").toBe(true);
   expect(box.canRun(w.programs.inBuildTmp), "run a program in the build's temporary folder").toBe(true);
-  for (const name of ["gh", "repoBee", "globalBee", "inDocuments", "inData"] as const) expect(box.canRun(w.programs[name]), `run ${name}`).toBe(false);
+  for (const name of ["gh", "repoBee", "globalBee", "inDocuments", "inData", "inBuilt"] as const) expect(box.canRun(w.programs[name]), `run ${name}`).toBe(false);
   // The same programs do run outside the sandbox: it is the fence that stops them.
   expect(spawnSync(w.programs.gh, [], { encoding: "utf8" }).stdout).toBe("ran\n");
   // Real programs, which need no reading to be started: allowed in the workspace, refused elsewhere.
@@ -419,6 +428,43 @@ function expectOtherProgramsHidden(w: World, box: Inside, profileFile: string): 
   const loose = w.loosened(profileFile, '(allow process-info*)\n(allow sysctl-read)\n(allow mach-lookup (global-name "com.apple.sysmond"))');
   expect(loose.run("/usr/bin/perl", ["-e", READ_ARGS, pid, word]).stdout).toBe("rc=0 found=1\n");
   expect(loose.run("/usr/bin/pgrep", ["-f", pattern]).stdout.trim()).toBe(pid);
+}
+
+/**
+ * Finished builds (<data>/built) are out of a build job's reach in every way a job could use one:
+ * reading or changing the app that will be published, listing which ideas were built, putting a
+ * build of its own there, or moving one away.
+ */
+function expectFinishedBuildsClosed(w: World, box: Inside): void {
+  const sealed = path.join(w.built, "idea_sealed");
+  // The app is really there, and readable outside the sandbox.
+  expect(readFileSync(w.files.sealedApp, "utf8")).toBe(DECOY);
+  expect(box.canRead(w.files.sealedApp), "read the finished app").toBe(false);
+  expect(box.canSee(w.files.sealedApp), "look at the finished app").toBe(false);
+  expect(box.canSee(sealed), "look at the idea's folder").toBe(false);
+  expect(box.canList(w.built), "list the finished builds").toBe(false);
+  expect(box.canList(sealed), "list one finished build").toBe(false);
+  expect(box.canList(path.join(sealed, "dist")), "list its dist folder").toBe(false);
+  expect(box.canWrite(w.files.sealedApp), "write the finished app").toBe(false);
+  expect(box.run("/bin/sh", ["-c", `echo changed >> "${w.files.sealedApp}"`]).status, "add to the finished app").not.toBe(0);
+  expect(box.canWrite(path.join(sealed, "dist", "planted.js")), "add a file to a finished build").toBe(false);
+  expect(box.canWrite(path.join(w.built, WRITE_TEST_FILE)), "make a file among the finished builds").toBe(false);
+  expect(box.run("/bin/mkdir", [path.join(w.built, "idea_planted")]).status, "make a folder among the finished builds").not.toBe(0);
+  expect(box.canRun(w.programs.inBuilt), "run a program in a finished build").toBe(false);
+  // Moving: a finished build away, the whole folder away, or a workspace of its own in.
+  expect(box.canMove(sealed, path.join(w.workspace, "taken")), "move a finished build into the workspace").toBe(false);
+  expect(box.canMove(sealed, path.join(w.built, "idea_renamed")), "rename a finished build").toBe(false);
+  expect(box.canMove(w.built, path.join(w.buildTmp, "built-moved")), "move the folder itself").toBe(false);
+  expect(box.canMove(path.join(w.workspace, "brief.md"), path.join(sealed, "dist", "brief.md")), "move a file of its own into a finished build").toBe(false);
+  expect(box.run("/bin/rm", ["-rf", sealed]).status === 0 && !existsSync(sealed), "remove a finished build").toBe(false);
+  expect(box.run("/bin/ln", ["-s", w.workspace, path.join(w.built, "idea_linked")]).status, "put a link among the finished builds").not.toBe(0);
+  expect(box.run("/bin/ln", [w.files.sealedApp, path.join(w.workspace, "hard-app")]).status, "hard-link the finished app into the workspace").not.toBe(0);
+  box.run("/bin/ln", ["-s", w.files.sealedApp, path.join(w.workspace, "soft-app")]);
+  expect(box.canRead(path.join(w.workspace, "soft-app")), "read the finished app through a link").toBe(false);
+  // Nothing changed.
+  expect(readFileSync(w.files.sealedApp, "utf8")).toBe(DECOY);
+  expect(readdirSync(w.built).sort()).toEqual([BUILT_MARKER_FILE, "idea_sealed"]);
+  expect(existsSync(w.files.brief)).toBe(true);
 }
 
 /** A made-up folder named like Claude Code's scratch folders, with a decoy in it. Removed after the test. */
@@ -643,6 +689,13 @@ describe.skipIf(!canSandbox)("the Kiro CLI build profile, run for real on a made
     expect(worked.stdout).toBe("done\n");
   });
 
+  for (const layout of ["split", "usual"] as const) {
+    it(`keeps finished builds out of a build's reach: not read, listed, written, run or moved (${layout === "usual" ? "data folder inside the home folder" : "data folder elsewhere"})`, () => {
+      const w = world(layout);
+      expectFinishedBuildsClosed(w, w.kiro);
+    });
+  }
+
   it("does not let a build reach other programs or the services it has no business with", () => {
     expectNoReachingOut(world().kiro);
   });
@@ -760,6 +813,35 @@ describe.skipIf(!canSandbox)("the Kiro Crew gateway profile, run for real on a m
     expect(w.gateway.canList(path.join(w.nodeDir, "lib"))).toBe(false);
   });
 
+  for (const layout of ["split", "usual"] as const) {
+    it(`keeps finished builds out of a job's reach: not read, listed, written, run or moved (${layout === "usual" ? "data folder inside the home folder" : "data folder elsewhere"})`, () => {
+      const w = world(layout);
+      expectFinishedBuildsClosed(w, w.gateway);
+    });
+  }
+
+  it("a workspace a job could read and change is out of its reach the moment Overnight has sealed it", () => {
+    const w = world("usual");
+    // Another idea's workspace: one profile covers every job, so this job can read and change it.
+    expect(w.gateway.canRead(w.files.otherWorkspace)).toBe(true);
+    expect(w.gateway.run("/bin/sh", ["-c", `echo changed-by-a-job >> "${w.files.otherWorkspace}"`]).status).toBe(0);
+    const before = readFileSync(w.files.otherWorkspace, "utf8");
+
+    // Our own code, outside the sandbox: the one rename the night flow does when an idea is built.
+    const sealed = sealWorkspace({ paths: dataPaths(w.data), ideaId: "idea_other", now: new Date("2026-10-10T07:40:00.000Z") });
+    expect(sealed).toEqual({ ok: true, dir: path.join(w.built, "idea_other"), movedAside: null });
+
+    const app = path.join(w.built, "idea_other", "index.html");
+    expect(w.gateway.canRead(app)).toBe(false);
+    expect(w.gateway.canSee(app)).toBe(false);
+    expect(w.gateway.canWrite(app)).toBe(false);
+    expect(w.gateway.run("/bin/sh", ["-c", `echo changed-again >> "${app}"`]).status).not.toBe(0);
+    expect(w.gateway.canMove(path.join(w.built, "idea_other"), path.join(w.data, "workspaces", "idea_other"))).toBe(false);
+    // What a job leaves under the old name does not come along either: it stays a workspace.
+    expect(w.gateway.run("/bin/mkdir", [path.join(w.data, "workspaces", "idea_other")]).status).toBe(0);
+    expect(readFileSync(app, "utf8")).toBe(before);
+  });
+
   it("does not let a job reach other programs or the services it has no business with", () => {
     expectNoReachingOut(world().gateway);
   });
@@ -782,9 +864,13 @@ describe.skipIf(!canSandbox)("the Kiro Crew gateway profile, run for real on a m
 });
 
 describe.skipIf(!canSandbox)("the nightly probe's own command, run for real inside the gateway profile on a made-up home", () => {
-  /** Run the probe's command line the way a Kiro Crew command job would, and judge what it left. */
+  /**
+   * Run the probe's command line the way a Kiro Crew command job would, and judge what it left
+   * the way the check does: the job's marks, and our own look for its test files afterwards.
+   */
   function runProbe(w: World, box: Inside) {
-    for (const name of ["keychain.txt", "bee.txt", "database.txt", "processes.txt", "finished.txt", "list-documents.txt", "list-library.txt", "list-claude.txt", "write-home.txt", "write-repo.txt", "write-node.txt", "write-kirocrew.txt", "write-launch-agents.txt"]) {
+    const dirs = { home: w.home, repo: w.repo, node: path.join(w.nodeDir, "bin"), kirocrew: path.join(w.kiroHome, "crew-venv", "bin") };
+    for (const name of ["keychain.txt", "bee.txt", "database.txt", "processes.txt", "finished.txt", ...[...LIST_TESTS, ...WRITE_TESTS, ...BUILT_TESTS].map((test) => test.file)]) {
       rmSync(path.join(w.probe, name), { force: true });
     }
     // The stand-in for the Bee program answers as Bee does when it cannot get at its login.
@@ -794,15 +880,16 @@ describe.skipIf(!canSandbox)("the nightly probe's own command, run for real insi
       beeBinary: path.join(w.probe, BEE_COPY),
       database: w.files.database,
       listTargets: listTestTargets(w.home),
-      writeTargets: writeTestTargets({ home: w.home, repo: w.repo, node: path.join(w.nodeDir, "bin"), kirocrew: path.join(w.kiroHome, "crew-venv", "bin") }),
+      writeTargets: writeTestTargets(dirs),
+      built: w.built,
     });
     expect(command).not.toBeNull();
     const ran = box.run("/bin/sh", ["-c", command ?? "exit 9"]);
     expect(ran.error).toBeUndefined();
-    return judgeProbe(w.probe);
+    return judgeProbe(w.probe, takeMadeFiles(writeTries(dirs, w.built)));
   }
 
-  it("passes under the shipped profile: three reads, three lists, the look at other programs and five writes all refused", () => {
+  it("passes under the shipped profile: three reads, three lists, the look at other programs, five writes and the two tries at the finished builds all refused", () => {
     const w = world("usual");
     const decoy = startDecoy();
     expect(decoy).not.toBeNull();
@@ -811,10 +898,12 @@ describe.skipIf(!canSandbox)("the nightly probe's own command, run for real insi
     expect(spawnSync("/usr/bin/pgrep", ["-f", DECOY_PATTERN], { encoding: "utf8" }).stdout.trim()).not.toBe("");
     expect(runProbe(w, w.gateway)).toEqual({ ok: true });
     // The files it left are counts and marks: 0 everywhere, nothing else.
-    for (const name of ["keychain.txt", "bee.txt", "processes.txt", "list-documents.txt", "list-library.txt", "list-claude.txt", "write-home.txt", "write-repo.txt", "write-node.txt", "write-kirocrew.txt", "write-launch-agents.txt"]) {
-      expect(readFileSync(path.join(w.probe, name), "utf8").trim(), name).toBe("0");
-    }
+    const marks = ["keychain.txt", "bee.txt", "processes.txt", "list-documents.txt", "list-library.txt", "list-claude.txt", "write-home.txt", "write-repo.txt", "write-node.txt", "write-kirocrew.txt", "write-launch-agents.txt", "list-built.txt", "write-built.txt"];
+    for (const name of marks) expect(readFileSync(path.join(w.probe, name), "utf8").trim(), name).toBe("0");
     expect(readFileSync(path.join(w.probe, "database.txt"), "utf8")).toBe("");
+    // Fourteen things were tried, and nothing was left behind among the finished builds.
+    expect(marks.length + 1).toBe(14);
+    expect(readdirSync(w.built).sort()).toEqual([BUILT_MARKER_FILE, "idea_sealed"]);
     expect(DECOY_MARK).toMatch(new RegExp(DECOY_PATTERN));
   });
 
@@ -826,6 +915,14 @@ describe.skipIf(!canSandbox)("the nightly probe's own command, run for real insi
       what: "other programs can be looked at",
       rules: () => '(allow process-info*)\n(allow sysctl-read)\n(allow mach-lookup (global-name "com.apple.sysmond"))',
       said: "a job can read the command lines of other programs",
+    },
+    { what: "the finished builds can be listed", rules: () => '(allow file-read* (subpath (string-append (param "DATA_DIR") "/built")))', said: BUILT_TESTS[0].said },
+    // Opened for writing only: the job's own mark says 0 here, and it is our look afterwards that catches it.
+    { what: "a file can be made among the finished builds", rules: () => '(allow file-write* (subpath (string-append (param "DATA_DIR") "/built")))', said: BUILT_TESTS[1].said },
+    {
+      what: "the finished builds can be listed and written",
+      rules: () => '(allow file-read* file-write* (subpath (string-append (param "DATA_DIR") "/built")))',
+      said: `${BUILT_TESTS[0].said}, ${BUILT_TESTS[1].said}`,
     },
   ];
   for (const loosening of loosenings) {
@@ -839,6 +936,42 @@ describe.skipIf(!canSandbox)("the nightly probe's own command, run for real insi
       expect(runProbe(w, w.gateway)).toEqual({ ok: true });
     });
   }
+
+  it("catches a fence opened for writing only, where the job's own marks all say 0, and leaves no test file behind", () => {
+    const w = world("usual");
+    const decoy = startDecoy();
+    cleanups.push(() => decoy?.stop());
+    // Everything in the home folder can be written again, and still nothing in it can be looked at.
+    const loose = w.loosened(CREW_GATEWAY_SANDBOX_PROFILE, '(allow file-write* (subpath (param "HOME")))');
+    const dirs = { home: w.home, repo: w.repo, node: path.join(w.nodeDir, "bin"), kirocrew: path.join(w.kiroHome, "crew-venv", "bin") };
+    const tries = writeTries(dirs, w.built);
+
+    const result = runProbe(w, loose);
+    // Where the job may not look, it could not tell: `touch` made the file and still ended with
+    // an error, so the mark says 0. Only Kiro Crew's program folder, which a job may read, says 1.
+    for (const test of [...WRITE_TESTS, BUILT_TESTS[1]]) expect(readFileSync(path.join(w.probe, test.file), "utf8").trim(), test.file).toBe(test.file === "write-kirocrew.txt" ? "1" : "0");
+    expect(judgeProbe(w.probe)).toEqual({ ok: false, reason: "the build sandbox check failed: a job can write where Kiro Crew is installed" });
+    // Our own look afterwards could: every write test is named, the one among the finished builds too.
+    expect(result).toEqual({ ok: false, reason: `the build sandbox check failed: ${tries.map((entry) => entry.said).join(", ")}` });
+    expect(tries).toHaveLength(6);
+    for (const entry of tries) expect(existsSync(entry.file), entry.file).toBe(false);
+    // The same world under the shipped profile passes.
+    expect(runProbe(w, w.gateway)).toEqual({ ok: true });
+  });
+
+  it("needs its marker file: an empty folder lists as nothing, with or without a fence", () => {
+    const w = world("usual");
+    const decoy = startDecoy();
+    cleanups.push(() => decoy?.stop());
+    const loose = w.loosened(CREW_GATEWAY_SANDBOX_PROFILE, '(allow file-read* (subpath (string-append (param "DATA_DIR") "/built")))');
+    // With only the marker in it, the opened folder is still caught ...
+    rmSync(path.join(w.built, "idea_sealed"), { recursive: true });
+    expect(runProbe(w, loose)).toEqual({ ok: false, reason: `the build sandbox check failed: ${BUILT_TESTS[0].said}` });
+    expect(readFileSync(path.join(w.probe, "list-built.txt"), "utf8").trim()).toBe("1");
+    // ... and without it the same opened folder would have passed. That is what the marker is for.
+    rmSync(w.files.builtMarker);
+    expect(runProbe(w, loose)).toEqual({ ok: true });
+  });
 
   it("fails on a copy in which the whole home folder can be read again, naming every list test", () => {
     const w = world("usual");

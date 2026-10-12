@@ -1,4 +1,5 @@
-// `overnight build`: tonight's builds. The background job runs this once a day at BUILD_TIME.
+// `overnight build`: tonight's builds. The background job wakes every minute and runs this, with
+// `--if-due`, once Overnight's own clock says it is BUILD_TIME (night-tick.ts).
 // Only wiring lives here: the brief, the workspaces, the two builders and every idea state change
 // are in @overnight/builder. This file takes the build lock, picks which builder goes first,
 // hands over, and prints one line about how the night went.
@@ -11,8 +12,11 @@ import { oneLine, plural } from "../output.ts";
 import type { Write } from "../output.ts";
 import { buildLockFile } from "../single-instance.ts";
 import type { ReleaseLock } from "../single-instance.ts";
+import { SLEPT_LINE, watchForSleep } from "../sleep-watch.ts";
+import type { WatchForSleep } from "../sleep-watch.ts";
 import { STOP_OVERDUE, STOP_SIGNAL_LINE, stopWaitText, watchStopSignals } from "../stop-signals.ts";
 import type { WatchStopSignals } from "../stop-signals.ts";
+import type { NightRunMarks } from "./night-tick.ts";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -93,8 +97,30 @@ export interface BuildDeps<Backend = unknown> {
   watchStopSignals?: WatchStopSignals;
   /** Watches for an error nobody caught while the night runs. Default: the real one (last-resort.ts). */
   watchLastResort?: WatchLastResort;
+  /** Watches for the Mac having slept while the night runs. Default: the real one (sleep-watch.ts). */
+  watchForSleep?: WatchForSleep;
+  /**
+   * Given by `--if-due`: the night clock's marks for this run. `started` is called just before
+   * any work begins, `ended` when it is over. Left out, this command means "now" and the clock
+   * is neither read nor written.
+   */
+  onRun?: NightRunMarks;
+  /** Holds the Mac awake while the night runs, also on battery. Left out, nothing holds it. */
+  keepAwake?: KeepAwakeHold;
   /** For tests: the last-resort time limit, in milliseconds. */
   limitMs?: number;
+}
+
+/** Starts a hold on the Mac's sleep and says how to let go of it (core's startKeepAwake, in its "always" mode). */
+export type KeepAwakeHold = (logger: Logger) => { stop(): void };
+
+/** Run one tidy-up step. A step that throws must not stop the ones after it. */
+export function quietly(step: () => void): void {
+  try {
+    step();
+  } catch {
+    // Whatever it held is dropped when the process ends.
+  }
 }
 
 export const BUILD_ALREADY_RUNNING = "another overnight build is already running on this data folder; not starting a second one";
@@ -202,23 +228,43 @@ export async function build<Backend>(deps: BuildDeps<Backend>): Promise<number> 
   }
 
   const stop = (deps.watchStopSignals ?? watchStopSignals)({ onStop: (signal) => logger.warn(`overnight build: ${STOP_SIGNAL_LINE}`, { signal }) });
+  // The Mac slept through part of the night: every time limit is long past for no good reason.
+  // The builder is told to stop, as by a stop signal, and what it was building gets another try.
+  let slept = false;
+  const sleepWatch = (deps.watchForSleep ?? watchForSleep)({
+    onSleep: (gapMs) => {
+      slept = true;
+      logger.warn(SLEPT_LINE, { gapSeconds: Math.round(gapMs / 1000) });
+      stop.stopWork();
+    },
+  });
   // An error nobody caught: one log line, the builder is told to stop, the lock goes, exit 1.
   const lastResort = (deps.watchLastResort ?? watchLastResort)({ command: "overnight build", logger, letGo: [() => stop.abort(), release], writeError: deps.writeError });
+  let started = false;
+  // Only a night that ended by itself is "finished". Stopped, slept through, overdue or failed, it was cut short.
+  let how: "finished" | "cut-short" = "cut-short";
+  let hold: { stop(): void } | null = null;
   try {
     const factories = await deps.loadFactories();
-    // Told to stop while the builder was loading: start nothing.
-    if (stop.exitCode() !== null) return stop.exitCode() ?? 1;
+    // Told to stop while the builder was loading, or the Mac slept meanwhile: start nothing.
+    if (stop.signal.aborted) return stop.exitCode() ?? 0;
     const chosen = chooseBackends(factories, { config, paths, logger });
+    // The night clock writes the start down before any work begins. If it cannot, nothing begins.
+    deps.onRun?.started();
+    started = true;
+    hold = deps.keepAwake?.(logger) ?? null;
     logger.info("overnight build starting", { primary: chosen.primaryName, fallback: chosen.fallbackName, sandboxMode: config.buildSandbox, dataDir: paths.root });
     const night = withDeadline(factories.runBuildNight({ store, config, paths, backends: chosen.backends, logger, signal: stop.signal, ...signInStep(factories, logger) }), deps.limitMs ?? buildNightLimitMs(config), "The night's build");
     const result = await stop.settle(night);
     if (result === STOP_OVERDUE) {
-      logger.error("overnight build: the builder did not stop in time after the stop signal; ending anyway", { waitedFor: stopWaitText() });
+      logger.error(`overnight build: the builder did not stop in time after ${slept && stop.received() === null ? "the Mac's sleep was noticed" : "the stop signal"}; ending anyway`, { waitedFor: stopWaitText() });
       deps.writeError(`"overnight build" was told to stop, and the builder had not stopped ${stopWaitText()} later. Ending anyway.`);
       return stop.exitCode() ?? 1;
     }
-    logger.info("overnight build finished", { built: result.built.length, failed: result.failed.length, skipped: oneLine(result.skipped ?? "").slice(0, 200) || undefined, stoppedBySignal: stop.received() ?? undefined });
+    logger.info("overnight build finished", { built: result.built.length, failed: result.failed.length, skipped: oneLine(result.skipped ?? "").slice(0, 200) || undefined, stoppedBySignal: stop.received() ?? undefined, stoppedBySleep: slept || undefined });
     for (const line of buildNightLines(result)) deps.write(line);
+    if (stop.exitCode() === null && !slept) how = "finished";
+    // After a sleep the code is still 0: nothing went wrong that a person has to fix.
     return stop.exitCode() ?? 0;
   } catch (error) {
     // Past its last-resort limit: nobody is waiting any more, so tell the builder to stop too.
@@ -227,6 +273,10 @@ export async function build<Backend>(deps: BuildDeps<Backend>): Promise<number> 
     deps.writeError(`"overnight build" could not finish. ${errorSummary(error)}`);
     return stop.exitCode() ?? 1;
   } finally {
+    sleepWatch.stop();
+    // Before the lock goes: the clock's record is closed while this run still holds it.
+    if (started) quietly(() => deps.onRun?.ended(how));
+    quietly(() => hold?.stop());
     lastResort.close();
     stop.close();
     release();

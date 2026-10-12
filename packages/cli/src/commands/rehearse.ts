@@ -49,15 +49,28 @@ export function isRehearsalIdea(idea: Pick<Idea, "conversationKey">): boolean {
 }
 
 /**
- * For the commands that talk to the real Bee (listen, deliver, build-now): a data folder that
- * holds a rehearsal idea is a rehearsal folder, and they do not run on it. Otherwise a rehearsal
- * idea left half-way (a failed build, say) would be announced on the wearer's wrist by the next
- * real `deliver` pointed at that folder. Null when the folder holds none.
+ * The commands that only ever run on real data: the listener, the two night jobs' commands and
+ * build-now. None of them runs on a data folder that holds a rehearsal idea.
+ */
+export const REAL_DATA_ONLY_COMMANDS = ["listen", "build", "deliver", "build-now"] as const;
+export type RealDataOnlyCommand = (typeof REAL_DATA_ONLY_COMMANDS)[number];
+
+export function isRealDataOnlyCommand(command: string): command is RealDataOnlyCommand {
+  return (REAL_DATA_ONLY_COMMANDS as readonly string[]).includes(command);
+}
+
+/**
+ * For the commands in REAL_DATA_ONLY_COMMANDS: a data folder that holds a rehearsal idea is a
+ * rehearsal folder, and they do not run on it. Otherwise a rehearsal idea left half-way (a failed
+ * build, say) would be announced on the wearer's wrist by the next real `deliver` pointed at that
+ * folder, and one left approved would be built by the next real `build` as if the wearer had
+ * said yes to it. Null when the folder holds none.
  */
 export function rehearsalFolderRefusal(store: Pick<Store, "listIdeas">, command: string): string | null {
   const count = store.listIdeas().filter(isRehearsalIdea).length;
   if (count === 0) return null;
-  return `Not started: this data folder holds ${count === 1 ? "a rehearsal idea" : `${count} rehearsal ideas`} (made by "overnight rehearse new"), and "overnight ${command}" talks to the real Bee, so it does not run here. Use "npx overnight rehearse run <ideaId>" for those, or a data folder with no rehearsal in it.`;
+  const why = command === "build" ? `"overnight build" is the real nightly build` : `"overnight ${command}" talks to the real Bee`;
+  return `Not started: this data folder holds ${count === 1 ? "a rehearsal idea" : `${count} rehearsal ideas`} (made by "overnight rehearse new"), and ${why}, so it does not run here. Use "npx overnight rehearse run <ideaId>" for those, or a data folder with no rehearsal in it.`;
 }
 
 export interface RehearseNewDeps {

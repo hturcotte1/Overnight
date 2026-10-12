@@ -3,34 +3,41 @@
 // it against an in-memory database without starting a process.
 import { homedir } from "node:os";
 import path from "node:path";
-import { ConfigError, createLogger, errorSummary } from "@overnight/core";
-import type { DataPaths, Logger, LoginState } from "@overnight/core";
+import { ConfigError, createLogger, errorSummary, startKeepAwake } from "@overnight/core";
+import type { ClockedJob, DataPaths, Logger, LoginState } from "@overnight/core";
 import { parseArgs } from "./args.ts";
-import { readListenerState, readNightJobsState } from "./background.ts";
-import type { ListenerState, NightJobsState } from "./background.ts";
+import { installedJobFolders, jobsBelongHere, readJobTriggers, readListenerState, readNightJobsState } from "./background.ts";
+import type { JobTrigger, ListenerState, NightJobsState } from "./background.ts";
 import { build } from "./commands/build.ts";
-import type { BuildFactories } from "./commands/build.ts";
+import type { BuildFactories, KeepAwakeHold } from "./commands/build.ts";
 import { buildNow } from "./commands/build-now.ts";
 import { deliver } from "./commands/deliver.ts";
 import type { DeliverFactories, DeliverSteps } from "./commands/deliver.ts";
 import { ideas } from "./commands/ideas.ts";
 import { listen } from "./commands/listen.ts";
 import type { ListenFactories } from "./commands/listen.ts";
+import { nightLockFile, nightTick, startClockFromNow } from "./commands/night-tick.ts";
+import type { NightRunMarks } from "./commands/night-tick.ts";
 import { pause, resume } from "./commands/pause.ts";
 import { preflight } from "./commands/preflight.ts";
 import type { PreflightProbes } from "./commands/preflight.ts";
 import { queue } from "./commands/queue.ts";
-import { rehearsalFolderRefusal, rehearseNew, rehearseRun } from "./commands/rehearse.ts";
+import { isRealDataOnlyCommand, rehearsalFolderRefusal, rehearseNew, rehearseRun } from "./commands/rehearse.ts";
 import { status } from "./commands/status.ts";
 import { openContext, repoRoot } from "./context.ts";
 import type { Context } from "./context.ts";
 import { gatewayAnswers } from "./gateway.ts";
 import { watchLastResort } from "./last-resort.ts";
 import type { WatchLastResort } from "./last-resort.ts";
+import { isOnline } from "./online.ts";
 import type { Write } from "./output.ts";
+import { readPowerSource } from "./power.ts";
+import type { PowerSource } from "./power.ts";
 import { readEnvFileText, rehearsalFolderProblem, REHEARSAL_WHY } from "./rehearsal-folder.ts";
-import { takeListenLock, takeLock } from "./single-instance.ts";
+import { lockHeld, takeListenLock, takeLock } from "./single-instance.ts";
 import type { ReleaseLock } from "./single-instance.ts";
+import { watchForSleep } from "./sleep-watch.ts";
+import type { WatchForSleep } from "./sleep-watch.ts";
 import { watchStopSignals } from "./stop-signals.ts";
 import type { WatchStopSignals } from "./stop-signals.ts";
 import { USAGE } from "./usage.ts";
@@ -81,12 +88,44 @@ export interface CliIo {
   givenDataDir: () => string | undefined;
   /** For `rehearse`: why a rehearsal may not run on that data folder, in one sentence, or null when it may. Never throws. */
   rehearsalFolderProblem: (dataDir: string | undefined) => string | null;
+  /** Does some process hold this job lock right now? Null if that could not be told. For `status`, and for the deliver job's question about the build. */
+  jobLockHeld: (file: string) => boolean | null;
+  /** For `status`: is this Mac on mains power or on battery? */
+  powerSource: () => Promise<PowerSource>;
+  /** For `--if-due`: is there real internet (online.ts)? */
+  isOnline: () => Promise<boolean>;
+  /** For `--if-due`: wait in place this many milliseconds. */
+  sleep: (ms: number) => Promise<void>;
+  /** For `build`, `deliver` and `build-now`: holds the Mac awake while a run is going, also on battery. */
+  keepAwake: KeepAwakeHold;
+  /** For the same commands and `rehearse run`: watches for the Mac having slept during a run (sleep-watch.ts). */
+  watchForSleep: WatchForSleep;
+  /** For `status`: how macOS starts the build and the deliver job: every minute, or still by its calendar. */
+  jobTriggers: () => Record<ClockedJob, JobTrigger | null>;
+  /** For `status`: were the installed background jobs installed for this data folder? Null if that cannot be told. */
+  jobsBelongHere: (paths: Pick<DataPaths, "root">) => boolean | null;
 }
 
-/** Is a rehearsal allowed on this folder? Asked of this Mac: the home folder and the repo's .env say which folder is the real one. */
-function realRehearsalFolderProblem(dataDir: string | undefined): string | null {
+/** What this Mac says about which data folders are real ones. Replaced in tests. */
+export interface RealFolderFacts {
+  home: () => string;
+  /** The text of the repo's .env file, or null when there is none. */
+  envFileText: () => string | null;
+  /** The data folders the installed background jobs were installed for. */
+  jobFolders: (home: string) => string[];
+}
+
+const THIS_MAC: RealFolderFacts = { home: homedir, envFileText: () => readEnvFileText(repoRoot()), jobFolders: installedJobFolders };
+
+/**
+ * Is a rehearsal allowed on this folder? Asked of this Mac: the home folder, the repo's .env and
+ * the installed background jobs' own settings files say which folders are real ones (the jobs'
+ * folders count whatever .env says by now). Never throws.
+ */
+export function realRehearsalFolderProblem(dataDir: string | undefined, mac: RealFolderFacts = THIS_MAC): string | null {
   try {
-    return rehearsalFolderProblem({ given: dataDir, home: homedir(), envFileText: readEnvFileText(repoRoot()) });
+    const home = mac.home();
+    return rehearsalFolderProblem({ given: dataDir, home, envFileText: mac.envFileText(), jobFolders: mac.jobFolders(home) });
   } catch (error) {
     // Not knowing which folder is the real one is a reason to refuse, not to go ahead.
     return `Not started: ${errorSummary(error)}, and a rehearsal must not run on it, because ${REHEARSAL_WHY}.`;
@@ -116,7 +155,16 @@ export const processIo: CliIo = {
   preflightProbes: realPreflightProbes,
   deliverSteps: realDeliverSteps,
   givenDataDir: () => process.env.OVERNIGHT_DATA_DIR,
-  rehearsalFolderProblem: realRehearsalFolderProblem,
+  rehearsalFolderProblem: (dataDir) => realRehearsalFolderProblem(dataDir),
+  jobLockHeld: lockHeld,
+  powerSource: () => readPowerSource(),
+  isOnline: () => isOnline(),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  // "always": on battery too. With the lid closed on battery the Mac sleeps all the same.
+  keepAwake: (logger) => startKeepAwake(logger, process.pid, undefined, "always"),
+  watchForSleep,
+  jobTriggers: () => readJobTriggers(),
+  jobsBelongHere: (paths) => jobsBelongHere(paths),
 };
 
 /** Each command and the switches it accepts. A Map, so "constructor" is not mistaken for a command. */
@@ -125,8 +173,9 @@ const COMMANDS = new Map<string, readonly string[]>([
   ["status", ["json", "check"]],
   ["ideas", ["json", "all"]],
   ["queue", ["approved", "json"]],
-  ["build", []],
-  ["deliver", []],
+  // --if-due: ask the night clock first. --from-now: start that clock from now. Never both.
+  ["build", ["if-due", "from-now"]],
+  ["deliver", ["if-due", "from-now"]],
   ["build-now", []],
   ["rehearse", ["no-publish"]],
   ["preflight", []],
@@ -167,14 +216,54 @@ function settingError(io: CliIo, error: ConfigError): number {
 async function dispatch(command: string, flags: Set<string>, extras: readonly string[], context: Context, io: CliIo): Promise<number> {
   const { store, config, paths } = context;
   const { write, writeError, now } = io;
-  // The commands that talk to the real Bee do not run on a data folder that holds a rehearsal idea.
-  if (command === "listen" || command === "deliver" || command === "build-now") {
+  // The commands that only ever run on real data do not run on a data folder that holds a
+  // rehearsal idea. With --if-due the question is asked later, inside the run (see `ifDue`);
+  // --from-now only moves a clock.
+  const clockSwitch = flags.has("if-due") || flags.has("from-now");
+  if (isRealDataOnlyCommand(command) && !clockSwitch) {
     const refused = rehearsalFolderRefusal(store, command);
     if (refused !== null) {
       writeError(refused);
       return EXIT_FAILED;
     }
   }
+
+  /** What `--if-due` hands the work: the job's lock, already held, and the night clock's marks. */
+  type NightHand = { takeLock: (file: string) => ReleaseLock | null; marks: NightRunMarks };
+
+  /** `--if-due`: one check of the night clock. `work` is called only when the job's slot is due. */
+  const ifDue = (job: ClockedJob, work: (logger: Logger, hand: NightHand) => Promise<number>): Promise<number> => {
+    // The job's log is made only when there is something to log: nearly every check finds
+    // nothing due, and must not open a file each minute to say so.
+    let made: Logger | undefined;
+    const logger = (): Logger => (made ??= io.jobLogger(paths, job));
+    return nightTick({
+      job,
+      store,
+      config,
+      paths,
+      now,
+      logger,
+      takeLock: io.takeJobLock,
+      lockHeld: io.jobLockHeld,
+      isOnline: io.isOnline,
+      sleep: io.sleep,
+      writeError,
+      run: async (hand) => {
+        // Asked here, when a run is due, and not at every check: said each minute it would fill
+        // the job's log. Said here it also closes the slot, so it is said once a night.
+        const refused = rehearsalFolderRefusal(store, job);
+        if (refused !== null) {
+          writeError(refused);
+          hand.marks.started();
+          hand.marks.ended("finished");
+          return EXIT_FAILED;
+        }
+        return work(logger(), hand);
+      },
+    });
+  };
+
   switch (command) {
     case "listen":
       return listen({ store, config, paths, logger: io.listenLogger(paths), factories: await io.listenFactories(), takeLock: io.takeListenLock });
@@ -188,6 +277,10 @@ async function dispatch(command: string, flags: Set<string>, extras: readonly st
           listenerState: () => io.listenerState(paths),
           nightJobs: io.nightJobsState,
           gatewayAnswers: io.gatewayAnswers,
+          jobRunning: (job) => io.jobLockHeld(nightLockFile(job, paths)),
+          jobTriggers: io.jobTriggers,
+          powerSource: io.powerSource,
+          jobsBelongHere: () => io.jobsBelongHere(paths),
         },
         { json: flags.has("json"), beeLoginState: flags.has("check") ? io.beeLoginState : undefined },
       );
@@ -195,34 +288,49 @@ async function dispatch(command: string, flags: Set<string>, extras: readonly st
       return ideas({ store, config, write, now }, { json: flags.has("json"), all: flags.has("all") });
     case "queue":
       return queue({ store, config, write, writeError });
-    case "build":
+    case "build": {
+      if (flags.has("from-now")) return startClockFromNow({ job: "build", store, config, paths, now, takeLock: io.takeJobLock }, write, writeError);
       // The sandbox mode is one of the settings (config.buildSandbox). A value that is neither of
       // the two has already stopped the command, like any other bad setting.
-      return build({
-        store,
-        config,
-        paths,
-        logger: io.jobLogger(paths, "build"),
-        loadFactories: io.buildFactories,
-        takeLock: io.takeJobLock,
-        write,
-        writeError,
-        watchStopSignals: io.watchStopSignals,
-        watchLastResort: io.watchLastResort,
-      });
-    case "deliver":
-      return deliver({
-        store,
-        config,
-        paths,
-        logger: io.jobLogger(paths, "deliver"),
-        loadFactories: io.deliverFactories,
-        takeLock: io.takeJobLock,
-        write,
-        writeError,
-        watchStopSignals: io.watchStopSignals,
-        watchLastResort: io.watchLastResort,
-      });
+      const run = (logger: Logger, hand?: NightHand): Promise<number> =>
+        build({
+          store,
+          config,
+          paths,
+          logger,
+          loadFactories: io.buildFactories,
+          takeLock: hand?.takeLock ?? io.takeJobLock,
+          write,
+          writeError,
+          watchStopSignals: io.watchStopSignals,
+          watchLastResort: io.watchLastResort,
+          watchForSleep: io.watchForSleep,
+          keepAwake: io.keepAwake,
+          ...(hand === undefined ? {} : { onRun: hand.marks }),
+        });
+      // Without the switch this means "now": the night clock is neither asked nor told.
+      return flags.has("if-due") ? ifDue("build", run) : run(io.jobLogger(paths, "build"));
+    }
+    case "deliver": {
+      if (flags.has("from-now")) return startClockFromNow({ job: "deliver", store, config, paths, now, takeLock: io.takeJobLock }, write, writeError);
+      const run = (logger: Logger, hand?: NightHand): Promise<number> =>
+        deliver({
+          store,
+          config,
+          paths,
+          logger,
+          loadFactories: io.deliverFactories,
+          takeLock: hand?.takeLock ?? io.takeJobLock,
+          write,
+          writeError,
+          watchStopSignals: io.watchStopSignals,
+          watchLastResort: io.watchLastResort,
+          watchForSleep: io.watchForSleep,
+          keepAwake: io.keepAwake,
+          ...(hand === undefined ? {} : { onRun: hand.marks }),
+        });
+      return flags.has("if-due") ? ifDue("deliver", run) : run(io.jobLogger(paths, "deliver"));
+    }
     case "build-now":
       return buildNow(extras[0] ?? "", {
         store,
@@ -239,6 +347,9 @@ async function dispatch(command: string, flags: Set<string>, extras: readonly st
         now,
         watchStopSignals: io.watchStopSignals,
         watchLastResort: io.watchLastResort,
+        watchForSleep: io.watchForSleep,
+        // One hold for the whole command: nobody may be at the Mac while it builds.
+        keepAwake: io.keepAwake,
       });
     case "rehearse": {
       // Asked a second time, now of the folder that was really opened.
@@ -263,12 +374,14 @@ async function dispatch(command: string, flags: Set<string>, extras: readonly st
           now,
           watchStopSignals: io.watchStopSignals,
           watchLastResort: io.watchLastResort,
+          // No hold on the Mac's sleep: someone is at the Mac for a rehearsal. A sleep is still noticed.
+          watchForSleep: io.watchForSleep,
           folderProblem,
         },
       );
     }
     case "preflight":
-      return preflight({ store, config, write, probes: await io.preflightProbes({ config, paths }) });
+      return preflight({ store, config, write, now, probes: await io.preflightProbes({ config, paths }) });
     case "pause":
       return pause({ store, write, now });
     case "resume":
@@ -296,6 +409,7 @@ export async function runCli(argv: readonly string[], overrides: Partial<CliIo> 
     const stray = [...unknown.map((flag) => `--${flag}`), ...extras.slice(wordsAfter)].join(", ");
     return usageError(io, `"overnight ${command}" does not understand: ${stray}`);
   }
+  if (flags.has("if-due") && flags.has("from-now")) return usageError(io, "Use --if-due or --from-now, not both.");
   if (command === "build-now" && extras.length < wordsAfter) {
     return usageError(io, 'Which idea? Give its id: "overnight build-now <ideaId>". See the ids with: overnight ideas --all');
   }

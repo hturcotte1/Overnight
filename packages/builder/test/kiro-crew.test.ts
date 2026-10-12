@@ -64,7 +64,7 @@ describe("Kiro Crew backend: one build", () => {
     const rig = makeRig();
     const outcome = await rig.backend.build(rig.job);
 
-    expect(outcome).toEqual({ ok: true, backend: "kiro-crew", ms: 2 * MINUTE, credits: 3.6 });
+    expect(outcome).toEqual({ ok: true, backend: "kiro-crew", ms: 2 * MINUTE, credits: 3.6, agentMs: 2 * MINUTE });
     expect(rig.crew.commands()).toEqual(["cron add", "cron trigger", "cron remove"]);
     expect(rig.crew.jobs).toHaveLength(1);
     expect(rig.crew.jobs[0]).toMatchObject({ name: `overnight-build-${ID}`, removed: true });
@@ -152,12 +152,13 @@ describe("Kiro Crew backend: one build", () => {
   it("reports the credits Crew recorded, and leaves them out when it recorded none", async () => {
     const withCredits = makeRig();
     withCredits.crew.credits = 4.1455329;
-    expect(await withCredits.backend.build(withCredits.job)).toMatchObject({ ok: true, credits: 4.146 });
+    expect(await withCredits.backend.build(withCredits.job)).toEqual({ ok: true, backend: "kiro-crew", ms: 2 * MINUTE, credits: 4.146, agentMs: 2 * MINUTE });
 
     const without = makeRig();
     without.crew.credits = null;
     const outcome = await without.backend.build(without.job);
-    expect(outcome.ok).toBe(true);
+    // How long the agent ran is still there: the month's ledger estimates from it.
+    expect(outcome).toEqual({ ok: true, backend: "kiro-crew", ms: 2 * MINUTE, agentMs: 2 * MINUTE });
     expect(outcome).not.toHaveProperty("credits");
   });
 
@@ -437,6 +438,142 @@ describe("Kiro Crew backend: deciding whether the build worked", () => {
   });
 });
 
+describe("Kiro Crew backend: what a try cost", () => {
+  it("says nothing about cost when no agent was started", async () => {
+    const refusals: Array<(rig: Rig) => void> = [
+      (rig) => (rig.crew.triggerReplies = [reply("Error: HTTP 409\n", { exitCode: 0 })]),
+      (rig) => (rig.crew.triggerReplies = [reply("Error: cannot reach gateway. Is `kirocrew gateway` running?\n")]),
+      (rig) => (rig.crew.addReplies = [reply("", { exitCode: 1, stderr: "Error: cron store busy, please retry\n" })]),
+      (rig) => rig.crew.writeSettings({ sandbox: "auto" }),
+    ];
+    for (const [n, refuse] of refusals.entries()) {
+      const rig = makeRig();
+      refuse(rig);
+      const outcome = await rig.backend.build(rig.job);
+      expect(outcome, String(n)).toMatchObject({ ok: false, couldNotStart: true });
+      expect(outcome, String(n)).not.toHaveProperty("agentMs");
+      expect(outcome, String(n)).not.toHaveProperty("credits");
+    }
+    const stoppedFirst = makeRig();
+    const stop = new AbortController();
+    stop.abort();
+    const outcome = await stoppedFirst.backend.build(stoppedFirst.job, { signal: stop.signal });
+    expect(outcome).toEqual({ ok: false, backend: "kiro-crew", ms: 0, reason: STOPPED_REASON, couldNotStart: false });
+  });
+
+  it("carries the agent's time and Crew's figure for a build that failed", async () => {
+    const rig = makeRig();
+    rig.crew.credits = 2.75;
+    rig.crew.runForMs = 6 * MINUTE;
+    rig.crew.onJobEnd = () => leaveBuild(rig.job.workspace, { status: "failed", at: rig.clock.now() });
+    expect(await rig.backend.build(rig.job)).toMatchObject({ ok: false, couldNotStart: false, credits: 2.75, agentMs: 6 * MINUTE });
+
+    // And for one whose agent left nothing at all.
+    const nothing = makeRig();
+    nothing.crew.onJobEnd = () => {};
+    expect(await nothing.backend.build(nothing.job)).toMatchObject({ ok: false, reason: expect.stringContaining("left no BUILD_STATUS.json"), credits: 3.6, agentMs: 2 * MINUTE });
+  });
+
+  it("carries them for a build that ran past its time limit, read after the run was cancelled", async () => {
+    const rig = makeRig();
+    rig.crew.writeSecret();
+    rig.crew.runForMs = Number.POSITIVE_INFINITY;
+    // Crew writes the figure down when the run ends, which here is when we cancel it.
+    rig.crew.creditsWhenCancelled = 41.5;
+    const outcome = await rig.backend.build(rig.job);
+    expect(outcome).toEqual({ ok: false, backend: "kiro-crew", ms: 45 * MINUTE + 90 * SECOND, reason: "the build ran past its time limit of 45 minutes", couldNotStart: false, agentMs: 45 * MINUTE + 90 * SECOND, credits: 41.5 });
+    expect(rig.crew.cancels).toHaveLength(1);
+
+    // Crew stopped the session itself at the limit: its own row is there to read.
+    const byCrew = makeRig();
+    byCrew.crew.historyStatus = "timeout";
+    byCrew.crew.runForMs = 45 * MINUTE + 20 * SECOND;
+    byCrew.crew.onJobEnd = () => leaveBuild(byCrew.job.workspace, { status: "building", at: byCrew.clock.now() });
+    expect(await byCrew.backend.build(byCrew.job)).toMatchObject({ ok: false, reason: "the build ran past its time limit of 45 minutes", credits: 3.6, agentMs: 45 * MINUTE + 20 * SECOND });
+  });
+
+  it("carries them for a build that was stopped, and only the time when Crew recorded nothing for the cancelled run", async () => {
+    for (const recorded of [1.2, null]) {
+      const rig = makeRig({ pollMs: 5 * SECOND });
+      rig.crew.writeSecret();
+      rig.crew.runForMs = Number.POSITIVE_INFINITY;
+      rig.crew.creditsWhenCancelled = recorded;
+      const stop = new AbortController();
+      const sleep = async (ms: number): Promise<void> => {
+        await rig.crew.sleep(ms);
+        if (rig.clock.ms() - Date.parse(T0) >= 40 * SECOND) stop.abort();
+      };
+      const backend = createKiroCrewBackend({ paths: rig.paths, logger: collectingLogger().logger, sandboxMode: "crew", kirocrewBinary: rig.crew.binary, crewHome: rig.crew.home, run: rig.crew.run, now: rig.clock.now, sleep, timeZone: "America/Boise", postCancel: rig.crew.postCancel, pollMs: 5 * SECOND });
+      const outcome = await backend.build(rig.job, { signal: stop.signal });
+      expect(outcome, String(recorded)).toEqual({ ok: false, backend: "kiro-crew", ms: 40 * SECOND, reason: STOPPED_REASON, couldNotStart: false, agentMs: 40 * SECOND, ...(recorded === null ? {} : { credits: recorded }) });
+      // Still: cancelled first, removed second, and nothing else.
+      expect(rig.crew.cancels).toHaveLength(1);
+      expect(rig.crew.commands()).toEqual(["cron add", "cron trigger", "cron remove"]);
+    }
+  });
+
+  it("never says the agent ran for longer than it was allowed, however long the Mac slept in the middle of the build", async () => {
+    const rig = makeRig({ pollMs: 5 * SECOND });
+    rig.crew.writeSecret();
+    rig.crew.runForMs = Number.POSITIVE_INFINITY;
+    const stop = new AbortController();
+    let looks = 0;
+    // The third look at Kiro Crew's files comes six hours after the second: the Mac was asleep.
+    // Overnight notices and stops the run (the command line does that; here the test does).
+    const sleep = async (ms: number): Promise<void> => {
+      looks += 1;
+      await rig.crew.sleep(looks === 3 ? 6 * 60 * MINUTE : ms);
+      if (looks === 3) stop.abort();
+    };
+    const backend = createKiroCrewBackend({ paths: rig.paths, logger: collectingLogger().logger, sandboxMode: "crew", kirocrewBinary: rig.crew.binary, crewHome: rig.crew.home, run: rig.crew.run, now: rig.clock.now, sleep, timeZone: "America/Boise", postCancel: rig.crew.postCancel, pollMs: 5 * SECOND });
+    const outcome = await backend.build(rig.job, { signal: stop.signal });
+    expect(outcome).toMatchObject({ ok: false, reason: STOPPED_REASON, ms: 6 * 60 * MINUTE + 10 * SECOND });
+    // The time limit (45 minutes) and the 90 seconds Kiro Crew is given to stop: not six hours.
+    expect(outcome.agentMs).toBe(45 * MINUTE + 90 * SECOND);
+  });
+
+  it("carries the time for a job that was started and then went wrong in a way nobody planned for", async () => {
+    const rig = makeRig();
+    rig.crew.runForMs = 3 * MINUTE;
+    rig.crew.onJobEnd = () => {
+      throw new Error("made-up failure inside the wait");
+    };
+    const outcome = await rig.backend.build(rig.job);
+    expect(outcome).toEqual({ ok: false, backend: "kiro-crew", ms: 3 * MINUTE, reason: "the Kiro Crew build stopped on an unexpected error", couldNotStart: false, agentMs: 3 * MINUTE });
+    expect(rig.crew.jobs[0]?.removed).toBe(true);
+    expect(rig.lines.filter((line) => line.includes("kiro crew build stopped on an unexpected error"))).toHaveLength(1);
+  });
+
+  it("carries the time even when Crew refused to run the job it had said it started", async () => {
+    const rig = makeRig();
+    rig.crew.historyStatus = "failure";
+    rig.crew.runForMs = 0;
+    rig.crew.credits = null;
+    rig.crew.onJobEnd = () => {};
+    const outcome = await rig.backend.build(rig.job);
+    // One look at Crew's files (5 seconds on the test clock) passed before the run was seen to be over.
+    expect(outcome).toMatchObject({ ok: false, couldNotStart: true, agentMs: 5 * SECOND });
+    expect(outcome).not.toHaveProperty("credits");
+  });
+
+  it("counts only this job's rows, from the day the run began and the day it ended", async () => {
+    const rig = makeRig();
+    // The run starts at 11:58 pm UTC and ends the next day: Crew's row lands in the next day's file.
+    rig.clock.set("2026-10-10T23:58:00.000Z");
+    rig.crew.runForMs = 5 * MINUTE;
+    rig.crew.credits = 2;
+    const usage = path.join(rig.crew.home, "usage", "tokens");
+    mkdirSync(usage, { recursive: true });
+    // Rows of another job, a row that is not a count, and an older day's row for a job with the same id.
+    writeFileSync(path.join(usage, "2026-10-10.jsonl"), `${JSON.stringify({ slot: "cron:76be9f71:aaaa0000", credits: 0.5 })}\n${JSON.stringify({ slot: "cron:0000ffff:bbbb1111", credits: 99 })}\nnot json\n${JSON.stringify({ slot: "cron:76be9f71:cccc2222", credits: "many" })}\n`);
+    writeFileSync(path.join(usage, "2026-10-08.jsonl"), `${JSON.stringify({ slot: "cron:76be9f71:dddd3333", credits: 50 })}\n`);
+    const job = { ...rig.job };
+    const outcome = await rig.backend.build(job);
+    expect(rig.crew.jobs[0]?.id).toBe("76be9f71");
+    expect(outcome).toMatchObject({ ok: true, credits: 2.5, agentMs: 5 * MINUTE });
+  });
+});
+
 describe("Kiro Crew backend: jobs left behind by a killed run", () => {
   it("removes its own leftover jobs once, before the first build", async () => {
     const rig = makeRig();
@@ -534,7 +671,8 @@ describe("Kiro Crew backend: when Overnight is told to stop", () => {
     const backend = createKiroCrewBackend({ paths: rig.paths, logger: collectingLogger().logger, sandboxMode: "crew", kirocrewBinary: rig.crew.binary, crewHome: rig.crew.home, run: rig.crew.run, now: rig.clock.now, sleep, timeZone: "America/Boise", postCancel: rig.crew.postCancel, pollMs: 5 * SECOND });
 
     const outcome = await backend.build(rig.job, { signal: stop.signal });
-    expect(outcome).toEqual({ ok: false, backend: "kiro-crew", ms: 20 * SECOND, reason: STOPPED_REASON, couldNotStart: false });
+    // Stopped after the agent had started: how long it ran is part of the answer.
+    expect(outcome).toEqual({ ok: false, backend: "kiro-crew", ms: 20 * SECOND, reason: STOPPED_REASON, couldNotStart: false, agentMs: 20 * SECOND });
     expect(STOPPED_REASON).toBe("the build was stopped");
     const id = rig.crew.jobs[0]?.id ?? "";
     expect(rig.crew.cancels.map((cancel) => cancel.jobId)).toEqual([id]);

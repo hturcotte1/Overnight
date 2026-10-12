@@ -1,9 +1,28 @@
 // All text in this file is made up for the tests. None of it is Bee data.
 import { describe, expect, it } from "vitest";
-import { BeeError, BUILD_INTERRUPTED_REASON, BUILD_STOPPED_REASON, MAX_BUILD_STARTS, parseConfig, Store } from "@overnight/core";
-import type { ListenerState } from "../src/background.ts";
-import { clockMinus, collectStatus, status, tonightWords } from "../src/commands/status.ts";
-import type { StatusReport } from "../src/commands/status.ts";
+import {
+  BeeError,
+  BUILD_INTERRUPTED_REASON,
+  BUILD_STOPPED_REASON,
+  budgetReachedText,
+  clockMinus as coreClockMinus,
+  closedRun,
+  currentSlot,
+  MAX_BUILD_STARTS,
+  noteChecked,
+  noticedRun,
+  parseConfig,
+  startedRun,
+  Store,
+  waitingRun,
+  writeNightRun,
+} from "@overnight/core";
+import type { ClockedJob, NightRun, NightWait } from "@overnight/core";
+import type { JobTrigger, ListenerState, NightJobsState } from "../src/background.ts";
+import { REHEARSAL_CONVERSATION_KEY } from "../src/commands/rehearse.ts";
+import { clockMinus, collectStatus, dayWords, nightClockWords, status, tonightWords } from "../src/commands/status.ts";
+import type { StatusDeps, StatusReport } from "../src/commands/status.ts";
+import type { PowerSource } from "../src/power.ts";
 import { addIdea, at, capture, fixedNow, moveIdea, SAMPLE_IDEAS, testConfig } from "./helpers.ts";
 
 const config = testConfig();
@@ -42,6 +61,7 @@ describe("overnight status", () => {
       "  Ideas             0",
       "  Asks today        0 of 3",
       "  Builds today      0 of 2",
+      "  Build credits     0 of 400 used this month",
       "  Waiting to build  0 approved ideas",
       // The made-up "now" is noon on Oct 9 in Boise: the next 01:00 and the next 06:30 are tomorrow's.
       "  Next build        Oct 10, 1:00 AM (kiro-crew first)",
@@ -68,6 +88,7 @@ describe("overnight status", () => {
       "  Ideas                 4 (heard 1, asked 1, approved 1, expired 1)",
       "  Asks today            2 of 3",
       "  Builds today          0 of 2",
+      "  Build credits         0 of 400 used this month",
       "  Waiting to build      1 approved idea",
       "  Next build            Oct 10, 1:00 AM (kiro-crew first)",
       "  Next deliver          Oct 10, 6:30 AM, for the link on the wrist at 07:00",
@@ -146,6 +167,16 @@ describe("overnight status", () => {
       nextBuildAt: "2026-10-10T07:00:00.000Z",
       nextDeliverAt: "2026-10-10T12:30:00.000Z",
       nextBuildTakes: 1,
+      // October in Boise, in UTC. Nothing has been built, so nothing is counted against the month's 400.
+      buildCredits: { monthStart: "2026-10-01T06:00:00.000Z", monthEnd: "2026-11-01T06:00:00.000Z", counted: 0, estimated: 0, tries: 0, limit: 400, reached: false },
+      rehearsalIdeas: 0,
+      // Neither night job has ever asked the clock on this data folder. scripts/install-agents.sh
+      // reads nightClock.build.checkedAt and nightClock.deliver.checkedAt.
+      nightClock: {
+        tickSeconds: 60,
+        build: { slotAt: "2026-10-09T07:00:00.000Z", slotDay: "2026-10-09", state: "no-record", waiting: null, nextSlotAt: "2026-10-10T07:00:00.000Z", checkedAt: null, lastRun: null, recordAhead: null, fresh: false },
+        deliver: { slotAt: "2026-10-09T12:30:00.000Z", slotDay: "2026-10-09", state: "no-record", waiting: null, nextSlotAt: "2026-10-10T12:30:00.000Z", checkedAt: null, lastRun: null, recordAhead: null, fresh: false },
+      },
     });
   });
 
@@ -309,7 +340,9 @@ describe("overnight status", () => {
     const at0645 = collectStatus({ store: new Store(":memory:"), config, now: fixedNow("2026-10-10T12:45:00.000Z") });
     expect(at0645).toMatchObject({ nextBuildAt: "2026-10-11T07:00:00.000Z", nextDeliverAt: "2026-10-11T12:30:00.000Z" });
 
-    // The deliver job starts 30 minutes before DELIVER_TIME, around midnight too.
+    // The deliver job starts 30 minutes before DELIVER_TIME, around midnight too. (The sum itself
+    // lives with the night clock in core now; it is still offered from here.)
+    expect(clockMinus).toBe(coreClockMinus);
     expect(clockMinus("07:00", 30)).toBe("06:30");
     expect(clockMinus("00:10", 30)).toBe("23:40");
     expect(clockMinus("00:00", 30)).toBe("23:30");
@@ -351,6 +384,32 @@ describe("overnight status", () => {
     );
     // Not known is not a problem to report: a caller that cannot look says nothing about it.
     expect(words({ waitingToBuild: 1, nextBuildTakes: 1, gatewayAnswers: null, nightJobs: undefined })).toBe("1 approved idea will be built at the next build");
+    // Nothing about mains power: on battery Overnight holds the Mac awake itself, and builds all the same.
+    expect(words({ waitingToBuild: 1, nextBuildTakes: 1, power: "battery" })).toBe("1 approved idea will be built at the next build");
+  });
+
+  it("puts what stops the night first: paused, a rehearsal folder, jobs that belong elsewhere, no build job, nothing waiting, the month's credits, the day's limit", () => {
+    const base: StatusReport = { ...collectStatus({ store: new Store(":memory:"), config, now: fixedNow() }), nightJobs: { build: true, deliver: true, crew: true }, gatewayAnswers: true };
+    const usedUp = { ...base.buildCredits, counted: 412.3, reached: true };
+    /** Everything wrong at once. Each line below takes one more thing away, and the next reason shows. */
+    const all: Partial<StatusReport> = { paused: true, rehearsalIdeas: 1, jobsBelongHere: false, nightJobs: { build: false, deliver: true, crew: true }, waitingToBuild: 0, nextBuildTakes: 0, buildCredits: usedUp };
+    const words = (changes: Partial<StatusReport>) => tonightWords({ ...base, ...all, ...changes });
+
+    expect(words({})).toBe("nothing will be built: Overnight is paused");
+    expect(words({ paused: false })).toBe("nothing will be built: this data folder holds a rehearsal idea, and the night's commands do not run here");
+    expect(words({ paused: false, rehearsalIdeas: 3 })).toBe("nothing will be built: this data folder holds 3 rehearsal ideas, and the night's commands do not run here");
+    expect(words({ paused: false, rehearsalIdeas: 0 })).toBe("nothing is built on this data folder by the night jobs: they are installed for another one");
+    // Not known, or known to be this folder's: not a reason.
+    for (const jobsBelongHere of [true, null, undefined]) {
+      expect(words({ paused: false, rehearsalIdeas: 0, jobsBelongHere })).toBe("nothing will be built: the build job is not installed. Put it in place with: scripts/install-agents.sh install build");
+    }
+    const installed = { paused: false, rehearsalIdeas: 0, jobsBelongHere: true, nightJobs: { build: true, deliver: true, crew: true } };
+    expect(words(installed)).toBe("nothing to build so far: no approved idea is waiting");
+    expect(words({ ...installed, waitingToBuild: 2 })).toBe("nothing will be built: this month's build credits are used up (see Build credits)");
+    // A limit of 0 is a setting, not a month that ran out.
+    expect(words({ ...installed, waitingToBuild: 2, buildCredits: { ...usedUp, counted: 0, limit: 0 } })).toBe("nothing will be built: MAX_BUILD_CREDITS_PER_MONTH in .env is 0 (see Build credits)");
+    expect(words({ ...installed, waitingToBuild: 2, buildCredits: base.buildCredits })).toBe("nothing more will be built that day: its limit of 2 is used up. 2 approved ideas wait for the night after");
+    expect(words({ ...installed, waitingToBuild: 2, nextBuildTakes: 2, buildCredits: base.buildCredits })).toBe("2 approved ideas will be built at the next build");
   });
 
   it("counts what the next build takes against the day it runs in, not today", async () => {
@@ -482,5 +541,413 @@ describe("overnight status", () => {
     expect(await status({ store: new Store(":memory:"), config, write: out.write, now: fixedNow() }, { beeLoginState })).toBe(0);
     expect(out.text()).toContain("Utterances saved  0");
     expect(out.lines.slice(-3)).toEqual(["  Bee login         could not tell (Bee did not answer)", "  Full check        npx overnight preflight", "  (Bee check failed: Bee did not answer within 15 seconds.)"]);
+  });
+
+  it("counts the ideas a rehearsal made, which make this a rehearsal folder", async () => {
+    const store = populated();
+    expect(collectStatus({ store, config, now: fixedNow() }).rehearsalIdeas).toBe(0);
+    for (const title of ["Made-up one", "Made-up two"]) store.createIdea({ title, pitch: "p", quote: "", confidence: 1, conversationKey: REHEARSAL_CONVERSATION_KEY, detectorRunId: null }, at(-60));
+    expect(collectStatus({ store, config, now: fixedNow() }).rehearsalIdeas).toBe(2);
+    const out = capture();
+    await status({ store, config, write: out.write, now: fixedNow() });
+    expect(out.lines.find((line) => line.startsWith("  Tonight"))).toBe("  Tonight               nothing will be built: this data folder holds 2 rehearsal ideas, and the night's commands do not run here");
+  });
+});
+
+// ---------- the night clock, the month's credits, the power row, and jobs that belong elsewhere ----------
+
+/** 10:00 am in Boise on Oct 12. That night's build time was 07:00Z (1:00 am), the delivery's 12:30Z (6:30 am). */
+const MORNING = "2026-10-12T16:00:00.000Z";
+const ALL_JOBS: NightJobsState = { build: true, deliver: true, crew: true };
+const ON_TIMER: Record<ClockedJob, JobTrigger | null> = { build: "timer", deliver: "timer" };
+
+/** The rows of the printed status, by label. */
+async function rows(store: Store, deps: Partial<StatusDeps> = {}, now: string = MORNING): Promise<Map<string, string>> {
+  const out = capture();
+  expect(await status({ store, config, write: out.write, now: fixedNow(now), ...deps })).toBe(0);
+  const found = new Map<string, string>();
+  for (const line of out.lines.slice(1)) {
+    const parts = /^ {2}(\S.*?) {2,}(.*)$/.exec(line);
+    if (parts !== null) found.set(parts[1] ?? "", parts[2] ?? "");
+  }
+  return found;
+}
+
+/** A job's record for the slot that came at or before `noticedAt`, taken through the steps named. */
+function nightRecord(job: ClockedJob, noticedAt: string, steps: { waiting?: NightWait; startedAt?: string; closedAt?: string; closedAs?: NonNullable<NightRun["closedAs"]> } = {}): NightRun {
+  const noticed = new Date(noticedAt);
+  let run = noticedRun(currentSlot(job, noticed, config), noticed);
+  if (steps.waiting !== undefined) run = waitingRun(run, steps.waiting);
+  if (steps.startedAt !== undefined) run = startedRun(run, new Date(steps.startedAt));
+  if (steps.closedAs !== undefined) run = closedRun(run, steps.closedAs, new Date(steps.closedAt ?? steps.startedAt ?? noticedAt));
+  return run;
+}
+
+/** A data folder on which both night jobs are on the clock: installed yesterday afternoon, and awake a moment ago. */
+function onTheClock(lastCheck: string | null = "2026-10-12T15:59:30.000Z"): Store {
+  const store = new Store(":memory:");
+  for (const job of ["build", "deliver"] as const) {
+    writeNightRun(store, job, nightRecord(job, "2026-10-11T20:00:00.000Z", { closedAs: "first-check" }), new Date("2026-10-11T20:00:00.000Z"));
+    if (lastCheck !== null) noteChecked(store, job, new Date(lastCheck));
+  }
+  return store;
+}
+
+const clockDeps: Partial<StatusDeps> = { nightJobs: () => ALL_JOBS, jobTriggers: () => ON_TIMER, jobRunning: () => false };
+
+describe("overnight status: this month's build credits", () => {
+  /** An idea to hang ledger rows on. Every row belongs to one. */
+  const withCosts = (costs: Array<{ at: string; credits: number; measured: boolean }>): Store => {
+    const store = new Store(":memory:");
+    const idea = addIdea(store, SAMPLE_IDEAS.turns, at(-3600));
+    for (const cost of costs) store.recordBuildCost({ ideaId: idea.id, backend: cost.measured ? "kiro-crew" : "kiro-cli", ...cost });
+    return store;
+  };
+
+  it("says what has been counted against the month's limit, and how much of that is an estimate", async () => {
+    const store = withCosts([
+      { at: "2026-10-03T07:10:00.000Z", credits: 8.2, measured: true },
+      { at: "2026-10-12T07:10:00.000Z", credits: 4.1, measured: false },
+      // September's, and one dated the first instant of November in Boise: neither is this month's.
+      { at: "2026-09-30T07:10:00.000Z", credits: 90, measured: true },
+      { at: "2026-11-01T06:00:00.000Z", credits: 90, measured: true },
+    ]);
+    expect((await rows(store)).get("Build credits")).toBe("12.3 of 400 used this month (4.1 of that is an estimate)");
+    expect(collectStatus({ store, config, now: fixedNow(MORNING) }).buildCredits).toEqual({ monthStart: "2026-10-01T06:00:00.000Z", monthEnd: "2026-11-01T06:00:00.000Z", counted: 12.3, estimated: 4.1, tries: 2, limit: 400, reached: false });
+    // All of it measured: nothing to add.
+    expect((await rows(withCosts([{ at: "2026-10-03T07:10:00.000Z", credits: 37, measured: true }]))).get("Build credits")).toBe("37 of 400 used this month");
+    expect((await rows(new Store(":memory:"))).get("Build credits")).toBe("0 of 400 used this month");
+  });
+
+  it("says that nothing more is built once the limit is reached, until when, and what would change that", async () => {
+    const store = withCosts([
+      { at: "2026-10-03T07:10:00.000Z", credits: 400, measured: true },
+      { at: "2026-10-12T07:10:00.000Z", credits: 12.3, measured: true },
+    ]);
+    moveIdea(store, addIdea(store, SAMPLE_IDEAS.plants, at(-900)), ["asked", "approved"], at(-800));
+    const shown = await rows(store, clockDeps);
+    expect(shown.get("Build credits")).toBe("412.3 of 400 used this month: nothing more is built until Nov 1, or until MAX_BUILD_CREDITS_PER_MONTH in .env is raised");
+    expect(shown.get("Tonight")).toBe("nothing will be built: this month's build credits are used up (see Build credits)");
+    // The same day and the same numbers as the sentence the builder logs and prints.
+    const budget = collectStatus({ store, config, now: fixedNow(MORNING) }).buildCredits;
+    expect(budget.reached).toBe(true);
+    expect(budgetReachedText(budget, config.timeZone)).toBe("this month's build credits are used up (412.3 of 400 counted): approved ideas wait until Nov 1, or until MAX_BUILD_CREDITS_PER_MONTH in .env is raised");
+
+    // Exactly at the limit is reached too, and an estimate among it is still said.
+    const exactly = withCosts([
+      { at: "2026-10-03T07:10:00.000Z", credits: 399, measured: true },
+      { at: "2026-10-04T07:10:00.000Z", credits: 1, measured: false },
+    ]);
+    expect((await rows(exactly)).get("Build credits")).toBe("400 of 400 used this month (1 of that is an estimate): nothing more is built until Nov 1, or until MAX_BUILD_CREDITS_PER_MONTH in .env is raised");
+  });
+
+  it("says a limit of 0 for what it is: a setting, not a month that ran out", async () => {
+    const zero = testConfig({ MAX_BUILD_CREDITS_PER_MONTH: "0" });
+    const store = withCosts([{ at: "2026-10-03T07:10:00.000Z", credits: 12.3, measured: true }]);
+    moveIdea(store, addIdea(store, SAMPLE_IDEAS.plants, at(-900)), ["asked", "approved"], at(-800));
+    const out = capture();
+    await status({ store, config: zero, write: out.write, now: fixedNow(MORNING), nightJobs: () => ALL_JOBS });
+    const row = (label: string) => out.lines.find((line) => line.startsWith(`  ${label}`))?.replace(/^ {2}\S.*? {2,}/, "");
+    expect(row("Build credits")).toBe("12.3 used this month. MAX_BUILD_CREDITS_PER_MONTH in .env is 0, so nothing is built until it is raised");
+    expect(row("Tonight")).toBe("nothing will be built: MAX_BUILD_CREDITS_PER_MONTH in .env is 0 (see Build credits)");
+    expect(out.text()).not.toContain("Nov 1");
+  });
+});
+
+describe("overnight status: the last night and the next, by the night clock", () => {
+  it("says nothing about a last build or a last deliver before either job has ever run", async () => {
+    // Both jobs were installed this morning, after their times: today's slots count as handled without a run.
+    const store = onTheClock();
+    for (const job of ["build", "deliver"] as const) writeNightRun(store, job, nightRecord(job, "2026-10-12T15:00:00.000Z", { closedAs: "first-check" }), new Date(MORNING));
+    const shown = await rows(store, clockDeps);
+    expect(shown.has("Last build")).toBe(false);
+    expect(shown.has("Last deliver")).toBe(false);
+    // Nothing is due: the next times are the settings' own, as they always were.
+    expect(shown.get("Next build")).toBe("Oct 13, 1:00 AM (kiro-crew first)");
+    expect(shown.get("Next deliver")).toBe("Oct 13, 6:30 AM, for the link on the wrist at 07:00");
+  });
+
+  it("shows when each job last started, and whether that was on time, late or cut short", async () => {
+    const store = onTheClock();
+    const write = (job: ClockedJob, run: NightRun) => writeNightRun(store, job, run, new Date(MORNING));
+    write("build", nightRecord("build", "2026-10-12T07:00:20.000Z", { startedAt: "2026-10-12T07:00:20.000Z", closedAs: "done", closedAt: "2026-10-12T07:12:00.000Z" }));
+    write("deliver", nightRecord("deliver", "2026-10-12T12:30:10.000Z", { startedAt: "2026-10-12T12:30:10.000Z", closedAs: "done", closedAt: "2026-10-12T12:31:00.000Z" }));
+    let shown = await rows(store, clockDeps);
+    expect(shown.get("Last build")).toBe("Oct 12, 1:00 AM, on time");
+    expect(shown.get("Last deliver")).toBe("Oct 12, 6:30 AM, on time");
+
+    // The Mac was asleep until 3:00 am, and waited its minute: 121 minutes late.
+    write("build", nightRecord("build", "2026-10-12T09:01:00.000Z", { startedAt: "2026-10-12T09:01:00.000Z", closedAs: "done", closedAt: "2026-10-12T09:12:00.000Z" }));
+    write("deliver", nightRecord("deliver", "2026-10-12T12:30:10.000Z", { startedAt: "2026-10-12T12:30:10.000Z", closedAs: "cut-short", closedAt: "2026-10-12T12:30:40.000Z" }));
+    shown = await rows(store, clockDeps);
+    expect(shown.get("Last build")).toBe("Oct 12, 3:01 AM, 121 minutes late");
+    expect(shown.get("Last deliver")).toBe("Oct 12, 6:30 AM, on time, cut short");
+
+    // Up to two minutes after its time is on time. From two whole minutes on it is late.
+    write("build", nightRecord("build", "2026-10-12T07:01:59.000Z", { startedAt: "2026-10-12T07:01:59.000Z", closedAs: "done" }));
+    expect((await rows(store, clockDeps)).get("Last build")).toBe("Oct 12, 1:01 AM, on time");
+    write("build", nightRecord("build", "2026-10-12T07:02:00.000Z", { startedAt: "2026-10-12T07:02:00.000Z", closedAs: "cut-short" }));
+    expect((await rows(store, clockDeps)).get("Last build")).toBe("Oct 12, 1:02 AM, 2 minutes late, cut short");
+
+    // The night after, with nothing run yet: the last run is still that one.
+    expect((await rows(store, clockDeps, "2026-10-13T08:00:00.000Z")).get("Last build")).toBe("Oct 12, 1:02 AM, 2 minutes late, cut short");
+  });
+
+  it("says a build or a deliver that is running is running, and since when", async () => {
+    const store = onTheClock();
+    writeNightRun(store, "build", nightRecord("build", "2026-10-12T15:40:00.000Z", { startedAt: "2026-10-12T15:41:00.000Z" }), new Date(MORNING));
+    const running: Partial<StatusDeps> = { ...clockDeps, jobRunning: (job) => job === "build" };
+    let shown = await rows(store, running);
+    expect(shown.get("Last build")).toBe("Oct 12, 9:41 AM, 521 minutes late, still running");
+    expect(shown.get("Next build")).toBe("running now, since Oct 12, 9:41 AM");
+    // The deliver job is not running: its row is the ordinary one.
+    expect(shown.get("Next deliver")).toMatch(/^as soon as the Mac has been awake/);
+
+    // Its lock is free after all: the run died. The job's next check closes it as cut short, and nothing is "running".
+    shown = await rows(store, clockDeps);
+    expect(shown.get("Last build")).toBe("Oct 12, 9:41 AM, 521 minutes late, cut short");
+    expect(shown.get("Next build")).toBe("Oct 13, 1:00 AM (kiro-crew first)");
+  });
+
+  it("says a run that is due and has not started is due, and what it is waiting for", async () => {
+    // Installed yesterday, asleep all night: at 10:00 am both jobs' slots are open.
+    const store = onTheClock();
+    let shown = await rows(store, clockDeps);
+    expect(shown.get("Next build")).toBe("as soon as the Mac has been awake for a minute or two: the Oct 12, 1:00 AM build has not run yet (kiro-crew first)");
+    expect(shown.get("Next deliver")).toBe("as soon as the Mac has been awake for a minute or two: the Oct 12, 6:30 AM deliver has not run yet");
+
+    // Awake, and no real internet: both have found themselves due and stored why they wait.
+    writeNightRun(store, "build", nightRecord("build", "2026-10-12T15:58:00.000Z", { waiting: "offline" }), new Date(MORNING));
+    writeNightRun(store, "deliver", nightRecord("deliver", "2026-10-12T15:58:00.000Z", { waiting: "offline" }), new Date(MORNING));
+    shown = await rows(store, clockDeps);
+    expect(shown.get("Next build")).toBe("waiting for the internet: the Oct 12, 1:00 AM build has not run yet (kiro-crew first)");
+    expect(shown.get("Next deliver")).toBe("waiting for the internet: the Oct 12, 6:30 AM deliver has not run yet");
+
+    // The delivery waits for a late build, whether that build is running or about to start.
+    for (const waiting of ["build-running", "build-not-started"] as const) {
+      writeNightRun(store, "deliver", nightRecord("deliver", "2026-10-12T15:58:00.000Z", { waiting }), new Date(MORNING));
+      expect((await rows(store, clockDeps)).get("Next deliver"), waiting).toBe("waiting for the build to finish first: the Oct 12, 6:30 AM deliver has not run yet");
+    }
+  });
+
+  it("keeps to the settings' own next times when nothing wakes the job on this data folder", async () => {
+    const store = onTheClock();
+    const usual = { build: "Oct 13, 1:00 AM (kiro-crew first)", deliver: "Oct 13, 6:30 AM, for the link on the wrist at 07:00" };
+    const both = async (deps: Partial<StatusDeps>) => {
+      const shown = await rows(store, deps);
+      return { build: shown.get("Next build"), deliver: shown.get("Next deliver") };
+    };
+    // Still on macOS's calendar: that job does not catch a slot up by Overnight's clock.
+    expect(await both({ ...clockDeps, jobTriggers: () => ({ build: "calendar", deliver: "calendar" }) })).toEqual(usual);
+    // Not installed, or its settings file could not be read.
+    expect(await both({ ...clockDeps, jobTriggers: () => ({ build: null, deliver: null }) })).toEqual(usual);
+    // Installed for another data folder.
+    expect(await both({ ...clockDeps, jobsBelongHere: () => false })).toEqual(usual);
+    // One of each: only the job on the timer is said to be due.
+    expect(await both({ ...clockDeps, jobTriggers: () => ({ build: "timer", deliver: "calendar" }) })).toEqual({ build: expect.stringMatching(/^as soon as the Mac has been awake/), deliver: usual.deliver });
+    // A caller that cannot look at the jobs goes by the record alone.
+    expect((await both({})).build).toMatch(/^as soon as the Mac has been awake/);
+  });
+});
+
+describe("overnight status: the night clock row", () => {
+  const clockRow = async (store: Store, deps: Partial<StatusDeps> = {}, now: string = MORNING) => (await rows(store, { ...clockDeps, ...deps }, now)).get("Night clock");
+
+  it("says both jobs check the time every minute when they do", async () => {
+    expect(await clockRow(onTheClock())).toBe("build and deliver check the time every minute, in America/Boise");
+    // Exactly three minutes ago still counts as a moment ago.
+    expect(await clockRow(onTheClock("2026-10-12T15:57:00.000Z"))).toBe("build and deliver check the time every minute, in America/Boise");
+    // Only one of the two is installed: the Night jobs row says which is missing.
+    expect(await clockRow(onTheClock(), { nightJobs: () => ({ build: true, deliver: false, crew: true }) })).toBe("the build job checks the time every minute, in America/Boise");
+  });
+
+  it("says which job is still on macOS's calendar, and how to move it", async () => {
+    const store = onTheClock();
+    expect(await clockRow(store, { jobTriggers: () => ({ build: "calendar", deliver: "timer" }) })).toBe(
+      "the build job is still on macOS's calendar, which ran an hour late on Oct 11. Move it to Overnight's own clock with: scripts/install-agents.sh install build",
+    );
+    expect(await clockRow(store, { jobTriggers: () => ({ build: "timer", deliver: "calendar" }) })).toBe(
+      "the deliver job is still on macOS's calendar, which ran an hour late on Oct 11. Move it to Overnight's own clock with: scripts/install-agents.sh install deliver",
+    );
+    expect(await clockRow(store, { jobTriggers: () => ({ build: "calendar", deliver: "calendar" }) })).toBe(
+      "the build and deliver jobs are still on macOS's calendar, which ran an hour late on Oct 11. Move them to Overnight's own clock with: scripts/install-agents.sh install build   then: scripts/install-agents.sh install deliver",
+    );
+  });
+
+  it("says when a job has stopped checking the time, or never has, and where to look", async () => {
+    // Both last asked the clock at 11:02 pm.
+    const stale = onTheClock("2026-10-12T05:02:00.000Z");
+    expect(await clockRow(stale)).toBe(
+      "the build job last checked the time Oct 11, 11:02 PM. If the Mac has been awake for a few minutes since, see why with: scripts/install-agents.sh status build   Also: the deliver job last checked the time Oct 11, 11:02 PM. If the Mac has been awake for a few minutes since, see why with: scripts/install-agents.sh status deliver",
+    );
+    // One millisecond more than three minutes ago is not a moment ago.
+    expect(await clockRow(onTheClock("2026-10-12T15:56:59.999Z"))).toContain("the build job last checked the time Oct 12, 9:56 AM.");
+    // A job that is running does not ask the clock meanwhile: its lock says it is alive.
+    expect(await clockRow(stale, { jobRunning: (job) => job === "build" })).toBe(
+      "the deliver job last checked the time Oct 11, 11:02 PM. If the Mac has been awake for a few minutes since, see why with: scripts/install-agents.sh status deliver",
+    );
+    // Not being able to tell is not "running".
+    expect(await clockRow(stale, { jobRunning: () => null })).toContain("the build job last checked the time");
+
+    expect(await clockRow(onTheClock(null), { nightJobs: () => ({ build: true, deliver: false, crew: true }) })).toBe(
+      "the build job has never checked the time. If the Mac has been awake for a few minutes since it was installed, see why with: scripts/install-agents.sh status build",
+    );
+  });
+
+  it("says when a clock's record is dated ahead, so nothing runs until then, and how to start it from now", async () => {
+    const store = onTheClock();
+    // The Mac's clock once read January 5: the build's record is from then.
+    writeNightRun(store, "build", nightRecord("build", "2027-01-05T08:00:00.000Z", { closedAs: "first-check" }), new Date(MORNING));
+    expect(await clockRow(store)).toBe("the build clock's record is dated ahead (Jan 5, 2027), so nothing runs until then. Start it from now with: scripts/install-agents.sh install build");
+    expect(collectStatus({ store, config, now: fixedNow(MORNING) }).nightClock.build.recordAhead).toBe("2027-01-05");
+    // A day ahead in the same year: the year goes without saying.
+    writeNightRun(store, "deliver", nightRecord("deliver", "2026-10-14T13:00:00.000Z", { closedAs: "first-check" }), new Date(MORNING));
+    expect(await clockRow(store)).toContain("   Also: the deliver clock's record is dated ahead (Oct 14), so nothing runs until then. Start it from now with: scripts/install-agents.sh install deliver");
+    expect(dayWords("2027-01-05", "2026-10-12")).toBe("Jan 5, 2027");
+    expect(dayWords("2026-10-14", "2026-10-12")).toBe("Oct 14");
+    expect(dayWords("not a day", "2026-10-12")).toBe("not a day");
+  });
+
+  it("says when an installed job's settings file could not be read, and names every problem when there are two kinds", async () => {
+    const store = onTheClock("2026-10-12T05:02:00.000Z");
+    expect(await clockRow(store, { jobTriggers: () => ({ build: "calendar", deliver: null }) })).toBe(
+      "the build job is still on macOS's calendar, which ran an hour late on Oct 11. Move it to Overnight's own clock with: scripts/install-agents.sh install build   Also: the deliver job's settings file could not be read. See why with: scripts/install-agents.sh status deliver",
+    );
+    expect(await clockRow(store, { jobTriggers: () => ({ build: "timer", deliver: "calendar" }) })).toBe(
+      "the deliver job is still on macOS's calendar, which ran an hour late on Oct 11. Move it to Overnight's own clock with: scripts/install-agents.sh install deliver   Also: the build job last checked the time Oct 11, 11:02 PM. If the Mac has been awake for a few minutes since, see why with: scripts/install-agents.sh status build",
+    );
+  });
+
+  it("is left out when neither job is installed, when they were installed for another data folder, and when the caller cannot look", async () => {
+    const store = onTheClock();
+    expect(await clockRow(store, { nightJobs: () => ({ build: false, deliver: false, crew: true }) })).toBeUndefined();
+    expect(await clockRow(store, { jobsBelongHere: () => false })).toBeUndefined();
+    expect((await rows(store, { nightJobs: () => ALL_JOBS })).has("Night clock")).toBe(false);
+    expect((await rows(store, { jobTriggers: () => ON_TIMER })).has("Night clock")).toBe(false);
+    expect(nightClockWords(collectStatus({ store, config, now: fixedNow(MORNING) }))).toBeNull();
+    // It sits between the night jobs and the gateway.
+    const out = capture();
+    await status({ store, config, write: out.write, now: fixedNow(MORNING), ...clockDeps, gatewayAnswers: async () => true, powerSource: async () => "mains" });
+    const labels = out.lines.slice(1).map((line) => /^ {2}(\S.*?) {2,}/.exec(line)?.[1]);
+    expect(labels).toEqual(["Mode", "Data folder", "Time zone", "Utterances saved", "Detector runs", "Ideas", "Asks today", "Builds today", "Build credits", "Waiting to build", "Next build", "Next deliver", "Night jobs", "Night clock", "Kiro Crew gateway", "Build sandbox", "Power", "Tonight", "Full check"]);
+  });
+
+  it("puts every row in its place when all of them show", async () => {
+    const store = populated();
+    const delivered = moveIdea(store, addIdea(store, { title: "Made-up timer", pitch: "Counts down.", quote: "a made-up line" }, at(-9000)), ["asked", "approved", "building", "built", "published", "delivered"], at(-8000));
+    store.updateIdea(delivered.id, { publishedUrl: "https://example.invalid/apps/made-up-timer/" }, at(-7000));
+    for (const job of ["build", "deliver"] as const) {
+      writeNightRun(store, job, nightRecord(job, at(-3 * 3600), { startedAt: at(-3 * 3600), closedAs: "done" }), new Date(at(0)));
+      noteChecked(store, job, new Date(at(-30)));
+    }
+    const out = capture();
+    await status(
+      { store, config, write: out.write, now: fixedNow(), listenerState: () => ({ running: true, jobInstalled: true }), ...clockDeps, gatewayAnswers: async () => true, powerSource: async () => "mains", jobsBelongHere: () => true },
+      { beeLoginState: async () => "logged-in" },
+    );
+    const labels = out.lines.slice(1).map((line) => /^ {2}(\S.*?) {2,}/.exec(line)?.[1]);
+    expect(labels).toEqual([
+      "Mode",
+      "Listener",
+      "Data folder",
+      "Time zone",
+      "Utterances saved",
+      "Newest utterance",
+      "Waiting for detector",
+      "Detector runs",
+      "Ideas",
+      "Asks today",
+      "Builds today",
+      "Build credits",
+      "Waiting to build",
+      "Last delivered",
+      "Last build",
+      "Last deliver",
+      "Next build",
+      "Next deliver",
+      "Night jobs",
+      "Night clock",
+      "Kiro Crew gateway",
+      "Build sandbox",
+      "Power",
+      "Tonight",
+      "Bee login",
+      "Full check",
+    ]);
+  });
+});
+
+describe("overnight status: power", () => {
+  const power = async (powerSource: (() => Promise<PowerSource>) | undefined) => {
+    const out = capture();
+    const json = capture();
+    await status({ store: new Store(":memory:"), config, write: out.write, now: fixedNow(), powerSource });
+    await status({ store: new Store(":memory:"), config, write: json.write, now: fixedNow(), powerSource }, { json: true });
+    return { row: out.lines.find((line) => line.startsWith("  Power"))?.replace(/^ {2}Power {2,}/, ""), json: JSON.parse(json.text()) as Record<string, unknown>, all: out.text() };
+  };
+
+  it("says mains or battery, and on battery what that means: awake while the lid is open, nothing with it closed", async () => {
+    expect((await power(async () => "mains")).row).toBe("mains power");
+    expect((await power(async () => "mains")).json).toMatchObject({ power: "mains" });
+    const battery = await power(async () => "battery");
+    expect(battery.row).toBe("battery: Overnight keeps the Mac awake while the lid is open. With the lid closed nothing runs until it is opened");
+    expect(battery.json).toMatchObject({ power: "battery" });
+    // No run waits for mains power, and no row says one does.
+    expect(battery.all).not.toMatch(/plugged in|waits? (for|until).*(mains|plugged)/);
+  });
+
+  it("says it could not tell when the reading is not one of the two, or the look itself fails, and still shows the rest", async () => {
+    expect((await power(async () => "unknown")).row).toBe("could not tell");
+    const failed = await power(() => Promise.reject(new Error("made-up: pmset fell over")));
+    expect(failed.row).toBe("could not tell");
+    expect(failed.json).toMatchObject({ power: "unknown", utterances: 0 });
+    expect(failed.all).not.toContain("made-up");
+  });
+
+  it("is left out when the caller cannot look", async () => {
+    const without = await power(undefined);
+    expect(without.row).toBeUndefined();
+    expect(without.json).not.toHaveProperty("power");
+  });
+});
+
+describe("overnight status on a data folder the installed jobs do not use", () => {
+  const elsewhere = async (listener: ListenerState, nightJobs: NightJobsState = ALL_JOBS, jobsBelongHere: boolean | null = false) =>
+    rows(onTheClock(), { ...clockDeps, listenerState: () => listener, nightJobs: () => nightJobs, jobsBelongHere: () => jobsBelongHere });
+
+  it("does not call a listener the job did not start the job's, or the job's absence here a fault", async () => {
+    expect((await elsewhere({ running: true, jobInstalled: true })).get("Listener")).toBe("running on this data folder, started by hand (the installed background job listens on another data folder)");
+    expect((await elsewhere({ running: false, jobInstalled: true })).get("Listener")).toBe("not running on this data folder (the installed background job listens on another data folder)");
+    expect((await elsewhere({ running: null, jobInstalled: true })).get("Listener")).toBe("could not tell whether one is running on this data folder (the installed background job listens on another data folder)");
+    // No listener job is installed at all: the ordinary words.
+    expect((await elsewhere({ running: false, jobInstalled: false })).get("Listener")).toBe("not running (background job not installed). Start it with: scripts/install-agents.sh install listen");
+  });
+
+  it("says the night jobs are installed for another data folder, leaves the night clock row out, and says nothing is built here by them", async () => {
+    const shown = await elsewhere({ running: false, jobInstalled: true });
+    expect(shown.get("Night jobs")).toBe("installed for another data folder: none of them runs on this one");
+    expect(shown.has("Night clock")).toBe(false);
+    expect(shown.get("Tonight")).toBe("nothing is built on this data folder by the night jobs: they are installed for another one");
+    // Some of them installed: still for another folder. None of them installed: the ordinary words.
+    expect((await elsewhere({ running: false, jobInstalled: true }, { build: true, deliver: false, crew: false })).get("Night jobs")).toBe("installed for another data folder: none of them runs on this one");
+    expect((await elsewhere({ running: false, jobInstalled: true }, { build: false, deliver: false, crew: false })).get("Night jobs")).toMatch(/^not installed\. Put them in place with:/);
+  });
+
+  it("changes nothing when the jobs are this folder's, or when that cannot be told", async () => {
+    for (const jobsBelongHere of [true, null]) {
+      const shown = await elsewhere({ running: true, jobInstalled: true }, ALL_JOBS, jobsBelongHere);
+      expect(shown.get("Listener")).toBe("running (background job installed)");
+      expect(shown.get("Night jobs")).toBe("build, deliver and Kiro Crew gateway installed");
+      expect(shown.get("Night clock")).toBe("build and deliver check the time every minute, in America/Boise");
+    }
+    const json = capture();
+    await status({ store: new Store(":memory:"), config, write: json.write, now: fixedNow(), jobsBelongHere: () => false }, { json: true });
+    expect(JSON.parse(json.text())).toMatchObject({ jobsBelongHere: false });
+    const unknown = capture();
+    await status({ store: new Store(":memory:"), config, write: unknown.write, now: fixedNow(), jobsBelongHere: () => null }, { json: true });
+    expect(JSON.parse(unknown.text())).toMatchObject({ jobsBelongHere: null });
+    const left = capture();
+    await status({ store: new Store(":memory:"), config, write: left.write, now: fixedNow() }, { json: true });
+    expect(JSON.parse(left.text())).not.toHaveProperty("jobsBelongHere");
   });
 });

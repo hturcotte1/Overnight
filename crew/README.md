@@ -32,7 +32,8 @@ The installed file must be an exact copy of `crew/build-skill.md`. Before every 
    **Kiro CLI:** Overnight first asks Kiro whether its two content-sharing settings are off, and refuses to build if either is not. It empties the build's temporary folder. Then it runs `kiro-cli chat --no-interactive` in the workspace, inside its own macOS sandbox (`packages/builder/sandbox/kiro-cli-build.sb`).
 3. The agent writes the app and, last of all, `BUILD_STATUS.json`.
 4. Overnight decides whether the build worked from three things only: `BUILD_STATUS.json` says `"built"`, that file was written after the build started, and `dist/index.html` exists. Kiro Crew's own "success" is ignored: it only means a session ended.
-5. In the morning the deliver step rebuilds the app from a clean copy, runs its own browser test, and only then publishes.
+5. Overnight records the idea as built and then moves the whole workspace to `~/.overnight/built/<idea id>/`. No build job can reach that folder (see "Finished builds" below).
+6. In the morning the deliver step rebuilds the app from a clean copy of that folder, runs its own browser test, and only then publishes.
 
 The agent never runs the `overnight` command, never sees the database, and never publishes.
 
@@ -57,6 +58,33 @@ Neither is the idea's fault, so **the nightly run tries such a build once more**
 - `npx overnight build-now <idea id>` is not bound by any of this: it builds any approved or failed idea when a person asks.
 
 The rule itself lives in `packages/core/src/build-retry.ts`. The log has one line, "trying a build again", each time a second try starts.
+
+### Finished builds
+
+A workspace is where an agent works, so build jobs can read and write there. With Kiro Crew that means every idea's workspace: one sandbox covers every job the gateway starts. A finished app left in `workspaces/` could be changed by a later job before the morning publishes it.
+
+So a finished build does not stay there:
+
+- As soon as an idea is recorded as built, its workspace is renamed to `~/.overnight/built/<idea id>/` (`packages/builder/src/seal.ts`). Whichever builder made it.
+- Both sandbox profiles close all of the data folder except `workspaces/`, `tmp/build/` and `tmp/build-probe/`, so nothing in `built/` can be read, listed, written, run or moved by a build job. The sandbox check tries it every night (below).
+- The order is "record, then move". If Overnight is killed between the two, the app is still in `workspaces/` and the morning uses it from there.
+- Before an idea is built again, an older finished build of it is renamed to `built/<idea id>.old-<time>`, never deleted. If that cannot be done, the build is not started.
+- If the move itself fails, the idea stays built, the log has an error ("a finished build could not be moved out of the builders' reach"), and the morning uses the app where it is.
+
+What this does not cover: a workspace while it is being built, and the `<idea id>.old-<time>` folders that failed tries leave in `workspaces/`. A Kiro Crew job can still reach those.
+
+### What builds cost
+
+Overnight counts what its builds use, and stops building for the month at a ceiling: `MAX_BUILD_CREDITS_PER_MONTH` in `.env` (400 unless set; 0 means never build). The month is the calendar month in `TZ`.
+
+- **One row per try that started an agent.** A build that needed both builders has two rows. A try that could not start has none.
+- **Kiro Crew's own figure when there is one.** After the run is over (cancelled, if it had to be) Overnight reads Kiro Crew's usage file for that job. This goes for a build that failed, ran past its time limit or was stopped as much as for one that worked.
+- **An estimate when there is none:** 2 credits for each minute the agent ran, at least 0.1. Kiro CLI gives no figure, so its builds are always estimated. The agent's time is never taken to be longer than the build's time limit: if the Mac slept in the middle of a build, the hours asleep are not the agent's.
+- A figure no build could have used (negative, or above 100,000) is not believed; the estimate is counted in its place. Kiro Crew's usage file is one a build job can write.
+- **Asked before each idea, never during one.** One build can take the month over the line; the next one waits. `overnight build` then says "this month's build credits are used up (… of … counted)", and `build-now` refuses with the same words. Nothing buzzes.
+- **It fails open.** If the count cannot be read or written, that is logged as an error and the build goes ahead. A fault in the ceiling must not cost a night.
+
+It is a count of what Overnight saw, not Kiro's bill: the detector's credits are not in it, and neither is a build whose process was killed before it could write its row.
 
 ## The sandbox
 
@@ -106,6 +134,7 @@ A build **cannot**:
 
 - read, list or run anything else in the home folder: `~/Documents`, `~/Desktop`, `~/Downloads`, `~/Library` (browser profiles, other programs' data), `~/.claude` and `/private/tmp/claude-<number>` (Claude Code's session records and scratch folders), `~/.ssh`, `~/.config`, this repo
 - read Overnight's data folder (apart from the folders named above) or the repo's `.env`
+- read, list, write, run or move anything among the finished builds in `~/.overnight/built/`
 - run `gh`, or the Bee program that is installed on this Mac
 - write where programs are run from or settings are read from: `~/.local`, the Node.js folder, `~/.kiro/crew-venv`, `~/.kiro/crew-python`, `/Applications`, this repo, `~/.zshenv` and the other shell start-up files, `~/.gitconfig`, `~/.config`, `~/Library/LaunchAgents`, `~/Library/Preferences`, `~/.kiro/settings`, Kiro's steering, skills and prompts folders, `~/.npm/_npx`
 - use the Keychain, the clipboard or the ssh agent, start other apps, run `launchctl`
@@ -131,21 +160,43 @@ Once per `overnight build` run, before the first Kiro Crew build, Overnight adds
 4. listing `~/Documents`, `~/Library` and `~/.claude`,
 5. finding, with `pgrep -f`, a harmless stand-in process that Overnight starts outside the sandbox for as long as the check runs (this is what reading another program's command line looks like),
 6. making a new file in each of: the home folder, this repo, the folder node is in, the folder Kiro Crew's program is in, and `~/Library/LaunchAgents`. (The file is removed at once if making it worked.)
+7. listing the finished builds in `~/.overnight/built/`. Overnight keeps one small file of its own there, `.overnight-probe-marker`, so that the folder is never empty: "nothing listed" can then only mean "refused".
+8. making a new file among the finished builds.
 
 The job writes only byte counts, line counts and 0/1 marks to `~/.overnight/tmp/build-probe/`. All of them must come back as 0 (or empty). If anything is reachable or writable, or the check cannot finish within 3 minutes, nothing is built with Kiro Crew that night; the reason starts with "the build sandbox check failed" and the Kiro CLI builder is used instead.
 
+For the six writes the job's own marks are not the last word. When the job is over, Overnight itself looks from outside the sandbox for the six files the job tried to make. One that is there counts as written, whatever the job reported, and is removed. (Measured Oct 11: where a job may write but not look, `touch` makes the file and still ends with an error, and `rm` then cannot remove it. Going by the marks alone, a fence opened for writing only would have passed.)
+
 `npx overnight preflight` runs the same check on its own, through the same code (`runStandaloneSandboxProbe` in `packages/builder`): Kiro Crew's setting first, then whether the gateway answers, then the job.
 
-**What the check proves:** that the gateway that is running right now was started inside a fence that refuses those twelve things (three reads, three lists, one look at another program, five writes). A gateway started with no profile, or with one in which any of them has been opened again, fails it. (Tried: against a gateway started inside a deliberately loosened copy, the check failed and named each opened thing.)
+**What the check proves:** that the gateway that is running right now was started inside a fence that refuses those fourteen things (three reads, four lists, one look at another program, six writes). A gateway started with no profile, or with one in which any of them has been opened again, fails it. (Tried on Oct 10 with the first twelve: against a gateway started inside a deliberately loosened copy, the check failed and named each opened thing. Each of the fourteen also fails, in the tests, on a copy of the profile loosened in exactly that way.)
 
 **What it does not prove:**
 
-- that every other rule of the profile holds. It tries twelve things, not everything: for the rest there are tests that run the profile for real around harmless commands (`packages/builder/test/sandbox-profiles.test.ts`).
+- that every other rule of the profile holds. It tries fourteen things, not everything: for the rest there are tests that run the profile for real around harmless commands (`packages/builder/test/sandbox-profiles.test.ts`).
 - anything about the home folder's own list of names, which a Kiro Crew job can read (see above), or about the network, which is open.
 - anything about a build that runs later the same night, beyond "the gateway has not been restarted since". The check runs once per `overnight build` run.
 - anything about the Kiro CLI builder. It needs no check of this kind and no Kiro Crew setting: Overnight starts it inside its own sandbox, with the profile's values, every time.
 
 Before the first build of a night Overnight also removes jobs of its own that a killed run left on Kiro Crew's list. If the list holds a job that Overnight did not add, it logs an error and removes nothing: a job inside the gateway is able to add jobs, so a person should look (`kirocrew cron list`).
+
+### Proving a change to a profile
+
+The tests run both profiles for real, but only around harmless commands on a made-up home folder. They cannot say what Kiro Crew and Kiro CLI themselves need while they work. `spikes/11-hardening-proof.ts` finds that out on a throwaway gateway, before a changed profile reaches the gateway that builds every night:
+
+```
+OVERNIGHT_DATA_DIR=~/.overnight-hardening node spikes/11-hardening-proof.ts check
+OVERNIGHT_DATA_DIR=~/.overnight-hardening KIRO_HOME=~/.kiro-hardening KIROCREW_PORT=5478 node spikes/11-hardening-proof.ts p1
+OVERNIGHT_DATA_DIR=~/.overnight-hardening KIRO_HOME=~/.kiro-hardening KIROCREW_PORT=5478 node spikes/11-hardening-proof.ts p2 --spend-credits
+```
+
+- `check` starts no gateway and no Kiro program, and costs nothing. It checks the script's own tools.
+- `p1` costs no Kiro credits. It starts a throwaway gateway inside the profile and runs the sandbox check (which must pass, and must fail by name against a loosened copy), one command job that is added, started, cancelled and removed by the builder's own code, and one `kiro-cli settings` question inside the Kiro CLI profile.
+- `p2` costs about half a Kiro credit: a one-line Kiro CLI chat and a one-line Kiro Crew agent job, each of which writes one file.
+
+The gateway runs inside a copy of the shipped profile with a few lines added that only report: each use of a socket file, a local port or the list of programs then shows in macOS's log, and the script prints it as counts by program, kind and the shape of the target, never as raw lines. It stops at the first failure.
+
+It refuses `~/.overnight`, `~/.kiro` and port 5476 under any spelling, and it will not run near the night's build or delivery. It installs no background job: the gateway is the script's own child and ends with it.
 
 ## Running one build by hand
 
@@ -179,5 +230,5 @@ Things that will trip you up, all seen in the experiments:
 - `kirocrew cron remove` takes a job off the list but does not end a run that is in progress, and kirocrew has no command that does. Overnight ends one by asking the gateway to cancel it before it removes the job (`packages/builder/src/crew-client.ts`). By hand: let the run finish, or stop the gateway.
 - `kirocrew` stops with a Python error when it may not look at the folder it was started in. Inside the sandbox this repo is closed, so Overnight starts its own `kirocrew` commands in `~/.overnight/tmp/build/`.
 - When an agent job fails at once with "cannot verify that macOS agent workspace ... a filesystem check failed on '..'", a folder above Kiro Crew's own is closed to it. See "It can still" above.
-- A Kiro Crew build costs about 2.6 to 4.2 Kiro credits. A build through Kiro CLI costs less; we have not measured it on its own. Even a one-line agent job costs about 0.4 to 0.5.
+- A Kiro Crew build costs about 2.6 to 4.6 Kiro credits. A build through Kiro CLI costs less; we have not measured it on its own. Even a one-line agent job costs about 0.4 to 0.5.
 - Kiro Crew leaves a folder per run in `~/workplace/kirocrew-workspace/`. They are small and safe to delete.

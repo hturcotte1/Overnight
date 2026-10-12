@@ -12,7 +12,7 @@ import { BUILD_SKILL_FILE, PROBE_JOB_NAME, probeDir, runStandaloneSandboxProbe, 
 import { gatewayAnswers, gatewayPort } from "../src/crew-client.ts";
 import { standaloneSandboxProbe } from "../src/kiro-crew.ts";
 import type { StandaloneProbeOverrides } from "../src/kiro-crew.ts";
-import { LIST_TESTS, WRITE_TESTS } from "../src/probe.ts";
+import { BUILT_TESTS, LIST_TESTS, WRITE_TESTS } from "../src/probe.ts";
 import { collectingLogger, FakeCrew, movableClock, T0, tempDir, testConfig, testPaths } from "./helpers.ts";
 
 interface Rig {
@@ -75,7 +75,7 @@ function makeRig(): Rig {
     if (job.name !== PROBE_JOB_NAME) return;
     const dir = probeDir(paths);
     for (const [name, text] of Object.entries({ "keychain.txt": rig.keychain, "bee.txt": "0\n", "database.txt": "", "processes.txt": "0\n", "finished.txt": "1\n" })) writeFileSync(path.join(dir, name), text);
-    for (const test of [...LIST_TESTS, ...WRITE_TESTS]) writeFileSync(path.join(dir, test.file), "0\n");
+    for (const test of [...LIST_TESTS, ...WRITE_TESTS, ...BUILT_TESTS]) writeFileSync(path.join(dir, test.file), "0\n");
   };
   return rig;
 }
