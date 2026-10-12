@@ -12,7 +12,7 @@ import type { BuildBackend, BuildJob, CommandResult, KiroCliBackendOptions } fro
 import { emptyFolder, KIRO_CLI_TMP, PRIVACY_SETTINGS, SHARING_NOT_OFF, SHARING_UNKNOWN } from "../src/kiro-cli.ts";
 import { profileParams } from "../src/sandbox-values.ts";
 import { STOPPED_WHILE_RUNNING } from "../src/run.ts";
-import { collectingLogger, leaveBuild, MINUTE, movableClock, recordingRunner, reply, SECOND, tempDir, testPaths } from "./helpers.ts";
+import { clockedSleptWatch, collectingLogger, HOUR, leaveBuild, MINUTE, movableClock, recordingRunner, reply, SECOND, tempDir, testPaths } from "./helpers.ts";
 import type { RunCall } from "./helpers.ts";
 
 const ID = "idea_20261010_ab12cd34";
@@ -357,9 +357,76 @@ describe("Kiro CLI backend: what a try cost", () => {
     expect(STOPPED_WHILE_RUNNING).toBe("the program was stopped: this process is stopping");
   });
 
-  it("never says the agent ran for longer than its time limit, however long the Mac slept in the middle of the build", async () => {
+  it("leaves out the time the Mac slept in the middle of the build: the agent's time is the time it was at work", async () => {
     const stop = new AbortController();
-    // Six hours pass on the clock while Kiro "runs": the Mac was asleep, and the run is stopped when it wakes.
+    const clock = movableClock();
+    const mac = clockedSleptWatch(clock);
+    const rig = makeRig(
+      () => {
+        // One watch, started with the agent and not with the questions before it.
+        expect(mac.running()).toBe(1);
+        // The agent works for two minutes. The lid is closed. Six hours later the Mac wakes, and
+        // the command line's own sleep watch stops the run (here the test does).
+        mac.awake(2 * MINUTE);
+        mac.asleep(6 * HOUR);
+        stop.abort();
+        return reply("", { exitCode: null, error: STOPPED_WHILE_RUNNING });
+      },
+      { now: clock.now, sleptWatch: mac.start },
+      () => (expect(mac.running()).toBe(0), reply(OFF)),
+    );
+    const outcome = await rig.backend.build(rig.job, { signal: stop.signal });
+    expect(outcome).toMatchObject({ ok: false, reason: STOPPED_REASON, ms: 6 * HOUR + 2 * MINUTE });
+    // Two minutes, to within one look of the watch (5 seconds): not the 45 minutes of a
+    // full-length try, which is what was counted before (90 credits in the month's ledger).
+    expect(outcome.agentMs).toBe(2 * MINUTE + 5 * SECOND);
+    expect(mac.running()).toBe(0);
+    const said = rig.lines.map((line) => JSON.parse(line) as Record<string, unknown>).find((line) => line.message === "the Mac slept during a kiro cli build; that time is not counted as the agent's");
+    expect(said).toMatchObject({ level: "info", ideaId: ID, sleptSeconds: 6 * 60 * 60 - 5, agentSeconds: 125 });
+  });
+
+  it("leaves it out for a build that finished after the Mac woke, and says nothing when the Mac never slept", async () => {
+    const clock = movableClock();
+    const mac = clockedSleptWatch(clock);
+    const rig = makeRig(
+      (call) => {
+        mac.awake(3 * MINUTE);
+        mac.asleep(HOUR);
+        mac.awake(4 * MINUTE);
+        return builds(call);
+      },
+      { now: clock.now, sleptWatch: mac.start },
+    );
+    expect(await rig.backend.build(rig.job)).toMatchObject({ ok: true, agentMs: 7 * MINUTE + 5 * SECOND });
+
+    const awake = makeRig((call) => (mac.awake(7 * MINUTE), builds(call)), { now: clock.now, sleptWatch: mac.start });
+    expect(await awake.backend.build(awake.job)).toMatchObject({ ok: true, agentMs: 7 * MINUTE });
+    expect(awake.lines.join("\n")).not.toContain("the Mac slept");
+  });
+
+  it("stops its watch however the run ends, and starts none when Kiro is never run", async () => {
+    const clock = movableClock();
+    const mac = clockedSleptWatch(clock);
+    let started = 0;
+    const sleptWatch = () => ((started += 1), mac.start());
+    const thrown = makeRig(
+      () => {
+        throw new Error("made-up runner crash");
+      },
+      { now: clock.now, sleptWatch },
+    );
+    expect(await thrown.backend.build(thrown.job)).toMatchObject({ ok: false, reason: "the Kiro CLI build stopped on an unexpected error" });
+    expect([started, mac.running()]).toEqual([1, 0]);
+
+    const refused = makeRig(undefined, { now: clock.now, sleptWatch }, () => reply("true (global)\n"));
+    expect(await refused.backend.build(refused.job)).toMatchObject({ ok: false, couldNotStart: true });
+    expect([started, mac.running()]).toEqual([1, 0]);
+  });
+
+  it("never says the agent ran for longer than its time limit, even if a sleep in the middle of the build was never seen", async () => {
+    const stop = new AbortController();
+    // Six hours pass on the test's clock while Kiro "runs", and the watch (the real one, on the
+    // real clock) sees none of it. The time limit is the second bound.
     const rig = timedRig(6 * 60 * MINUTE, () => (stop.abort(), reply("", { exitCode: null, error: STOPPED_WHILE_RUNNING })));
     const outcome = await rig.backend.build(rig.job, { signal: stop.signal });
     expect(outcome).toMatchObject({ ok: false, reason: STOPPED_REASON, ms: 6 * 60 * MINUTE + 4 * SECOND });

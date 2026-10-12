@@ -37,6 +37,8 @@ import { createCommandRunner } from "./run.ts";
 import type { CommandRunner } from "./run.ts";
 import { readSmallText } from "./safe-read.ts";
 import { realPath, realPathAllowMissing, sandboxDefines } from "./sandbox-values.ts";
+import { awakeMs, watchSlept } from "./slept.ts";
+import type { StartSleptWatch } from "./slept.ts";
 import { buildTmpDir, isSafeIdeaId } from "./workspace.ts";
 import { minutesText, STOPPED_REASON } from "./types.ts";
 import type { BuildBackend, BuildJob, BuildOptions, BuildOutcome } from "./types.ts";
@@ -91,6 +93,11 @@ export interface KiroCrewBackendOptions {
   postCancel?: (request: CancelRequest) => Promise<number | null>;
   /** Starts the sandbox check's stand-in for "another program". Tests pass one that starts nothing. */
   startDecoy?: StartDecoy;
+  /**
+   * Counts the time the Mac sleeps while the agent runs, so that it is not counted as the
+   * agent's (slept.ts). Default: the real watch, on the real clock. Tests pass their own.
+   */
+  sleptWatch?: StartSleptWatch;
 }
 
 const settingsSchema = z.object({
@@ -236,6 +243,7 @@ export function createKiroCrewBackend(options: KiroCrewBackendOptions): BuildBac
   const { sandboxMode } = options;
   const access = crewAccess(options);
   const { logger, now, binary, crewHome, timeZone } = access;
+  const startSleptWatch = options.sleptWatch ?? watchSlept;
 
   // Once per process, before the first Crew build: clear out jobs a killed run left behind. This
   // comes before every check that can refuse a build, so a left-over job never waits for the
@@ -347,6 +355,9 @@ export function createKiroCrewBackend(options: KiroCrewBackendOptions): BuildBac
     };
 
     let outcome: BuildOutcome;
+    let sleptMs: number;
+    // From just before the agent is started until its time ends: how long the Mac slept meanwhile.
+    const slept = startSleptWatch();
     try {
       outcome = await runJob(added.id);
     } catch {
@@ -356,6 +367,7 @@ export function createKiroCrewBackend(options: KiroCrewBackendOptions): BuildBac
     } finally {
       // The agent's time ends here: the clean-up below is ours, not the agent's.
       agentEndedMs = now().getTime();
+      sleptMs = slept.stop();
       if (run.mayBeRunning) await crew.cancel(added.id).catch(() => false);
       await crew.remove(added.id, signal === undefined ? {} : { signal }).catch(() => false);
     }
@@ -365,10 +377,12 @@ export function createKiroCrewBackend(options: KiroCrewBackendOptions): BuildBac
     // Kiro Crew has had its chance to write the figure down. This goes for a build that failed,
     // ran out of time or was stopped as much as for one that worked. Reading it is a look at a
     // few small files: no time worth counting against the 10 seconds a stop may take.
-    // By the clock on the wall, and never more than the try was allowed: the agent cannot have
-    // run for longer than its time limit, so a longer gap means the Mac slept in the middle of
-    // the build. Without this, one build slept through would be estimated at hours of credits.
-    const agentMs = Math.min(Math.max(0, agentEndedMs - run.triggeredAtMs), job.timeoutMs + CREW_STOP_GRACE_MS);
+    // How long the agent worked: by the clock on the wall, less the time the Mac slept in the
+    // middle of the build (slept.ts). A build the lid was closed on two minutes in is two
+    // minutes of agent, however many hours later it was stopped. And never more than the try
+    // was allowed: a second bound, should a sleep ever go unseen.
+    const agentMs = Math.min(awakeMs(run.triggeredAtMs, agentEndedMs, sleptMs), job.timeoutMs + CREW_STOP_GRACE_MS);
+    if (sleptMs > 0) logger.info("the Mac slept during a kiro crew build; that time is not counted as the agent's", { ideaId: job.ideaId, sleptSeconds: Math.round(sleptMs / 1000), agentSeconds: Math.round(agentMs / 1000) });
     // Kiro Crew's own record, best effort. Without it the ledger takes an estimate.
     const credits = crew.creditsFor(added.id, [new Date(run.triggeredAtMs), now()]);
     return { ...outcome, agentMs, ...(credits === undefined ? {} : { credits }) };

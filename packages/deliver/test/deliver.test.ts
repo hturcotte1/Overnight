@@ -9,6 +9,10 @@ import { HOUR, lostReply, makeRig, MINUTE, PITCH, QUOTE, refused, T_0630, TITLE 
 const SEVEN_AM = "2026-10-10T13:00:00.000Z";
 /** The note on an idea whose to-do was being created when Overnight was cut off. Written out here on purpose: the words are the promise. */
 const CUT_OFF_NOTE = "Bee was being told when Overnight stopped, so its to-do may or may not exist; no second one is made";
+/** The note on an idea whose to-do Bee never answered for in a way we could use. Written out too: no answer does not mean "told". */
+const lostReplyNote = (kind: string) => `Bee was asked for the to-do but its reply was lost (${kind}), so the to-do may or may not exist; no second one is made`;
+/** The note on an idea that was stopped once its push had been started. Written out too: a stop during the push does not mean "pushed". */
+const PUSH_STARTED_NOTE = "the push to GitHub was started, but Overnight was stopped before the link was confirmed; the next run publishes it again";
 /** What a failed publish's reason ends with when the push had been started and may have got through. */
 const MAY_BE_PUBLIC = " The push may have reached GitHub all the same, so the app may be public.";
 
@@ -289,7 +293,7 @@ describe("runDeliver: never twice", () => {
     expect(readFileSync(reportPath(rig.paths, idea.id), "utf8")).toBe(reportBefore);
   });
 
-  it("a to-do whose reply was lost counts as delivered: no second to-do, now or on a later run", async () => {
+  it("a to-do whose reply was lost counts as delivered: no second to-do, now or on a later run, and its note does not claim the wearer was told", async () => {
     const rig = makeRig();
     const idea = rig.idea("built");
     rig.bee.todoErrors.push(lostReply());
@@ -300,7 +304,13 @@ describe("runDeliver: never twice", () => {
     expect(rig.bee.todoCalls).toHaveLength(1);
     const after = rig.store.getIdea(idea.id);
     expect(after).toMatchObject({ state: "delivered", morningTodoId: null, deliveredAt: T_0630 });
-    expect(after?.note).toContain("reply was lost (timeout)");
+    // Word for word. No answer in time can also mean the request never left this Mac, so all
+    // that is known is that Bee was asked: the to-do may or may not exist.
+    expect(after?.note).toBe(lostReplyNote("timeout"));
+    expect(after?.note).not.toContain("told in Bee");
+    // The note is on the timeline and in the report too.
+    expect(rig.store.ideaEvents(idea.id).find((event) => event.toState === "delivered")?.note).toBe(lostReplyNote("timeout"));
+    expect(readReport(rig, idea.id)).toMatchObject({ state: "delivered", ok: true, note: lostReplyNote("timeout"), morningTodoId: null });
 
     await runDeliver(rig.deps);
     expect(rig.bee.todoCalls).toHaveLength(1);
@@ -314,7 +324,17 @@ describe("runDeliver: never twice", () => {
     await runDeliver(rig.deps);
     await runDeliver(rig.deps);
     expect(rig.bee.todoCalls).toHaveLength(1);
-    expect(rig.store.getIdea(idea.id)?.state).toBe("delivered");
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "delivered", morningTodoId: null, note: lostReplyNote("bad-response") });
+  });
+
+  it("so is anything Bee's side throws that is not one of its own errors", async () => {
+    const rig = makeRig();
+    const idea = rig.idea("built");
+    rig.bee.todoErrors.push(new Error("made-up crash"));
+    await runDeliver(rig.deps);
+    await runDeliver(rig.deps);
+    expect(rig.bee.todoCalls).toHaveLength(1);
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "delivered", morningTodoId: null, note: lostReplyNote("unexpected") });
   });
 
   it("a to-do Bee plainly refused is asked for again, up to three times, and the idea stays published if all fail", async () => {
@@ -1242,6 +1262,13 @@ describe("runDeliver: being stopped", () => {
     expect(summary).toEqual({ delivered: [], failed: [], notified: [], stopped: true });
     // Never half-published without a record.
     expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "built", publishedUrl: null, note: PUSHED_UNCONFIRMED_NOTE, failureReason: null, failureNotifiedAt: null });
+    // Word for word. The publisher says "pushed" from the moment the push starts, so a stop that
+    // landed during the push itself ends here too: the note must not say the push went through.
+    expect(PUSHED_UNCONFIRMED_NOTE).toBe(PUSH_STARTED_NOTE);
+    expect(PUSHED_UNCONFIRMED_NOTE).not.toMatch(/\bpushed\b/);
+    // The log line of the same stop says no more than the note does.
+    const stopLine = rig.logLines.map((line) => JSON.parse(line) as Record<string, unknown>).find((line) => String(line.msg ?? line.message ?? "").includes("stopped before a built app was published"));
+    expect(stopLine).toMatchObject({ ideaId: idea.id, during: "publish, once the push had started" });
     expect(rig.bee.todoCalls).toEqual([]);
 
     // Run 2: verified again, published again (a new marker), recorded, and told exactly once.

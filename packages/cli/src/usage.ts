@@ -59,7 +59,8 @@ Usage: overnight <command> [options]
                               The night's commands (build, deliver, build-now, rehearse run)
                               stop cleanly on Ctrl-C or a stop signal: they end what they started
                               first. A second one ends them at once. They stop the same way when the
-                              Mac slept through part of a run; what was stopped is tried again.
+                              Mac slept through part of a run: a build stopped on its first start gets
+                              one more try on a later night, and a delivery waits for the next run.
   pause                       Keep listening and saving, but stop asking and building.
   resume                      Ask and build again.
   help                        Show this text.`;

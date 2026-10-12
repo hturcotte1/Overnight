@@ -9,11 +9,11 @@
 // Every sentence in this file is ours. The only words from elsewhere that pass through are an
 // idea's own note and failure reason, which the other packages write in plain words and which
 // never hold anything that was said.
-import { localDateKey, localDayBounds, parseHhMm, previousLocalTime } from "@overnight/core";
-import type { Config, IdeaEvent, IdeaState } from "@overnight/core";
+import { budgetReachedText, describeNight, LATE_AFTER_MS, localDateKey, localDayBounds, parseHhMm, previousLocalTime } from "@overnight/core";
+import type { ClockedJob, Config, IdeaEvent, IdeaState, NightWait } from "@overnight/core";
 import { DELIVER_LEAD_MINUTES, INTERRUPTED_GRACE_MINUTES } from "./log-messages.ts";
-import { backendLabel, clockTime, duration, minusMinutes, plural } from "./render/format.ts";
-import type { BuildFacts, BuildRun, Check, DashIdea, DeliverFacts, DeliverRun, IdeaExtras, Night, Running, RunCommand, Snapshot, StepKey, StepStatus, Story, StoryStep, TonightQueue } from "./types.ts";
+import { backendLabel, clockTime, dateTime, duration, minusMinutes, plural } from "./render/format.ts";
+import type { BuildFacts, BuildHold, BuildRun, Check, ChecksHold, DashIdea, DeliverFacts, DeliverRun, IdeaExtras, Night, NightOutlook, Running, RunCommand, Snapshot, StepKey, StepStatus, Story, StoryStep, TonightQueue } from "./types.ts";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -66,6 +66,94 @@ export function nightKey(at: string | Date, timeZone: string): string {
   return localDateKey(new Date(ms + 12 * HOUR_MS), timeZone);
 }
 
+// ---------- what stands in the night's way ----------
+
+/** Where the full account of the night's state is. The pages only read the data folder; this also looks at the night jobs. */
+const SEE_STATUS = "See: npx overnight status";
+
+/** "Jan 5" for a day named like 2027-01-05, with the year when it is not the year of `beside`. */
+function dayWords(day: string, beside: string): string {
+  const at = new Date(`${day}T12:00:00.000Z`);
+  if (Number.isNaN(at.getTime())) return day;
+  return new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "short", day: "numeric", ...(day.slice(0, 4) === beside.slice(0, 4) ? {} : { year: "numeric" }) }).format(at);
+}
+
+/** A night job that will not start at its time by the settings: its slot is overdue, or its clock's record is dated ahead. */
+type OffTheClock = { late: true; slotAt: string; waiting: NightWait | null } | { late: false; ahead: string };
+
+/**
+ * Is a night job off its clock, by the night clock's own reading of what it has stored (core,
+ * describeNight: the one `overnight status` goes by)? A job that has never asked the clock on
+ * this data folder has no record, and is taken to run at its time by the settings.
+ */
+function offTheClock(s: Snapshot, job: ClockedJob, config: Config): OffTheClock | null {
+  const now = new Date(toMs(s.at) ?? 0);
+  const view = describeNight({ job, now, config, ...s.nightClock[job], running: s.running[job] });
+  if (view.recordAhead !== null) return { late: false, ahead: dayWords(view.recordAhead, view.slotDay) };
+  // A slot is due from the moment its time comes until the job's next check starts it, a minute
+  // later at most. That is every night, and not late: late is past core's two minutes.
+  if (view.state === "due" && now.getTime() - Date.parse(view.slotAt) >= LATE_AFTER_MS) return { late: true, slotAt: view.slotAt, waiting: view.waiting };
+  return null;
+}
+
+/**
+ * What stands between the waiting ideas and the night's two runs, asked in the order
+ * `overnight status` asks it (cli, commands/status.ts: "Tonight", then "Next build"). It goes by
+ * what the data folder holds and nothing else, so it cannot say that the night jobs are not
+ * installed. Being paused is not looked at here: each page asks that first.
+ */
+export function nightOutlook(s: Snapshot, config: Config): NightOutlook {
+  const zone = config.timeZone;
+  // The demo's folder holds rehearsal ideas as well (which is what makes the real commands refuse
+  // it). Its night is played by the demo itself, so its pages show the night as a real one goes.
+  const rehearsalFolder = s.rehearsalIdeas > 0 && !s.demoMark;
+  const budget = s.buildCredits;
+  const building = offTheClock(s, "build", config);
+  const delivering = offTheClock(s, "deliver", config);
+
+  let build: BuildHold | null = null;
+  if (rehearsalFolder) {
+    build = { why: "rehearsal", step: "Rehearsal folder: no nightly build", line: "is approved. No nightly build runs on a rehearsal folder", note: "Rehearsal folder: the nightly build does not run here. A rehearsal idea is built by hand, with rehearse run." };
+  } else if (budget?.reached === true) {
+    // The whole sentence is core's (build-budget.ts): the one the builder logs and `build-now` refuses with.
+    const note = `Not tonight: ${budgetReachedText(budget, zone)}.`;
+    build =
+      budget.limit === 0
+        ? { why: "credits", step: "Not tonight: the monthly credit limit is 0", line: "is approved. Nothing is built while the monthly credit limit is 0", note }
+        : { why: "credits", step: "Not tonight: this month's build credits are used up", line: "is approved. This month's build credits are used up", note };
+  } else if (building !== null && !building.late) {
+    // Which night the next build is then depends on how the record stands. Status works that out; the page only says not to count on tonight.
+    build = {
+      why: "clock-ahead",
+      step: "On hold: the build clock is dated ahead",
+      line: `is approved. The build clock's record is dated ahead (${building.ahead}), so the next build may not be tonight's`,
+      note: `On hold: the build clock's record is dated ahead (${building.ahead}), so the next build may not be tonight's. ${SEE_STATUS}`,
+    };
+  } else if (building !== null) {
+    const slot = dateTime(building.slotAt, zone);
+    build =
+      building.waiting === "offline"
+        ? { why: "late", step: "as soon as the Mac is online", line: "will be built as soon as the Mac is online", note: `Running late: the ${slot} build is waiting for the internet.` }
+        : { why: "late", step: "Running late", line: "is approved. The build is running late", note: `Running late: the ${slot} build has not started yet.` };
+  }
+
+  let checks: ChecksHold | null = null;
+  if (rehearsalFolder) {
+    // `overnight deliver` refuses a rehearsal folder too. A rehearsal's own run checks its app right after building it.
+    checks = { why: "rehearsal", step: null, line: "No morning run happens on a rehearsal folder" };
+  } else if (delivering !== null && !delivering.late) {
+    checks = { why: "clock-ahead", step: "On hold: the deliver clock is dated ahead", line: `The deliver clock's record is dated ahead (${delivering.ahead}), so the next checks may not be this morning's` };
+  } else if (delivering !== null) {
+    checks =
+      delivering.waiting === "offline"
+        ? { why: "late", step: "as soon as the Mac is online", line: "Checks start as soon as the Mac is online" }
+        : delivering.waiting !== null
+          ? { why: "late", step: "after the build", line: "Checks start after the build" }
+          : { why: "late", step: "Running late", line: "The morning's checks are running late" };
+  }
+  return { build, checks };
+}
+
 // ---------- one idea's story ----------
 
 const STEP_LABELS: Readonly<Record<StepKey, string>> = { heard: "Heard", asked: "Asked", approved: "Approved", built: "Built", checked: "Checked", published: "Published", delivered: "Delivered" };
@@ -79,6 +167,10 @@ const REHEARSAL = "Rehearsal";
 export const STAND_IN_SITE = "https://rehearsal.invalid";
 const CUT_OFF = "This build looks cut off. The next nightly build records it and tries once more.";
 const CUT_SHORT = "Cut short. It will be built once more at the next nightly build.";
+// The same two, where the nightly build will not be the one to do it.
+const CUT_OFF_BY_HAND = "This build looks cut off. No nightly build runs on a rehearsal folder: it is built again by hand, with rehearse run.";
+const CUT_SHORT_BY_HAND = "Cut short. No nightly build runs on a rehearsal folder: it is built once more by hand, with rehearse run.";
+const CUT_SHORT_NO_CREDITS = "Cut short. It will be built once more when the month's build credits allow.";
 const NOT_SEEN_YET = "Pushed. The page was not seen yet.";
 
 /** Our own words for the part of the morning's check that an app did not pass (deliver, verifier.ts). */
@@ -116,10 +208,21 @@ export function storyOf(
   build: BuildFacts | null,
   deliver: DeliverFacts | null,
   extras: Pick<IdeaExtras, "report" | "marks"> | null,
-  ctx: { now: Date; running: Running; paused: boolean; nextBuildAt: string; nextDeliverAt: string; config: Pick<Config, "timeZone" | "buildTimeoutMin"> },
+  ctx: {
+    now: Date;
+    running: Running;
+    paused: boolean;
+    nextBuildAt: string;
+    nextDeliverAt: string;
+    config: Pick<Config, "timeZone" | "buildTimeoutMin">;
+    /** What stands in the night's way (nightOutlook). Left out: nothing is known to, and the two runs are taken to start at their times. */
+    outlook?: NightOutlook;
+  },
 ): Story {
   const zone = ctx.config.timeZone;
   const report = extras?.report ?? null;
+  const hold = ctx.outlook?.build ?? null;
+  const checksHold = ctx.outlook?.checks ?? null;
 
   // ----- which log facts are about the build the idea has now -----
   const buildingAt = lastInto(events, "building");
@@ -160,7 +263,9 @@ export function storyOf(
     if (report?.confirmedLive === true) return report.liveAfterMs === null ? "Live" : `Live after ${duration(report.liveAfterMs)}`;
     return report?.confirmedLive === false ? NOT_SEEN_YET : null;
   };
-  const checksAt = `at ${clockTime(ctx.nextDeliverAt, zone)}`;
+  // Where the time of a step still to come would be: when its run starts, or what is in that run's way.
+  const buildsAt = ctx.paused ? "Paused: nothing is built" : hold !== null ? hold.step : `at ${clockTime(ctx.nextBuildAt, zone)}`;
+  const checksAt = checksHold !== null ? checksHold.step : `at ${clockTime(ctx.nextDeliverAt, zone)}`;
 
   // ----- the seven steps -----
   const step = (key: StepKey, status: StepStatus, more: { label?: string; at?: string | null; detail?: string | null } = {}): StoryStep => ({
@@ -182,8 +287,8 @@ export function storyOf(
   let steps: StoryStep[];
   let runningSince: string | null = null;
   let hint: string | null = null;
-  // A rehearsal idea lives in a folder that build-now refuses, so the hint would not work for it.
-  const tryAgain = idea.rehearsal ? null : `To try again, ask Claude Code to run: npx overnight build-now ${idea.id}`;
+  // A rehearsal idea lives in a folder that build-now refuses, so the hint would not work for it. Nor for any other idea in such a folder.
+  const tryAgain = idea.rehearsal || hold?.why === "rehearsal" ? null : `To try again, ask Claude Code to run: npx overnight build-now ${idea.id}`;
 
   switch (idea.state) {
     case "heard":
@@ -199,18 +304,21 @@ export function storyOf(
       break;
     }
     case "approved":
-      steps = [heard, asked(), approved(), step("built", "todo", { detail: ctx.paused ? "Paused: nothing is built" : `at ${clockTime(ctx.nextBuildAt, zone)}` }), ...rest("todo", "checked", "published", "delivered")];
+      steps = [heard, asked(), approved(), step("built", "todo", { detail: buildsAt }), ...rest("todo", "checked", "published", "delivered")];
       break;
     case "building": {
       const cutOff = looksCutOff(idea, buildingAt, ctx);
       if (!cutOff) runningSince = buildingAt ?? idea.buildStartedAt;
-      const building = cutOff ? step("built", "waiting", { label: "Building", at: buildingAt, detail: CUT_OFF }) : step("built", "active", { label: "Building", at: buildingAt, detail: builder === "" ? null : builder });
+      const building = cutOff
+        ? step("built", "waiting", { label: "Building", at: buildingAt, detail: hold?.why === "rehearsal" ? CUT_OFF_BY_HAND : CUT_OFF })
+        : step("built", "active", { label: "Building", at: buildingAt, detail: builder === "" ? null : builder });
       steps = [heard, asked(), approved(), building, step("checked", "todo", { detail: checksAt }), ...rest("todo", "published", "delivered")];
       break;
     }
     case "build_failed": {
       const failedAt = lastInto(events, "build_failed");
-      const failed = idea.awaitingRetry ? step("built", "waiting", { label: "Not built yet", at: failedAt, detail: CUT_SHORT }) : step("built", "failed", { label: "Could not build", at: failedAt, detail: idea.failureReason });
+      const oneMore = hold?.why === "rehearsal" ? CUT_SHORT_BY_HAND : hold?.why === "credits" ? CUT_SHORT_NO_CREDITS : CUT_SHORT;
+      const failed = idea.awaitingRetry ? step("built", "waiting", { label: "Not built yet", at: failedAt, detail: oneMore }) : step("built", "failed", { label: "Could not build", at: failedAt, detail: idea.failureReason });
       if (!idea.awaitingRetry) hint = tryAgain;
       steps = [heard, asked(), approved(), failed, ...rest("todo", "checked", "published", "delivered")];
       break;
@@ -243,7 +351,9 @@ export function storyOf(
       // deliver run is going, is it left for the next run.
       const publishedMs = toMs(lastInto(events, "published") ?? idea.publishedAt);
       const justPublished = publishedMs !== null && ctx.now.getTime() - publishedMs <= MINUTE_MS;
-      const last = ctx.running.deliver === true || justPublished ? step("delivered", "active") : step("delivered", "waiting", { detail: "Not finished yet. The next deliver run does that." });
+      // On a rehearsal folder there is no deliver run to come, so none is promised.
+      const unfinished = checksHold?.why === "rehearsal" ? "Not finished yet." : "Not finished yet. The next deliver run does that.";
+      const last = ctx.running.deliver === true || justPublished ? step("delivered", "active") : step("delivered", "waiting", { detail: unfinished });
       steps = [heard, asked(), approved(), built(), checked(), publishedStep, last];
       break;
     }
@@ -405,14 +515,15 @@ export function nowLine(s: Snapshot, hero: DashIdea | null, config: Config): { o
     if ((s.problem === "busy" || s.problem === "unreadable") && s.staleSince === null) return say("Could not read the database", "");
     return say(s.running.listener === true ? "Listening. No ideas yet" : "No ideas yet", "");
   }
-  const checksClock = clockOf(checksStart(config));
+  const outlook = nightOutlook(s, config);
+  const checksWords = outlook.checks?.line ?? `Checks start at ${clockOf(checksStart(config))}`;
   switch (hero.state) {
     case "heard":
       return say("Heard", "");
     case "asked":
       return say("Waiting for an answer about", "");
     case "approved":
-      return say("", s.paused ? "is approved. Building is paused" : `will be built at ${clockTime(s.nextBuildAt, config.timeZone)}`);
+      return say("", s.paused ? "is approved. Building is paused" : outlook.build !== null ? outlook.build.line : `will be built at ${clockTime(s.nextBuildAt, config.timeZone)}`);
     case "rejected":
       return say("", "was not approved");
     case "expired":
@@ -420,7 +531,7 @@ export function nowLine(s: Snapshot, hero: DashIdea | null, config: Config): { o
     case "building":
       return say(`${backendLabel(hero.buildBackend) || "Overnight"} is building`, "");
     case "built": {
-      if (s.running.deliver !== true) return say("", `is built. Checks start at ${checksClock}`);
+      if (s.running.deliver !== true) return say("", `is built. ${checksWords}`);
       // The morning's run is on it. Once the log says this very build passed its check, what is left is publishing
       // (the same reading as the story's steps: a check from before this build was finished is an earlier build's).
       const checked = s.deliver.get(hero.id)?.checked ?? null;
@@ -456,6 +567,9 @@ export function nowLine(s: Snapshot, hero: DashIdea | null, config: Config): { o
  * were used up. So a build that is going counts as tonight's run only in the hours after
  * tonight's build time (the same noon-to-noon night), and never when the build log says the run
  * that is open was started by hand.
+ *   - A nightly build that is running late will run today, whenever it starts.
+ *
+ * `hold` says when the nightly build will not take the rows at all, or not at its time.
  */
 export function tonightQueue(s: Snapshot, config: Config): TonightQueue {
   const eventsOf = (idea: DashIdea): readonly IdeaEvent[] => s.events.get(idea.id) ?? [];
@@ -475,7 +589,8 @@ export function tonightQueue(s: Snapshot, config: Config): TonightQueue {
   const openRun = s.buildRuns.at(-1);
   const startedByHand = openRun !== undefined && openRun.finishedAt === null && (openRun.command === "build-now" || openRun.command === "rehearse");
   const underWay = going && afterTonightsBuildTime && !startedByHand;
-  const countedDay = underWay ? now : new Date(toMs(s.nextBuildAt) ?? now.getTime());
+  const hold = s.paused ? null : nightOutlook(s, config).build;
+  const countedDay = underWay || hold?.why === "late" ? now : new Date(toMs(s.nextBuildAt) ?? now.getTime());
   const day = localDayBounds(countedDay, config.timeZone);
   let started = 0;
   for (const events of s.events.values()) {
@@ -489,6 +604,7 @@ export function tonightQueue(s: Snapshot, config: Config): TonightQueue {
     at: s.nextBuildAt,
     paused: s.paused,
     limit: config.maxBuildsPerNight,
+    hold,
     rows: [
       ...heardFirst.filter((idea) => idea.state === "building").map((idea) => ({ idea, when: "building" as const })),
       ...waiting.map((idea, index) => ({ idea, when: index < room ? ("tonight" as const) : ("later" as const) })),
@@ -532,7 +648,7 @@ function resultOf(row: Pick<NightRow, "idea" | "outcome">): Result {
  * of "N of M worked" and said on its own. (A Mac that sleeps through a build cuts it short, so on
  * real nights this is routine, not a failure.)
  */
-function headlineOf(results: readonly Result[], buildRun: BuildRun | null, checksClock: string, overYet: boolean, morningUnderWay: boolean): string {
+function headlineOf(results: readonly Result[], buildRun: BuildRun | null, checksWords: string, overYet: boolean, morningUnderWay: boolean): string {
   if (results.includes("running")) return "Building now.";
   if (results.length === 0) {
     if (buildRun?.paused === true) return "Paused: nothing was built.";
@@ -541,7 +657,7 @@ function headlineOf(results: readonly Result[], buildRun: BuildRun | null, check
   }
   // Built and still waiting for the morning. On a night long past, no morning is coming for it by itself.
   // While the morning's run is at work on it, "checks start at 6:30 AM" would be about a time gone by.
-  if (results.includes("pending")) return overYet ? "Built, but not delivered." : morningUnderWay ? "Built. The morning's checks are running now." : `Built. Checks start at ${checksClock}.`;
+  if (results.includes("pending")) return overYet ? "Built, but not delivered." : morningUnderWay ? "Built. The morning's checks are running now." : `Built. ${checksWords}.`;
   const cutShort = results.filter((result) => result === "retry").length;
   const settled = results.length - cutShort;
   if (settled === 0) return "Cut short. It will be built once more.";
@@ -598,7 +714,8 @@ export function groupNights(s: Snapshot, config: Config): Night[] {
   for (const run of s.buildRuns) if (toMs(run.startedAt) !== null) nightOf(nightKey(run.startedAt, zone)).buildRuns.push(run);
   for (const run of s.deliverRuns) if (toMs(run.startedAt) !== null) nightOf(nightKey(run.startedAt, zone)).deliverRuns.push(run);
 
-  const checksClock = clockOf(checksStart(config));
+  // When the morning's checks start, or what is in their way (the same words as the line over the hero).
+  const checksWords = nightOutlook(s, config).checks?.line ?? `Checks start at ${clockOf(checksStart(config))}`;
   const today = localDateKey(new Date(toMs(s.at) ?? 0), zone);
   // The morning's run takes every app that is built. A deliver started by hand (build-now, a rehearsal) takes only its own.
   const openDeliver = s.deliverRuns.at(-1);
@@ -622,7 +739,7 @@ export function groupNights(s: Snapshot, config: Config): Night[] {
       return {
         key,
         label: nightLabel(key),
-        headline: headlineOf(results, buildRun, checksClock, key < today, morningUnderWay),
+        headline: headlineOf(results, buildRun, checksWords, key < today, morningUnderWay),
         ideas,
         built: gathered.filter((row) => row.builtHere).length,
         failed: results.filter((result) => result === "failed").length,

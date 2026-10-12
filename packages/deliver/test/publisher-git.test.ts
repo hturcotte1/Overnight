@@ -399,5 +399,50 @@ describe.skipIf(!gitWorks())("the Pages publisher with the real git program", ()
       expect(m.deliver.bee.todoCalls).toHaveLength(1);
       expect(m.git.failures).toEqual([]);
     });
+
+    it("stopped while the push itself was running, with nothing on GitHub: the note says the push was started, not that it was pushed", async () => {
+      const m = morning();
+      const stop = new AbortController();
+      // "GitHub" takes the push in and then keeps it waiting: a hook of the stand-in repo, which
+      // runs before anything is accepted. The stop lands right then, in the middle of the push.
+      // (Left alone, the hook gives up after 20 seconds and refuses the push.)
+      const reached = path.join(m.git.root, "push-reached-github");
+      const hook = path.join(m.git.bare, "hooks", "pre-receive");
+      mkdirSync(path.dirname(hook), { recursive: true });
+      writeFileSync(hook, `#!/bin/sh\n: > "${reached}"\nn=0\nwhile [ "$n" -lt 200 ]; do sleep 0.1; n=$((n + 1)); done\nexit 1\n`);
+      chmodSync(hook, 0o755);
+      let over = false;
+      const stopMidPush = (async () => {
+        while (!over && !existsSync(reached)) await new Promise((resolve) => setTimeout(resolve, 5));
+        stop.abort();
+      })();
+
+      const summary = await runDeliver({ ...m.deps, signal: stop.signal });
+      over = true;
+      await stopMidPush;
+
+      expect(summary).toEqual({ delivered: [], failed: [], notified: [], stopped: true });
+      // The push was under way, and nothing came of it: "GitHub" has no new version.
+      expect(existsSync(reached)).toBe(true);
+      expect(m.git.commits()).toEqual([SEED]);
+      expect(m.git.web.looks).toBe(0);
+      // Nobody can know that from this side, so the publisher counts a push as possibly out from
+      // the moment it starts. The note may say the push was started, and no more than that.
+      const note = m.deliver.store.getIdea(m.idea.id)?.note;
+      expect(note).toBe(PUSHED_UNCONFIRMED_NOTE);
+      expect(note).toBe("the push to GitHub was started, but Overnight was stopped before the link was confirmed; the next run publishes it again");
+      expect(note).not.toMatch(/\bpushed\b/);
+      expect(m.deliver.store.getIdea(m.idea.id)).toMatchObject({ state: "built", publishedUrl: null, failureReason: null, failureNotifiedAt: null });
+      expect(m.deliver.bee.todoCalls).toEqual([]);
+      expect(m.git.failures).toEqual(["push"]);
+
+      // The next run publishes it, as the note promised: for the first time here, and told once.
+      writeFileSync(hook, "#!/bin/sh\nexit 0\n");
+      expect(await runDeliver(m.deps)).toEqual({ delivered: [m.idea.id], failed: [], notified: [] });
+      expect(m.git.commits()).toEqual([publishCommit(m.idea.slug), SEED]);
+      expect(m.deliver.store.getIdea(m.idea.id)).toMatchObject({ state: "delivered", publishedUrl: m.link, note: null });
+      expect(m.deliver.bee.todoCalls).toHaveLength(1);
+      expect(m.git.failures).toEqual(["push"]);
+    });
   });
 });

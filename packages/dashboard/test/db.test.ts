@@ -12,7 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { deliverLockFile, listenLockFile, takeLock } from "@overnight/cli";
-import { BUILD_STOPPED_REASON, createLogger, dataPaths, IDEA_STATES, parseConfig, Store } from "@overnight/core";
+import { BUILD_STOPPED_REASON, buildBudget, closedRun, createLogger, currentSlot, dataPaths, IDEA_STATES, noteChecked, noticedRun, parseConfig, readCheckedAt, readLastNightRun, readNightRun, startedRun, Store, waitingRun, writeNightRun } from "@overnight/core";
 import type { Config, DataPaths, Idea, IdeaState } from "@overnight/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { HIDDEN_TITLE, openReadOnly, readDatabase } from "../src/data/db.ts";
@@ -25,7 +25,9 @@ const NOT_FILMING: FilmingPolicy = { on: false, showQuoteFor: new Set() };
 const FILMING: FilmingPolicy = { on: true, showQuoteFor: new Set() };
 /** 7:00 AM in America/Boise on Oct 10: where the invented day starts. */
 const DAY_START = "2026-10-10T13:00:00.000Z";
-const Q = { dayStart: DAY_START, filming: NOT_FILMING, pausedByDefault: true };
+/** October 2026 in America/Boise: the calendar month the credit ceiling counts. */
+const MONTH = { start: "2026-10-01T06:00:00.000Z", end: "2026-11-01T06:00:00.000Z" };
+const Q = { dayStart: DAY_START, month: MONTH, filming: NOT_FILMING, pausedByDefault: true };
 
 let scratch: string;
 let file: string;
@@ -328,6 +330,132 @@ describe("what was heard, as counts only", () => {
   });
 });
 
+// The dashboard used to promise a build from the settings alone. Whether one happens is also in
+// the database: the ledger of what builds cost, the rehearsal ideas, and the night clock's records.
+describe("what decides whether, and when, a build happens", () => {
+  it("sums the month's ledger exactly as the Store does: this month's rows, estimates apart", () => {
+    const store = openStore();
+    const idea = makeIdea(store, "delivered", 10);
+    const nothing = { credits: 0, estimated: 0, tries: 0 };
+    expect(look().creditsThisMonth).toEqual(nothing);
+    expect(look().creditsThisMonth).toEqual(store.buildCreditsBetween(MONTH.start, MONTH.end));
+    store.recordBuildCost({ ideaId: idea.id, at: at(20), backend: "kiro-crew", credits: 6.29, measured: true });
+    store.recordBuildCost({ ideaId: idea.id, at: at(30), backend: "kiro-cli", credits: 4.09, measured: false });
+    // Fractions that do not add up evenly in a computer: the sum is still given to three decimals.
+    store.recordBuildCost({ ideaId: idea.id, at: at(40), backend: "kiro-crew", credits: 0.1, measured: true });
+    store.recordBuildCost({ ideaId: idea.id, at: at(41), backend: "kiro-crew", credits: 0.2, measured: true });
+    // The last moment of September and the first of November are other months'.
+    store.recordBuildCost({ ideaId: idea.id, at: "2026-10-01T05:59:59.999Z", backend: "kiro-crew", credits: 50, measured: true });
+    store.recordBuildCost({ ideaId: idea.id, at: MONTH.end, backend: "kiro-crew", credits: 70, measured: true });
+    expect(look().creditsThisMonth).toEqual({ credits: 10.68, estimated: 4.09, tries: 4 });
+    expect(look().creditsThisMonth).toEqual(store.buildCreditsBetween(MONTH.start, MONTH.end));
+    // Asked for another month, it is that month's.
+    const november = { start: MONTH.end, end: "2026-12-01T07:00:00.000Z" };
+    expect(look({ month: november }).creditsThisMonth).toEqual(store.buildCreditsBetween(november.start, november.end));
+    expect(look({ month: november }).creditsThisMonth).toEqual({ credits: 70, estimated: 0, tries: 1 });
+    expect(look().unreadableRows).toBe(0);
+  });
+
+  it("counts nothing, and still reads everything else, in a database that has no ledger yet", () => {
+    const store = openStore();
+    const idea = makeIdea(store, "approved", 10);
+    store.close();
+    stores.length = 0;
+    // The database as Milestone 2 left it: the live one, until a Milestone 3 program first opens it.
+    const raw = new Database(file);
+    raw.exec("DROP TABLE build_costs;");
+    raw.pragma("user_version = 3");
+    raw.close();
+    const read = readDatabase(file, Q);
+    expect(read.ok).toBe(true);
+    expect(look().creditsThisMonth).toEqual({ credits: 0, estimated: 0, tries: 0 });
+    expect(look().ideas.map((mine) => mine.id)).toEqual([idea.id]);
+    expect(look().unreadableRows).toBe(0);
+    // Looking did not upgrade it.
+    const after = new Database(file, { readonly: true });
+    expect(after.pragma("user_version", { simple: true })).toBe(3);
+    expect(after.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'build_costs'").get()).toEqual({ n: 0 });
+    after.close();
+  });
+
+  it("counts the rehearsal ideas in the whole database, as the commands that refuse the folder do", () => {
+    const store = openStore();
+    expect(look().rehearsalIdeas).toBe(0);
+    makeIdea(store, "approved", 5);
+    expect(look().rehearsalIdeas).toBe(0);
+    // The oldest idea is a rehearsal. 200 newer ones push it off the list of ideas that are shown.
+    const rehearsal = makeIdea(store, "delivered", 0, { conversationKey: "rehearsal", quote: "" });
+    for (let n = 1; n <= 200; n += 1) makeIdea(store, "heard", 10 + n);
+    const read = look();
+    expect(read.ideas.some((idea) => idea.id === rehearsal.id)).toBe(false);
+    expect(read.ideas.some((idea) => idea.rehearsal)).toBe(false);
+    expect(read.rehearsalIdeas).toBe(1);
+    expect(read.rehearsalIdeas).toBe(store.listIdeas().filter((idea) => idea.conversationKey === "rehearsal").length);
+    makeIdea(store, "approved", 300, { conversationKey: "rehearsal", quote: "" });
+    expect(look().rehearsalIdeas).toBe(2);
+  });
+
+  it("reads what the night clock has stored for both jobs, as core's own readers give it", () => {
+    const store = openStore();
+    const none = { record: null, last: null, checkedAt: null };
+    expect(look().nightClock).toEqual({ build: none, deliver: none });
+
+    const config = parseConfig({ OVERNIGHT_DATA_DIR: scratch, TZ: "America/Boise" });
+    // Oct 10: the build ran at 1:00 AM and was closed. Oct 11, 8:00 AM: the next one is found due, with the internet away.
+    const lastNight = new Date("2026-10-10T07:00:30.000Z");
+    const ranLastNight = closedRun(startedRun(noticedRun(currentSlot("build", lastNight, config), lastNight), lastNight), "done", new Date("2026-10-10T07:05:00.000Z"));
+    writeNightRun(store, "build", ranLastNight, new Date("2026-10-10T07:05:00.000Z"));
+    const morning = new Date("2026-10-11T14:00:00.000Z");
+    const waiting = waitingRun(noticedRun(currentSlot("build", morning, config), morning), "offline");
+    writeNightRun(store, "build", waiting, morning);
+    noteChecked(store, "build", morning);
+    noteChecked(store, "deliver", new Date("2026-10-11T14:00:20.000Z"));
+
+    const read = look();
+    expect(read.nightClock.build).toEqual({ record: waiting, last: ranLastNight, checkedAt: morning.toISOString() });
+    expect(read.nightClock.deliver).toEqual({ record: null, last: null, checkedAt: "2026-10-11T14:00:20.000Z" });
+    for (const job of ["build", "deliver"] as const) {
+      expect(read.nightClock[job]).toEqual({ record: readNightRun(store, job), last: readLastNightRun(store, job), checkedAt: readCheckedAt(store, job) });
+    }
+    expect(read.unreadableRows).toBe(0);
+  });
+
+  it("takes a night clock record it cannot read as no record, the way every other program does", () => {
+    const store = openStore();
+    store.setValue("night.build.run", "not a record at all", at(1));
+    store.setValue("night.deliver.run", JSON.stringify({ day: "tomorrow", slotAt: "soon" }), at(1));
+    store.setValue("night.build.checkedAt", "half past one", at(1));
+    const read = look();
+    expect(read.nightClock).toEqual({ build: { record: null, last: null, checkedAt: null }, deliver: { record: null, last: null, checkedAt: null } });
+    expect([readNightRun(store, "build"), readNightRun(store, "deliver"), readCheckedAt(store, "build")]).toEqual([null, null, null]);
+  });
+
+  it("reads no other small value: where the listener got to in Bee's history stays behind", () => {
+    const store = openStore();
+    store.setValue("backfill.cursor", "CURSOR-SENTINEL", at(1));
+    store.setValue("nightly", "NOT-THE-CLOCK-SENTINEL", at(1));
+    const results: unknown[] = [];
+    const open = (target: string): Database.Database => {
+      const db = openReadOnly(target);
+      const prepare = db.prepare.bind(db);
+      db.prepare = ((text: string) => {
+        const statement = prepare(text);
+        const all = statement.all.bind(statement);
+        statement.all = ((...args: unknown[]) => {
+          const rows = all(...args);
+          results.push(rows);
+          return rows;
+        }) as typeof statement.all;
+        return statement;
+      }) as typeof db.prepare;
+      return db;
+    };
+    expect(readDatabase(file, Q, { open }).ok).toBe(true);
+    expect(results.length).toBeGreaterThan(3);
+    expect(JSON.stringify(results)).not.toMatch(/SENTINEL/);
+  });
+});
+
 describe("quiet mode and the demo mark", () => {
   it("uses the setting until somebody has paused or resumed, then what they chose", () => {
     const store = openStore();
@@ -579,6 +707,8 @@ describe("rows that do not fit", () => {
 
     const read = look();
     expect(read.unreadableRows).toBe(0);
+    // No ledger and no rehearsal idea: nothing counted, nothing in the way.
+    expect(read).toMatchObject({ creditsThisMonth: { credits: 0, estimated: 0, tries: 0 }, rehearsalIdeas: 0 });
     expect(read.ideas).toHaveLength(1);
     expect(read.ideas[0]).toMatchObject({
       id: idea.id, state: "approved", title: idea.title, slug: null, buildBackend: null, buildStartedAt: null, builtAt: null, publishedUrl: null, publishedAt: null,
@@ -848,6 +978,30 @@ describe("one look at everything", () => {
     expect(snapshot.deliverRuns).toHaveLength(1);
     // The data folder's path was on two of those lines, and is nowhere in what was read.
     expect(JSON.stringify([snapshot.buildRuns, snapshot.deliverRuns, [...snapshot.build], [...snapshot.deliver]])).not.toContain(scratch);
+  });
+
+  it("holds the month's credits against the limit by core's own rule, and says when it cannot", () => {
+    const store = openStore(paths.database);
+    const idea = makeIdea(store, "delivered", 60);
+    const now = new Date("2026-10-11T07:02:00.000Z");
+    const limited = { ...config, maxBuildCreditsPerMonth: 5 };
+    expect(collectSnapshot({ config: limited, paths, filming: NOT_FILMING, now }).buildCredits).toEqual(buildBudget(store, limited, now));
+    expect(collectSnapshot({ config: limited, paths, filming: NOT_FILMING, now }).buildCredits).toMatchObject({ counted: 0, limit: 5, reached: false });
+    store.recordBuildCost({ ideaId: idea.id, at: at(64), backend: "kiro-crew", credits: 6.29, measured: true });
+    store.recordBuildCost({ ideaId: idea.id, at: at(70), backend: "kiro-cli", credits: 4.09, measured: false });
+    const used = collectSnapshot({ config: limited, paths, filming: NOT_FILMING, now }).buildCredits;
+    expect(used).toEqual(buildBudget(store, limited, now));
+    expect(used).toMatchObject({ counted: 10.38, estimated: 4.09, tries: 2, limit: 5, reached: true, monthStart: MONTH.start, monthEnd: MONTH.end });
+    // The same ledger under the usual limit is far from reached. A limit of 0 always is.
+    expect(collectSnapshot({ config, paths, filming: NOT_FILMING, now }).buildCredits).toMatchObject({ counted: 10.38, limit: 400, reached: false });
+    expect(collectSnapshot({ config: { ...config, maxBuildCreditsPerMonth: 0 }, paths, filming: NOT_FILMING, now }).buildCredits).toEqual(buildBudget(store, { ...config, maxBuildCreditsPerMonth: 0 }, now));
+    // Seen from November, October's credits are not this month's.
+    const november = new Date("2026-11-02T08:02:00.000Z");
+    expect(collectSnapshot({ config: limited, paths, filming: NOT_FILMING, now: november }).buildCredits).toEqual(buildBudget(store, limited, november));
+    expect(collectSnapshot({ config: limited, paths, filming: NOT_FILMING, now: november }).buildCredits).toMatchObject({ counted: 0, reached: false });
+    // A database that cannot be read: nothing is claimed about the month.
+    const nowhere = path.join(scratch, "nowhere");
+    expect(collectSnapshot({ config: { ...limited, dataDir: nowhere }, paths: dataPaths(nowhere), filming: NOT_FILMING, now })).toMatchObject({ problem: "missing", buildCredits: null, rehearsalIdeas: 0, nightClock: { build: { record: null }, deliver: { record: null } } });
   });
 
   it("sees which programs hold their locks in the data folder", () => {

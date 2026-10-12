@@ -20,10 +20,10 @@ import {
 import type { ClockedJob, NightRun, NightWait } from "@overnight/core";
 import type { JobTrigger, ListenerState, NightJobsState } from "../src/background.ts";
 import { REHEARSAL_CONVERSATION_KEY } from "../src/commands/rehearse.ts";
-import { clockMinus, collectStatus, dayWords, nightClockWords, status, tonightWords } from "../src/commands/status.ts";
+import { clockMinus, collectStatus, dayWords, nightClockWords, status, tonightWords, whenWords } from "../src/commands/status.ts";
 import type { StatusDeps, StatusReport } from "../src/commands/status.ts";
 import type { PowerSource } from "../src/power.ts";
-import { addIdea, at, capture, fixedNow, moveIdea, SAMPLE_IDEAS, testConfig } from "./helpers.ts";
+import { addIdea, at, capture, fixedNow, moveIdea, plain, SAMPLE_IDEAS, testConfig } from "./helpers.ts";
 
 const config = testConfig();
 const SPOKEN = ["someone should build a tiny app for whose turn it is", "yeah that would settle it", "anyway what time is the game"];
@@ -174,8 +174,8 @@ describe("overnight status", () => {
       // reads nightClock.build.checkedAt and nightClock.deliver.checkedAt.
       nightClock: {
         tickSeconds: 60,
-        build: { slotAt: "2026-10-09T07:00:00.000Z", slotDay: "2026-10-09", state: "no-record", waiting: null, nextSlotAt: "2026-10-10T07:00:00.000Z", checkedAt: null, lastRun: null, recordAhead: null, fresh: false },
-        deliver: { slotAt: "2026-10-09T12:30:00.000Z", slotDay: "2026-10-09", state: "no-record", waiting: null, nextSlotAt: "2026-10-10T12:30:00.000Z", checkedAt: null, lastRun: null, recordAhead: null, fresh: false },
+        build: { slotAt: "2026-10-09T07:00:00.000Z", slotDay: "2026-10-09", state: "no-record", waiting: null, nextSlotAt: "2026-10-10T07:00:00.000Z", checkedAt: null, lastRun: null, recordAhead: null, fresh: false, nextStartAt: "2026-10-10T07:00:00.000Z", lockHeld: null, notStarting: false },
+        deliver: { slotAt: "2026-10-09T12:30:00.000Z", slotDay: "2026-10-09", state: "no-record", waiting: null, nextSlotAt: "2026-10-10T12:30:00.000Z", checkedAt: null, lastRun: null, recordAhead: null, fresh: false, nextStartAt: "2026-10-10T12:30:00.000Z", lockHeld: null, notStarting: false },
       },
     });
   });
@@ -593,6 +593,12 @@ function onTheClock(lastCheck: string | null = "2026-10-12T15:59:30.000Z"): Stor
   return store;
 }
 
+/** The same data folder, with both jobs' latest look at the clock moved to `lastCheck`. */
+function onTheClockWith(store: Store, lastCheck: string): Store {
+  for (const job of ["build", "deliver"] as const) noteChecked(store, job, new Date(lastCheck));
+  return store;
+}
+
 const clockDeps: Partial<StatusDeps> = { nightJobs: () => ALL_JOBS, jobTriggers: () => ON_TIMER, jobRunning: () => false };
 
 describe("overnight status: this month's build credits", () => {
@@ -748,6 +754,106 @@ describe("overnight status: the last night and the next, by the night clock", ()
     // A caller that cannot look at the jobs goes by the record alone.
     expect((await both({})).build).toMatch(/^as soon as the Mac has been awake/);
   });
+
+  it("names the run the clock will really start after BUILD_TIME and DELIVER_TIME were moved later on a day whose runs had already happened", async () => {
+    // Oct 13: the build ran at 1:00 am and the delivery at 6:30 am. At 2:00 pm the settings become 15:00 and 16:00.
+    const store = onTheClock("2026-10-13T20:29:30.000Z");
+    writeNightRun(store, "build", nightRecord("build", "2026-10-13T07:00:05.000Z", { startedAt: "2026-10-13T07:00:05.000Z", closedAs: "done", closedAt: "2026-10-13T07:20:00.000Z" }), new Date("2026-10-13T07:20:00.000Z"));
+    writeNightRun(store, "deliver", nightRecord("deliver", "2026-10-13T12:30:05.000Z", { startedAt: "2026-10-13T12:30:05.000Z", closedAs: "done", closedAt: "2026-10-13T12:31:00.000Z" }), new Date("2026-10-13T12:31:00.000Z"));
+    const moved = testConfig({ BUILD_TIME: "15:00", DELIVER_TIME: "16:00" });
+    const shown = async (now: string) => {
+      const out = capture();
+      await status({ store, config: moved, write: out.write, now: fixedNow(now), ...clockDeps });
+      const row = (label: string) => out.lines.find((line) => line.startsWith(`  ${label}`))?.replace(new RegExp(`^ {2}${label} +`), "");
+      return { build: row("Next build"), deliver: row("Next deliver"), clock: row("Night clock") };
+    };
+
+    // 2:30 pm. Today's new times are still to come, and the clock will start nothing at them:
+    // each record already holds Oct 13. The first runs it starts are tomorrow's.
+    const before = await shown("2026-10-13T20:30:00.000Z");
+    expect(before.build).toBe("Oct 14, 3:00 PM (kiro-crew first)");
+    expect(before.deliver).toBe("Oct 14, 3:30 PM, for the link on the wrist at 16:00");
+    expect(before.clock).toBe(
+      "the build clock already has Oct 13 on record, so the next build is Oct 14, 3:00 PM (BUILD_TIME, TZ or the Mac's clock was moved). Start its clock from now with: scripts/install-agents.sh install build" +
+        "   Also: the deliver clock already has Oct 13 on record, so the next deliver is Oct 14, 3:30 PM (DELIVER_TIME, TZ or the Mac's clock was moved). Start its clock from now with: scripts/install-agents.sh install deliver",
+    );
+    // The settings alone still say today, and the report keeps both: nobody else's reading of it changes.
+    const report = collectStatus({ store, config: moved, now: fixedNow("2026-10-13T20:30:00.000Z"), ...clockDeps });
+    expect(report).toMatchObject({ nextBuildAt: "2026-10-13T21:00:00.000Z", nextDeliverAt: "2026-10-13T21:30:00.000Z" });
+    expect(report.nightClock.build).toMatchObject({ nextSlotAt: "2026-10-13T21:00:00.000Z", nextStartAt: "2026-10-14T21:00:00.000Z", recordAhead: "2026-10-13" });
+    expect(report.nightClock.deliver).toMatchObject({ nextSlotAt: "2026-10-13T21:30:00.000Z", nextStartAt: "2026-10-14T21:30:00.000Z", recordAhead: "2026-10-13" });
+
+    // 3:36 pm, the new times have passed and nothing ran, as designed. The rows say the same day as before.
+    const after = await shown("2026-10-13T21:36:00.000Z");
+    expect(after.build).toBe("Oct 14, 3:00 PM (kiro-crew first)");
+    expect(after.deliver).toBe("Oct 14, 3:30 PM, for the link on the wrist at 16:00");
+    expect(after.clock).toMatch(/^the build job last checked the time/);
+
+    // A job that does not go by this clock (still on macOS's calendar) keeps the settings' own time.
+    const out = capture();
+    await status({ store, config: moved, write: out.write, now: fixedNow("2026-10-13T20:30:00.000Z"), ...clockDeps, jobTriggers: () => ({ build: "calendar", deliver: "calendar" }) });
+    expect(out.lines.find((line) => line.startsWith("  Next build"))).toContain("Oct 13, 3:00 PM (kiro-crew first)");
+  });
+
+  it("writes the next time the way it always did on the last day of a year, and adds the year only for a record dated far ahead", async () => {
+    const eve = "2026-12-31T19:00:00.000Z";
+    const store = new Store(":memory:");
+    for (const job of ["build", "deliver"] as const) {
+      writeNightRun(store, job, nightRecord(job, "2026-12-31T14:00:00.000Z", { closedAs: "first-check" }), new Date(eve));
+      noteChecked(store, job, new Date("2026-12-31T18:59:30.000Z"));
+    }
+    expect((await rows(store, clockDeps, eve)).get("Next build")).toBe("Jan 1, 1:00 AM (kiro-crew first)");
+    // The Mac's clock once read March 3, 2028: nothing runs until that day is past.
+    writeNightRun(store, "build", nightRecord("build", "2028-03-03T09:00:00.000Z", { closedAs: "first-check" }), new Date(eve));
+    expect((await rows(store, clockDeps, eve)).get("Next build")).toBe("Mar 4, 2028, 1:00 AM (kiro-crew first)");
+  });
+
+  it("counts what that build takes against the day it really runs in", async () => {
+    // Two builds started at 1:00 am on Oct 13, the day's limit. BUILD_TIME is then moved to 15:00.
+    const store = onTheClock("2026-10-13T20:29:30.000Z");
+    writeNightRun(store, "build", nightRecord("build", "2026-10-13T07:00:05.000Z", { startedAt: "2026-10-13T07:00:05.000Z", closedAs: "done", closedAt: "2026-10-13T07:40:00.000Z" }), new Date("2026-10-13T07:40:00.000Z"));
+    for (const [index, sample] of [SAMPLE_IDEAS.turns, SAMPLE_IDEAS.plants].entries()) {
+      const idea = moveIdea(store, addIdea(store, sample, "2026-10-12T20:00:00.000Z"), ["asked", "approved"], `2026-10-12T20:0${index + 1}:00.000Z`);
+      store.transitionIdea(idea.id, "building", { buildStartedAt: "2026-10-13T07:01:00.000Z", buildBackend: "kiro-crew" }, "2026-10-13T07:01:00.000Z");
+      store.transitionIdea(idea.id, "built", { builtAt: "2026-10-13T07:10:00.000Z" }, "2026-10-13T07:10:00.000Z");
+    }
+    moveIdea(store, addIdea(store, SAMPLE_IDEAS.chores, "2026-10-13T16:00:00.000Z"), ["asked", "approved"], "2026-10-13T16:01:00.000Z");
+    const moved = testConfig({ BUILD_TIME: "15:00" });
+    // By the settings alone the next build would be today's, whose limit is used up. The clock's next build is tomorrow's.
+    expect(collectStatus({ store, config: moved, now: fixedNow("2026-10-13T20:30:00.000Z"), ...clockDeps })).toMatchObject({ buildsToday: 2, waitingToBuild: 1, nextBuildTakes: 1 });
+    expect(collectStatus({ store, config: moved, now: fixedNow("2026-10-13T20:30:00.000Z"), ...clockDeps, jobTriggers: () => ({ build: "calendar", deliver: "calendar" }) })).toMatchObject({ nextBuildTakes: 0 });
+  });
+
+  it("says why a run that is due is not starting when its job is awake: another run has the lock, or every try ends before the work begins", async () => {
+    // 1:29 am on Oct 13. The build's time came at 1:00 am.
+    const NOW = "2026-10-13T07:29:30.000Z";
+    const store = onTheClock("2026-10-13T07:29:00.000Z");
+    // A build-now (or a build started by hand) holds the build lock: the job finds it busy every minute and stores nothing.
+    let shown = await rows(store, { ...clockDeps, jobRunning: (job) => job === "build" }, NOW);
+    expect(shown.get("Next build")).toBe("waiting for the build that is going on this data folder right now (a build-now, or one started by hand): the Oct 13, 1:00 AM build has not run yet (kiro-crew first)");
+    expect(shown.get("Night clock")).toBe("build and deliver check the time every minute, in America/Boise");
+    expect(collectStatus({ store, config, now: fixedNow(NOW), ...clockDeps, jobRunning: (job) => job === "build" }).nightClock.build).toMatchObject({ state: "due", lockHeld: true, notStarting: false });
+
+    // The lock is free, and the job has tried since 1:00 am: each try ended before the work began (the builder would not load).
+    writeNightRun(store, "build", nightRecord("build", "2026-10-13T07:00:05.000Z"), new Date("2026-10-13T07:00:05.000Z"));
+    shown = await rows(store, clockDeps, NOW);
+    expect(shown.get("Next build")).toBe("the build job is awake and tries every minute, but the build does not start (the reason is in logs/build.log): the Oct 13, 1:00 AM build has not run yet (kiro-crew first)");
+    expect(shown.get("Night clock")).toBe("the build job checks the time, but the build that is due does not start. See the last lines of its logs with: scripts/install-agents.sh status build");
+    expect(collectStatus({ store, config, now: fixedNow(NOW), ...clockDeps }).nightClock.build).toMatchObject({ state: "due", lockHeld: false, notStarting: true });
+
+    // The same record two minutes after its first try: a try or two is not yet "does not start".
+    shown = await rows(onTheClockWith(store, "2026-10-13T07:02:00.000Z"), clockDeps, "2026-10-13T07:02:05.000Z");
+    expect(shown.get("Next build")).toBe("as soon as the Mac has been awake for a minute or two: the Oct 13, 1:00 AM build has not run yet (kiro-crew first)");
+    expect(shown.get("Night clock")).toBe("build and deliver check the time every minute, in America/Boise");
+
+    // The delivery, the same way.
+    const morning = onTheClock("2026-10-13T12:59:00.000Z");
+    writeNightRun(morning, "deliver", nightRecord("deliver", "2026-10-13T12:30:05.000Z"), new Date("2026-10-13T12:30:05.000Z"));
+    shown = await rows(morning, clockDeps, "2026-10-13T12:59:30.000Z");
+    expect(shown.get("Next deliver")).toBe("the deliver job is awake and tries every minute, but the delivery does not start (the reason is in logs/deliver.log): the Oct 13, 6:30 AM deliver has not run yet");
+    shown = await rows(morning, { ...clockDeps, jobRunning: (job) => job === "deliver" }, "2026-10-13T12:59:30.000Z");
+    expect(shown.get("Next deliver")).toBe("waiting for the delivery that is going on this data folder right now (a build-now, or one started by hand): the Oct 13, 6:30 AM deliver has not run yet");
+  });
 });
 
 describe("overnight status: the night clock row", () => {
@@ -794,18 +900,33 @@ describe("overnight status: the night clock row", () => {
     );
   });
 
-  it("says when a clock's record is dated ahead, so nothing runs until then, and how to start it from now", async () => {
+  it("says when a clock's record is dated ahead, when the next run really is, and how to start the clock from now", async () => {
     const store = onTheClock();
-    // The Mac's clock once read January 5: the build's record is from then.
+    // The Mac's clock once read January 5: the build's record is from then. Nothing runs until that day is past.
     writeNightRun(store, "build", nightRecord("build", "2027-01-05T08:00:00.000Z", { closedAs: "first-check" }), new Date(MORNING));
-    expect(await clockRow(store)).toBe("the build clock's record is dated ahead (Jan 5, 2027), so nothing runs until then. Start it from now with: scripts/install-agents.sh install build");
-    expect(collectStatus({ store, config, now: fixedNow(MORNING) }).nightClock.build.recordAhead).toBe("2027-01-05");
+    expect(await clockRow(store)).toBe(
+      "the build clock already has Jan 5, 2027 on record, so the next build is Jan 6, 2027, 1:00 AM (BUILD_TIME, TZ or the Mac's clock was moved). Start its clock from now with: scripts/install-agents.sh install build",
+    );
+    expect(collectStatus({ store, config, now: fixedNow(MORNING) }).nightClock.build).toMatchObject({ recordAhead: "2027-01-05", nextSlotAt: "2026-10-13T07:00:00.000Z", nextStartAt: "2027-01-06T08:00:00.000Z" });
     // A day ahead in the same year: the year goes without saying.
     writeNightRun(store, "deliver", nightRecord("deliver", "2026-10-14T13:00:00.000Z", { closedAs: "first-check" }), new Date(MORNING));
-    expect(await clockRow(store)).toContain("   Also: the deliver clock's record is dated ahead (Oct 14), so nothing runs until then. Start it from now with: scripts/install-agents.sh install deliver");
+    expect(await clockRow(store)).toContain(
+      "   Also: the deliver clock already has Oct 14 on record, so the next deliver is Oct 15, 6:30 AM (DELIVER_TIME, TZ or the Mac's clock was moved). Start its clock from now with: scripts/install-agents.sh install deliver",
+    );
     expect(dayWords("2027-01-05", "2026-10-12")).toBe("Jan 5, 2027");
     expect(dayWords("2026-10-14", "2026-10-12")).toBe("Oct 14");
     expect(dayWords("not a day", "2026-10-12")).toBe("not a day");
+    expect(plain(whenWords(new Date("2026-10-14T21:00:00.000Z"), "America/Boise", new Date(MORNING)))).toBe("Oct 14, 3:00 PM");
+    expect(plain(whenWords(new Date("2027-01-06T08:00:00.000Z"), "America/Boise", new Date(MORNING)))).toBe("Jan 6, 2027, 1:00 AM");
+  });
+
+  it("says when a job is awake and the run that is due does not start, and where the reason is", async () => {
+    // The build was first tried at 1:00 am and has been tried every minute since. It is 1:29 am.
+    const store = onTheClock("2026-10-13T07:29:00.000Z");
+    writeNightRun(store, "build", nightRecord("build", "2026-10-13T07:00:05.000Z"), new Date("2026-10-13T07:00:05.000Z"));
+    expect(await clockRow(store, {}, "2026-10-13T07:29:30.000Z")).toBe("the build job checks the time, but the build that is due does not start. See the last lines of its logs with: scripts/install-agents.sh status build");
+    // A job that has stopped waking is the bigger news, and is what is said.
+    expect(await clockRow(store, {}, "2026-10-13T09:00:00.000Z")).toMatch(/^the build job last checked the time Oct 13, 1:29 AM\./);
   });
 
   it("says when an installed job's settings file could not be read, and names every problem when there are two kinds", async () => {
@@ -878,22 +999,42 @@ describe("overnight status: the night clock row", () => {
 });
 
 describe("overnight status: power", () => {
-  const power = async (powerSource: (() => Promise<PowerSource>) | undefined) => {
+  const power = async (powerSource: (() => Promise<PowerSource>) | undefined, listener?: ListenerState) => {
     const out = capture();
     const json = capture();
-    await status({ store: new Store(":memory:"), config, write: out.write, now: fixedNow(), powerSource });
-    await status({ store: new Store(":memory:"), config, write: json.write, now: fixedNow(), powerSource }, { json: true });
+    const listenerState = listener === undefined ? {} : { listenerState: () => listener };
+    await status({ store: new Store(":memory:"), config, write: out.write, now: fixedNow(), powerSource, ...listenerState });
+    await status({ store: new Store(":memory:"), config, write: json.write, now: fixedNow(), powerSource, ...listenerState }, { json: true });
     return { row: out.lines.find((line) => line.startsWith("  Power"))?.replace(/^ {2}Power {2,}/, ""), json: JSON.parse(json.text()) as Record<string, unknown>, all: out.text() };
   };
+  const LISTENING: ListenerState = { running: true, jobInstalled: true };
 
-  it("says mains or battery, and on battery what that means: awake while the lid is open, nothing with it closed", async () => {
-    expect((await power(async () => "mains")).row).toBe("mains power");
+  it("says mains or battery, and on battery with a listener running what that means: awake while the lid is open, nothing with it closed", async () => {
+    expect((await power(async () => "mains", LISTENING)).row).toBe("mains power");
     expect((await power(async () => "mains")).json).toMatchObject({ power: "mains" });
-    const battery = await power(async () => "battery");
+    const battery = await power(async () => "battery", LISTENING);
     expect(battery.row).toBe("battery: Overnight keeps the Mac awake while the lid is open. With the lid closed nothing runs until it is opened");
     expect(battery.json).toMatchObject({ power: "battery" });
     // No run waits for mains power, and no row says one does.
     expect(battery.all).not.toMatch(/plugged in|waits? (for|until).*(mains|plugged)/);
+    // It is the listener that holds the Mac awake, however it was started.
+    expect((await power(async () => "battery", { running: true, jobInstalled: false })).row).toBe(battery.row);
+  });
+
+  it("does not say Overnight keeps the Mac awake on battery when no listener is running, or when that cannot be told", async () => {
+    // Installed and not running (after a crash, or in the middle of a restart), and not installed at all.
+    for (const jobInstalled of [true, false]) {
+      const stopped = await power(async () => "battery", { running: false, jobInstalled });
+      expect(stopped.row).toBe("battery: the listener is not running, so nothing of Overnight's keeps the Mac awake between runs, and it may go to sleep. With the lid closed nothing runs until it is opened");
+      expect(stopped.all).not.toContain("Overnight keeps the Mac awake");
+      expect(stopped.json).toMatchObject({ power: "battery", listener: { running: false } });
+    }
+    const untold = "battery: a running listener keeps the Mac awake while the lid is open, but whether one is running could not be told. With the lid closed nothing runs until it is opened";
+    expect((await power(async () => "battery", { running: null, jobInstalled: true })).row).toBe(untold);
+    // A caller that cannot look at the listener at all.
+    expect((await power(async () => "battery")).row).toBe(untold);
+    // On mains none of this is said.
+    expect((await power(async () => "mains", { running: false, jobInstalled: true })).row).toBe("mains power");
   });
 
   it("says it could not tell when the reading is not one of the two, or the look itself fails, and still shows the rest", async () => {

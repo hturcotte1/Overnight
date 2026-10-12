@@ -1,4 +1,5 @@
 // All text in this file is made up for the tests. None of it is Bee data, and no builder is run.
+import { EventEmitter } from "node:events";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { BUILD_INTERRUPTED_REASON } from "@overnight/core";
@@ -6,9 +7,9 @@ import { runBuildNight, SKIPPED_PAUSED } from "@overnight/builder";
 import { build, BUILD_ALREADY_RUNNING, BUILD_PAUSED_LINE, BUILD_SKIPPED_PAUSED, buildNightLimitMs, buildNightLines, buildSummary, chooseBackends, formatDuration, quietly } from "../src/commands/build.ts";
 import type { BuildDeps } from "../src/commands/build.ts";
 import type { NightRunMarks } from "../src/commands/night-tick.ts";
-import { DeadlinePassed, withDeadline } from "../src/deadline.ts";
+import { DeadlinePassed, settleUnderLimit, withDeadline } from "../src/deadline.ts";
 import { LAST_RESORT_LINE } from "../src/last-resort.ts";
-import { SLEPT_LINE } from "../src/sleep-watch.ts";
+import { sleptLine } from "../src/sleep-watch.ts";
 import { STOP_EXIT_CODES, STOP_OVERDUE, STOP_SIGNAL_NAMES, watchStopSignals } from "../src/stop-signals.ts";
 import { addIdea, at, capture, moveIdea, SAMPLE_IDEAS, testContext } from "./helpers.ts";
 import { aborted, collectingLogger, fakeBuild, fakeKeepAwake, fakeLastResort, fakeLocks, fakeMarks, fakeSleepWatch, fakeStopSignals, never } from "./night-fakes.ts";
@@ -299,6 +300,27 @@ describe("overnight build and stop signals", () => {
     expect(t.stop.handlers()).toBe(0);
   });
 
+  it("waits for the builder when the night's last-resort limit passes while it is stopping after a signal: the signal's code, and no \"could not finish\"", async () => {
+    const order: string[] = [];
+    const told = { now: () => {} };
+    const fakes = fakeBuild({
+      night: async (deps) => {
+        told.now();
+        await aborted(deps.signal);
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        order.push("builder came back");
+        return { built: [], failed: [], skipped: "stopped" };
+      },
+    });
+    fakes.order = order;
+    const t = setUp({ fakes, locks: fakeLocks({ order }), limitMs: 20 });
+    told.now = () => t.stop.send("SIGTERM");
+    expect(await t.run()).toBe(143);
+    expect(order).toEqual(["lock build.lock", "load builder", "runBuildNight", "builder came back", "release build.lock"]);
+    expect(t.err.lines).toEqual([]);
+    expect(t.out.lines).toEqual(["Tonight's build: 0 built, 0 failed; stopped."]);
+  });
+
   it("starts nothing when the stop signal arrives while the builder is still loading", async () => {
     const t = setUp();
     const load = t.deps.loadFactories;
@@ -551,7 +573,9 @@ describe("overnight build and a Mac that slept through part of the night", () =>
     expect(t.fakes.nightDeps[0]?.signal?.aborted).toBe(true);
     // Nothing went wrong that a person has to fix.
     expect(await running).toBe(0);
-    expect(t.log.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: SLEPT_LINE, gapSeconds: 7200 }]);
+    expect(t.log.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: sleptLine("build"), gapSeconds: 7200 }]);
+    // The line promises a second try only to a build that still has a start left.
+    expect(sleptLine("build")).toBe("the Mac went to sleep during the run; what was in progress was stopped. A build that was on its first start is tried once more on a later night; one on its second start counts as failed");
     expect(t.log.lines.at(-1)).toMatchObject({ message: "overnight build finished", failed: 1, skipped: "stopped", stoppedBySleep: true });
     expect(t.log.lines.at(-1)).not.toHaveProperty("stoppedBySignal");
     expect(order).toEqual(["lock build.lock", "load builder", "mark started", "runBuildNight", "mark ended cut-short", "release build.lock"]);
@@ -599,6 +623,82 @@ describe("overnight build and a Mac that slept through part of the night", () =>
     t.stop.send("SIGTERM");
     expect(await running).toBe(143);
     expect(t.log.lines.at(-1)).toMatchObject({ level: "error", message: "overnight build: the builder did not stop in time after the stop signal; ending anyway" });
+  });
+
+  // A sleep that outlasts the night's own last-resort limit: on waking, the sleep watch and the
+  // limit come due in the same instant. The builder still needs its few seconds to stop.
+  describe("when the sleep outlasted the night's last-resort limit", () => {
+    const LIMIT_MS = 20;
+    /** A builder that takes longer to stop than the limit has left, and says when it has. `woke` is called as the night begins. */
+    const slowToStop = (order: string[], woke: () => void) => {
+      const fakes = fakeBuild({
+        night: async (deps) => {
+          woke();
+          await aborted(deps.signal);
+          // Cancelling its Kiro Crew job and writing the result down: well past the limit.
+          await new Promise((resolve) => setTimeout(resolve, LIMIT_MS + 60));
+          order.push("builder came back");
+          return { built: [], failed: ["idea_b"], skipped: "stopped" };
+        },
+      });
+      fakes.order = order;
+      return fakes;
+    };
+    const expectSleptNight = (t: ReturnType<typeof setUp>, marks: ReturnType<typeof fakeMarks>, order: string[]) => {
+      // The builder was waited for: the lock, and the database behind it, went only after it came back.
+      expect(order).toEqual(["lock build.lock", "load builder", "mark started", "runBuildNight", "builder came back", "mark ended cut-short", "release build.lock"]);
+      expect(marks.ended).toEqual(["cut-short"]);
+      expect(t.out.lines).toEqual(["Tonight's build: 0 built, 1 failed (idea_b); stopped."]);
+      expect(t.err.lines).toEqual([]);
+      expect(t.log.text()).not.toContain("past its time limit");
+      expect(t.log.lines.filter((line) => line.level === "error")).toEqual([]);
+      expect(t.log.lines.at(-1)).toMatchObject({ message: "overnight build finished", stoppedBySleep: true });
+    };
+
+    it("waits for the builder when the watch's timer ran first, and ends as after any sleep: the summary, exit 0, no \"could not finish\"", async () => {
+      const order: string[] = [];
+      const marks = fakeMarks(order);
+      const woke = { now: () => {} };
+      const t = setUp({ fakes: slowToStop(order, () => woke.now()), locks: fakeLocks({ order }), onRun: marks.marks, limitMs: LIMIT_MS });
+      // The watch fires as the night begins; the limit passes 20 ms later, while the builder is still stopping.
+      woke.now = () => t.sleep.fire(5 * 3_600_000);
+      expect(await t.run()).toBe(0);
+      expectSleptNight(t, marks, order);
+    });
+
+    it("sees the sleep all the same when the limit's timer ran first: the watch is asked to look before the night is called overdue", async () => {
+      const order: string[] = [];
+      const marks = fakeMarks(order);
+      const woke = { now: () => {} };
+      const t = setUp({ fakes: slowToStop(order, () => woke.now()), locks: fakeLocks({ order }), onRun: marks.marks, limitMs: LIMIT_MS });
+      // The Mac slept, and the watch's own timer has not come round when the limit passes.
+      woke.now = () => t.sleep.sleepUnnoticed(5 * 3_600_000);
+      expect(await t.run()).toBe(0);
+      expect(t.sleep.looks()).toBe(1);
+      expect(t.log.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: sleptLine("build"), gapSeconds: 18_000 }]);
+      expectSleptNight(t, marks, order);
+    });
+
+    it("still gives up on a builder that never comes back, after the stop's own wait and not at the limit", async () => {
+      const woke = { now: () => {} };
+      const fakes = fakeBuild({ night: () => (woke.now(), never()) });
+      const t = setUp({ fakes, limitMs: LIMIT_MS, stopWaitMs: 120 });
+      woke.now = () => t.sleep.fire();
+      const began = Date.now();
+      expect(await t.run()).toBe(1);
+      // Not at the limit (20 ms): the builder had the whole of the stop's wait.
+      expect(Date.now() - began).toBeGreaterThanOrEqual(100);
+      expect(t.err.lines).toEqual(['"overnight build" was told to stop, and the builder had not stopped 20 seconds later. Ending anyway.']);
+      expect(t.log.text()).not.toContain("past its time limit");
+    });
+
+    it("a limit that passes with no sleep and no stop signal is still the last resort: the watch is asked, finds nothing, and the night ends \"could not finish\"", async () => {
+      const t = setUp({ fakes: fakeBuild({ night: () => never() }), limitMs: LIMIT_MS });
+      expect(await t.run()).toBe(1);
+      expect(t.sleep.looks()).toBe(1);
+      expect(t.err.lines).toEqual(['"overnight build" could not finish. The night\'s build was still going after 0 minutes, which is past its time limit.']);
+      expect(t.fakes.nightDeps[0]?.signal?.aborted).toBe(true);
+    });
   });
 });
 
@@ -759,6 +859,36 @@ describe("time limits and durations", () => {
     expect(error).toBeInstanceOf(DeadlinePassed);
     expect((error as DeadlinePassed).message).toBe("The work was still going after 0 minutes, which is past its time limit.");
     expect(new DeadlinePassed("The build", 105 * 60_000).message).toBe("The build was still going after 105 minutes, which is past its time limit.");
+  });
+
+  it("lets the limit end the wait only for work nobody has told to stop", async () => {
+    const watch = () => watchStopSignals({ source: new EventEmitter(), exitNow: () => {}, waitMs: 60 });
+    // In time: the work's own result, and the question is never asked.
+    let asked = 0;
+    const quick = watch();
+    expect(await settleUnderLimit({ work: "made", stop: quick, limitMs: 1_000, what: "The build", toldToStop: () => ((asked += 1), false) })).toBe("made");
+    expect(asked).toBe(0);
+    // The work's own error passes through, also when it had been told to stop.
+    await expect(settleUnderLimit({ work: Promise.reject(new Error("made-up failure")), stop: quick, limitMs: 1_000, what: "The build", toldToStop: () => true })).rejects.toThrow("made-up failure");
+    quick.close();
+
+    // Past the limit, and nobody told it to stop: the last resort.
+    const alone = watch();
+    await expect(settleUnderLimit({ work: never(), stop: alone, limitMs: 10, what: "The build", toldToStop: () => false })).rejects.toBeInstanceOf(DeadlinePassed);
+    alone.close();
+
+    // Past the limit while it is stopping: its result is waited for.
+    const stopping = watch();
+    stopping.stopWork();
+    const slow = new Promise<string>((resolve) => setTimeout(() => resolve("stopped cleanly"), 40));
+    expect(await settleUnderLimit({ work: slow, stop: stopping, limitMs: 10, what: "The build", toldToStop: () => true })).toBe("stopped cleanly");
+    stopping.close();
+
+    // Told to stop and never back: the stop's own wait ends it, not the limit.
+    const stuck = watch();
+    stuck.stopWork();
+    expect(await settleUnderLimit({ work: never(), stop: stuck, limitMs: 10, what: "The build", toldToStop: () => true })).toBe(STOP_OVERDUE);
+    stuck.close();
   });
 
   it("writes a duration the way a person would say it", () => {

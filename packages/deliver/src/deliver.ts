@@ -12,8 +12,9 @@
 // programs killed; nothing new is started; and the idea in progress is left exactly where the
 // next run picks it up:
 //   - stopped while verifying or publishing: the idea stays "built" (or "publish_failed") and is
-//     verified and published again next time. If the push may already have reached GitHub, a
-//     note on the idea says so; the publisher replaces that version cleanly (see publisher.ts).
+//     verified and published again next time. If the push had been started by then, a note on
+//     the idea says so (whether GitHub took it is not known); the publisher replaces that version
+//     cleanly if it is there (see publisher.ts).
 //   - stopped while Bee was being asked for the to-do: the mark described above stays, so the
 //     next run closes the idea without asking Bee a second time.
 //
@@ -55,6 +56,14 @@ export const ANNOUNCING_NOTE = "telling the wearer in Bee now";
 const INTERRUPTED_NOTE = "Bee was being told when Overnight stopped, so its to-do may or may not exist; no second one is made";
 
 /**
+ * The note on an idea that is closed because Bee's answer never reached us in a form we could use
+ * (`kind`: no reply in time, a reply we could not read, anything unexpected). The same rule as the
+ * note above: no reply in time can also mean the request never left this Mac, so all that is
+ * known is that Bee was asked. It does not say "told" either.
+ */
+const lostReplyNote = (kind: string): string => `Bee was asked for the to-do but its reply was lost (${kind}), so the to-do may or may not exist; no second one is made`;
+
+/**
  * Added to the reason when publishing failed after the push had been started (it ran into its
  * time limit, say): GitHub may have taken the new version although we never heard so. The idea is
  * a failure all the same, but its reason must not let anyone think nothing went out.
@@ -62,11 +71,13 @@ const INTERRUPTED_NOTE = "Bee was being told when Overnight stopped, so its to-d
 const PUSH_MAY_BE_PUBLIC = " The push may have reached GitHub all the same, so the app may be public.";
 
 /**
- * The note left on an idea when Overnight was stopped after the new version was (or may have
- * been) pushed, but before the link was confirmed and recorded. The idea is published again on
- * the next run, which replaces this note.
+ * The note left on an idea when Overnight was stopped once the push of the new version had been
+ * started, but before the link was confirmed and recorded. The publisher counts a push as possibly
+ * out from the moment it starts, so the stop may have landed during the push itself, with nothing
+ * on GitHub. The note therefore says "started", never "pushed". The idea is published again on the
+ * next run, which replaces this note.
  */
-export const PUSHED_UNCONFIRMED_NOTE = "pushed to GitHub, but Overnight was stopped before the link was confirmed; the next run publishes it again";
+export const PUSHED_UNCONFIRMED_NOTE = "the push to GitHub was started, but Overnight was stopped before the link was confirmed; the next run publishes it again";
 
 /**
  * The note on a published idea whose new version was pushed, but whose page was not seen serving
@@ -330,12 +341,12 @@ async function verifyAndPublish(ctx: Context, idea: Idea): Promise<PublishOutcom
   };
   /**
    * Stopped while publishing. Never half-published without a record: if the new version is, or
-   * may be, on GitHub, the idea says so until the next run has published it again and recorded
-   * the link.
+   * may be, on GitHub (`pushed`: the push had at least been started), the idea says so until the
+   * next run has published it again and recorded the link. The log says the same, and no more.
    */
   const stoppedWhilePublishing = (pushed: boolean): PublishOutcome => {
     if (pushed) store.updateIdea(idea.id, { note: PUSHED_UNCONFIRMED_NOTE }, ctx.now().toISOString());
-    return stoppedHere(pushed ? "publish, after the push" : "publish");
+    return stoppedHere(pushed ? "publish, once the push had started" : "publish");
   };
 
   if (ctx.stopped()) return stoppedHere("start");
@@ -455,7 +466,8 @@ async function announce(ctx: Context, ideaId: string): Promise<"delivered" | "no
       deliver(todo.value.id, idea.note);
       logger.info("told the wearer about a built app", { ideaId, todoId: todo.value.id });
     } else {
-      deliver(null, `told in Bee, but its reply was lost (${todo.kind}), so the to-do's id is unknown`);
+      // "lost": the to-do may exist, so this was the one and only ask. The note says just that.
+      deliver(null, lostReplyNote(todo.kind));
     }
   }
 

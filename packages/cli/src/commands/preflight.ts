@@ -23,7 +23,8 @@ import { oneLine } from "../output.ts";
 import type { Write } from "../output.ts";
 import { STOP_OVERDUE, watchStopSignals } from "../stop-signals.ts";
 import type { WatchStopSignals } from "../stop-signals.ts";
-import { dayWords } from "./status.ts";
+import { nextStartAt, runNotStarting } from "./night-tick.ts";
+import { recordAheadWords } from "./status.ts";
 
 export type SandboxProbeResult = { ok: true } | { ok: false; reason: string };
 
@@ -99,6 +100,8 @@ export const PREFLIGHT_STOPPED = "Stopped: not every check was made.";
 const SANDBOX_REASON_PREFIX = /^the build sandbox check failed:\s*/i;
 
 const INSTALL_CREW = installCommand("crew");
+/** Where the gateway job's own copy of the sandbox rules is kept, as said to a person. scripts/install-agents.sh makes it (installed_profile_of). */
+const GATEWAY_COPY = "sandbox/crew-gateway.sb in the data folder";
 const JOB_STATUS_COMMAND = "scripts/install-agents.sh status";
 /** "3", for "in the last 3 minutes": how recent a job's last look at the clock has to be. */
 const FRESH_MINUTES = Math.round(NIGHT_CHECK_FRESH_MS / 60_000);
@@ -153,6 +156,21 @@ function staleText(jobs: readonly ClockedJob[], checkedAt: Record<ClockedJob, st
 function staleFix(jobs: readonly ClockedJob[]): string {
   const commands = jobs.map((job) => `${JOB_STATUS_COMMAND} ${job}   then: ${installCommand(job)}`).join("   then: ");
   return `if the Mac has only just woken, wait two minutes and run this again. Otherwise: ${commands}`;
+}
+
+/** What it means that a job is awake and its due run does not start, for one job or for both. */
+function notStartingText(jobs: readonly ClockedJob[], now: Date, config: Pick<Config, "timeZone" | "buildTime" | "deliverTime">): string {
+  const work: Record<ClockedJob, string> = { build: "build", deliver: "delivery" };
+  const due = (job: ClockedJob) => `the ${work[job]} that was due at ${formatLocal(currentSlot(job, now, config).at, config.timeZone)}`;
+  const [first, second] = jobs;
+  if (first === undefined) return "";
+  if (second === undefined) return `The ${first} job is awake and tries every minute, but ${due(first)} does not start.`;
+  return `The ${first} and ${second} jobs are awake and try every minute, but ${due(first)} and ${due(second)} do not start.`;
+}
+
+/** Where the reason is: each failed try leaves a line in the job's own log and in what it printed. */
+function notStartingFix(jobs: readonly ClockedJob[]): string {
+  return `the reason is in the last lines of ${jobs.map((job) => `logs/${job}.log`).join(" and ")}: ${jobs.map((job) => `${JOB_STATUS_COMMAND} ${job}`).join("   then: ")}`;
 }
 
 /**
@@ -305,22 +323,29 @@ export async function preflight(deps: PreflightDeps): Promise<number> {
       if (onCalendar.length > 0) return fail(`Still on macOS's calendar: ${onCalendar.join(", ")}. That calendar ran both jobs an hour late on Oct 11.`, installCommands(onCalendar));
 
       const now = deps.now?.() ?? new Date();
-      // A record dated after today's slot: the Mac's clock or a setting was moved back, and the job starts nothing until that day.
+      const records = { build: readNightRun(store, "build"), deliver: readNightRun(store, "deliver") };
+      // A record dated after the day the job's clock has come to: a setting or the Mac's clock was
+      // moved, and the job starts nothing until that day is past. Say when its next run really is.
       for (const job of CLOCKED_JOBS) {
-        const record = readNightRun(store, job);
+        const record = records[job];
         const slot = currentSlot(job, now, config);
         if (record !== null && record.day > slot.day) {
-          return fail(`The ${job} clock's record is dated ahead (${dayWords(record.day, slot.day)}), so nothing runs until then.`, installCommand(job));
+          const said = recordAheadWords(job, record.day, { slotDay: slot.day, slotAt: slot.at.toISOString(), nextStartAt: nextStartAt(job, now, config, record).toISOString() }, config.timeZone);
+          return fail(`The ${said}`, `${installCommand(job)}   (that starts the ${job} clock from now)`);
         }
       }
       // Awake means: asked the clock moments ago, or is running right now (a job that is running does not ask).
-      const running = CLOCKED_JOBS.filter((job) => probes.nightJobRunning(job) === true);
+      const lockHeld = { build: probes.nightJobRunning("build"), deliver: probes.nightJobRunning("deliver") };
+      const running = CLOCKED_JOBS.filter((job) => lockHeld[job] === true);
       const checkedAt = { build: readCheckedAt(store, "build"), deliver: readCheckedAt(store, "deliver") };
       const asleep = CLOCKED_JOBS.filter((job) => {
         const at = checkedAt[job];
         return !running.includes(job) && !(at !== null && now.getTime() - Date.parse(at) <= NIGHT_CHECK_FRESH_MS);
       });
       if (asleep.length > 0) return fail(staleText(asleep, checkedAt, config.timeZone), staleFix(asleep));
+      // Awake, and getting nowhere: a run is due, the job tries every minute, and the work never begins.
+      const stuck = CLOCKED_JOBS.filter((job) => runNotStarting({ job, now, config, record: records[job], lockHeld: lockHeld[job] }));
+      if (stuck.length > 0) return fail(notStartingText(stuck, now, config), notStartingFix(stuck));
       const ownTime = `The build and deliver jobs wake every minute and go by Overnight's own clock (${config.timeZone}).`;
       if (running.length === 0) return pass(`${ownTime} Both checked the time in the last ${FRESH_MINUTES} minutes.`);
       if (running.length === CLOCKED_JOBS.length) return pass(`${ownTime} Both are running right now.`);
@@ -334,10 +359,15 @@ export async function preflight(deps: PreflightDeps): Promise<number> {
       const installedFor = probes.crewJobSandbox();
       if (installedFor === null) return unchecked(question, "its settings file could not be read");
       if (installedFor !== mode) return fail(`The gateway job was installed for BUILD_SANDBOX=${installedFor}, but the setting is now ${mode}.`, INSTALL_CREW);
-      // Inside Overnight's sandbox the gateway goes by its own copy of the rules, made by the last
-      // `install crew`. A copy that is not the repo's file means the rules changed since.
-      if (mode === "overnight" && probes.gatewayProfileCopy() !== "same") return fail("The gateway is running behind an older copy of the sandbox rules.", INSTALL_CREW);
-      return pass(`The gateway job was installed for BUILD_SANDBOX=${mode}.`);
+      if (mode !== "overnight") return pass(`The gateway job was installed for BUILD_SANDBOX=${mode}.`);
+      // Inside Overnight's sandbox the gateway goes by its own copy of the rules. `install crew`
+      // replaces that copy only once it has stopped the old gateway, so the copy is what the
+      // gateway started behind. What is compared here is that copy and the repo's file: a copy
+      // that is not the repo's means the rules changed since the gateway job was last installed.
+      const copy = probes.gatewayProfileCopy();
+      if (copy === "missing") return fail(`The gateway job's copy of the sandbox rules is missing (${GATEWAY_COPY}).`, INSTALL_CREW);
+      if (copy === "different") return fail(`The gateway job's copy of the sandbox rules (${GATEWAY_COPY}) is not the repo's, so the gateway is not running behind the rules in this repo.`, INSTALL_CREW);
+      return pass(`The gateway job was installed for BUILD_SANDBOX=${mode}, and its copy of the sandbox rules is the repo's.`);
     });
 
     const stopCode = stop.exitCode();

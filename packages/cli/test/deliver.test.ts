@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { deliver, DELIVER_ALREADY_RUNNING, DELIVER_ONE_LIMIT_MS, deliverLimitMs, deliverSummary, disposeQuietly } from "../src/commands/deliver.ts";
 import type { DeliverDeps } from "../src/commands/deliver.ts";
 import type { NightRunMarks } from "../src/commands/night-tick.ts";
-import { SLEPT_LINE } from "../src/sleep-watch.ts";
+import { sleptLine } from "../src/sleep-watch.ts";
 import { STOP_EXIT_CODES, STOP_SIGNAL_NAMES } from "../src/stop-signals.ts";
 import { addIdea, at, capture, moveIdea, SAMPLE_IDEAS, testContext } from "./helpers.ts";
 import { LAST_RESORT_LINE } from "../src/last-resort.ts";
@@ -393,7 +393,8 @@ describe("overnight deliver and a Mac that slept through part of the morning", (
     t.sleep.fire(95_000);
     expect(t.fakes.runDeps[0]?.signal?.aborted).toBe(true);
     expect(await running).toBe(0);
-    expect(t.log.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: SLEPT_LINE, gapSeconds: 95 }]);
+    expect(t.log.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: sleptLine("deliver"), gapSeconds: 95 }]);
+    expect(sleptLine("deliver")).toBe("the Mac went to sleep during the run; what was in progress was stopped. What was not delivered waits for the next run");
     expect(t.log.lines.at(-1)).toMatchObject({ message: "overnight deliver finished", delivered: 1, stoppedBySleep: true });
     expect(t.log.lines.at(-1)).not.toHaveProperty("stoppedBySignal");
     expect(order).toEqual(["lock deliver.lock", "load deliver", "create bee", "mark started", "runDeliver", "mark ended cut-short", "dispose bee", "release deliver.lock"]);
@@ -437,6 +438,75 @@ describe("overnight deliver and a Mac that slept through part of the morning", (
     expect(t.log.lines.at(-1)).toMatchObject({ level: "error", message: "overnight deliver: the deliver step did not stop in time after the Mac's sleep was noticed; ending anyway" });
     expect(marks.ended).toEqual(["cut-short"]);
     expect(t.fakes.order.slice(-2)).toEqual(["dispose bee", "release deliver.lock"]);
+  });
+
+  // A sleep that outlasts the morning's own last-resort limit (75 minutes with one idea waiting):
+  // on waking, the sleep watch and the limit come due in the same instant.
+  describe("when the sleep outlasted the morning's last-resort limit", () => {
+    const LIMIT_MS = 20;
+    /** A deliver step that takes longer to stop than the limit has left. `woke` is called as the morning begins. */
+    const slowToStop = (order: string[], woke: () => void) => {
+      const fakes = fakeDeliver({
+        run: async (deps) => {
+          woke();
+          await aborted(deps.signal);
+          // Stopping the programs it started: well past the limit.
+          await new Promise((resolve) => setTimeout(resolve, LIMIT_MS + 60));
+          order.push("deliver step came back");
+          return { delivered: [], failed: [], notified: [], stopped: true };
+        },
+      });
+      fakes.order = order;
+      return fakes;
+    };
+    const expectSleptMorning = (t: ReturnType<typeof setUp>, marks: ReturnType<typeof fakeMarks>, order: string[]) => {
+      expect(order).toEqual(["lock deliver.lock", "load deliver", "create bee", "mark started", "runDeliver", "deliver step came back", "mark ended cut-short", "dispose bee", "release deliver.lock"]);
+      expect(marks.ended).toEqual(["cut-short"]);
+      expect(t.out.lines).toEqual(["This morning: 0 delivered, 0 failed, 0 told about a failure. Stopped before the morning was done: the rest waits for the next run."]);
+      expect(t.err.lines).toEqual([]);
+      expect(t.log.text()).not.toContain("past its time limit");
+      expect(t.log.lines.filter((line) => line.level === "error")).toEqual([]);
+      expect(t.log.lines.at(-1)).toMatchObject({ message: "overnight deliver finished", stoppedBySleep: true });
+    };
+
+    it("waits for the deliver step when the watch's timer ran first, and ends as after any sleep: the summary, exit 0, no \"could not finish\"", async () => {
+      const order: string[] = [];
+      const marks = fakeMarks(order);
+      const woke = { now: () => {} };
+      const t = setUp({ fakes: slowToStop(order, () => woke.now()), locks: fakeLocks({ order }), onRun: marks.marks, limitMs: LIMIT_MS });
+      woke.now = () => t.sleep.fire(80 * 60_000);
+      expect(await t.run()).toBe(0);
+      expectSleptMorning(t, marks, order);
+    });
+
+    it("sees the sleep all the same when the limit's timer ran first", async () => {
+      const order: string[] = [];
+      const marks = fakeMarks(order);
+      const woke = { now: () => {} };
+      const t = setUp({ fakes: slowToStop(order, () => woke.now()), locks: fakeLocks({ order }), onRun: marks.marks, limitMs: LIMIT_MS });
+      woke.now = () => t.sleep.sleepUnnoticed(80 * 60_000);
+      expect(await t.run()).toBe(0);
+      expect(t.sleep.looks()).toBe(1);
+      expect(t.log.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: sleptLine("deliver"), gapSeconds: 4800 }]);
+      expectSleptMorning(t, marks, order);
+    });
+
+    it("waits the same way when the limit passes while the deliver step is stopping after a stop signal", async () => {
+      const order: string[] = [];
+      const told = { now: () => {} };
+      const t = setUp({ fakes: slowToStop(order, () => told.now()), locks: fakeLocks({ order }), limitMs: LIMIT_MS });
+      told.now = () => t.stop.send("SIGTERM");
+      expect(await t.run()).toBe(143);
+      expect(order.slice(-3)).toEqual(["deliver step came back", "dispose bee", "release deliver.lock"]);
+      expect(t.err.lines).toEqual([]);
+    });
+
+    it("a limit that passes with no sleep and no stop signal is still the last resort", async () => {
+      const t = setUp({ fakes: fakeDeliver({ run: () => never() }), limitMs: LIMIT_MS });
+      expect(await t.run()).toBe(1);
+      expect(t.sleep.looks()).toBe(1);
+      expect(t.err.lines).toEqual(['"overnight deliver" could not finish. The morning\'s deliver was still going after 0 minutes, which is past its time limit.']);
+    });
   });
 });
 

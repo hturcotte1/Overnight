@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { BUILD_SKILL_FILE, createKiroCrewBackend, crewSettingsProblem, NEVER_DUE_CRON, prepareWorkspace, renderBrief, STOPPED_REASON } from "../src/index.ts";
 import type { BuildBackend, BuildJob, KiroCrewBackendOptions } from "../src/index.ts";
 import { gatewayPort } from "../src/crew-client.ts";
-import { collectingLogger, FakeCrew, flagValue, leaveBuild, MINUTE, movableClock, reply, SECOND, T0, tempDir, testPaths } from "./helpers.ts";
+import { clockedSleptWatch, collectingLogger, FakeCrew, flagValue, HOUR, leaveBuild, MINUTE, movableClock, reply, SECOND, T0, tempDir, testPaths } from "./helpers.ts";
 import type { Clock } from "./helpers.ts";
 
 const ID = "idea_20261010_ab12cd34";
@@ -512,22 +512,85 @@ describe("Kiro Crew backend: what a try cost", () => {
     }
   });
 
-  it("never says the agent ran for longer than it was allowed, however long the Mac slept in the middle of the build", async () => {
-    const rig = makeRig({ pollMs: 5 * SECOND });
+  /**
+   * A build whose Mac goes to sleep after two minutes and wakes six hours later, when Overnight
+   * notices and stops the run (the command line does that; here the test does). `mac` says
+   * whether the backend's sleep watch can see it: the test's own, on the test's clock, or none
+   * given (then the backend uses the real one, on the real clock, which sees nothing of this).
+   */
+  async function sleptThrough(recorded: number | null, mac: ReturnType<typeof clockedSleptWatch> | null, clock: Clock, rig: Rig) {
     rig.crew.writeSecret();
     rig.crew.runForMs = Number.POSITIVE_INFINITY;
+    rig.crew.creditsWhenCancelled = recorded;
     const stop = new AbortController();
     let looks = 0;
-    // The third look at Kiro Crew's files comes six hours after the second: the Mac was asleep.
-    // Overnight notices and stops the run (the command line does that; here the test does).
     const sleep = async (ms: number): Promise<void> => {
       looks += 1;
-      await rig.crew.sleep(looks === 3 ? 6 * 60 * MINUTE : ms);
-      if (looks === 3) stop.abort();
+      // Each look at Kiro Crew's files is 5 seconds after the last, as the watch's ticks are.
+      // The 25th comes six hours late.
+      await rig.crew.sleep(looks === 25 ? 6 * HOUR : ms);
+      mac?.tick();
+      if (looks === 25) stop.abort();
     };
-    const backend = createKiroCrewBackend({ paths: rig.paths, logger: collectingLogger().logger, sandboxMode: "crew", kirocrewBinary: rig.crew.binary, crewHome: rig.crew.home, run: rig.crew.run, now: rig.clock.now, sleep, timeZone: "America/Boise", postCancel: rig.crew.postCancel, pollMs: 5 * SECOND });
-    const outcome = await backend.build(rig.job, { signal: stop.signal });
-    expect(outcome).toMatchObject({ ok: false, reason: STOPPED_REASON, ms: 6 * 60 * MINUTE + 10 * SECOND });
+    const { logger, lines } = collectingLogger();
+    const backend = createKiroCrewBackend({ paths: rig.paths, logger, sandboxMode: "crew", kirocrewBinary: rig.crew.binary, crewHome: rig.crew.home, run: rig.crew.run, now: clock.now, sleep, timeZone: "America/Boise", postCancel: rig.crew.postCancel, pollMs: 5 * SECOND, ...(mac === null ? {} : { sleptWatch: mac.start }) });
+    return { outcome: await backend.build(rig.job, { signal: stop.signal }), lines };
+  }
+
+  it("leaves out the time the Mac slept in the middle of the build: the agent's time is the time it was at work", async () => {
+    for (const recorded of [3.4, null]) {
+      const rig = makeRig({ pollMs: 5 * SECOND });
+      const mac = clockedSleptWatch(rig.clock);
+      const { outcome, lines } = await sleptThrough(recorded, mac, rig.clock, rig);
+      expect(outcome, String(recorded)).toMatchObject({ ok: false, reason: STOPPED_REASON, ms: 6 * HOUR + 2 * MINUTE });
+      // Two minutes, to within one look of the watch (5 seconds): not the 46 and a half minutes
+      // of a full-length try, which is what was counted before (93 credits in the month's ledger).
+      expect(outcome.agentMs, String(recorded)).toBe(2 * MINUTE + 5 * SECOND);
+      // Kiro Crew's own figure for the cancelled run, when it wrote one, is passed on as ever.
+      if (recorded === null) expect(outcome).not.toHaveProperty("credits");
+      else expect(outcome.credits).toBe(recorded);
+      // One watch, from the start of the agent to its end.
+      expect(mac.running()).toBe(0);
+      const said = lines.map((line) => JSON.parse(line) as Record<string, unknown>).find((line) => line.message === "the Mac slept during a kiro crew build; that time is not counted as the agent's");
+      expect(said).toMatchObject({ level: "info", ideaId: ID, sleptSeconds: 6 * 60 * 60 - 5, agentSeconds: 125 });
+    }
+  });
+
+  it("starts no watch when no agent is started, stops it when the agent's time ends, and says nothing when the Mac never slept", async () => {
+    const refused = makeRig();
+    const idle = clockedSleptWatch(refused.clock);
+    let started = 0;
+    const counting = () => ((started += 1), idle.start());
+    refused.crew.addReplies = [reply("", { exitCode: 1, stderr: "Error: cron store busy, please retry\n" })];
+    const backend = createKiroCrewBackend({ paths: refused.paths, logger: collectingLogger().logger, sandboxMode: "crew", kirocrewBinary: refused.crew.binary, crewHome: refused.crew.home, run: refused.crew.run, now: refused.clock.now, sleep: refused.crew.sleep, timeZone: "America/Boise", postCancel: refused.crew.postCancel, sleptWatch: counting });
+    expect(await backend.build(refused.job)).toMatchObject({ ok: false, couldNotStart: true });
+    expect([started, idle.running()]).toEqual([0, 0]);
+
+    // A whole build with the Mac awake: the watch ticks along with the looks at Kiro Crew's files.
+    const rig = makeRig();
+    const mac = clockedSleptWatch(rig.clock);
+    const { logger, lines } = collectingLogger();
+    let runningWhenRemoved = -1;
+    rig.crew.onCommand = (call) => {
+      // The clean-up after the agent is ours, not the agent's: the watch is over by then.
+      if (call.args[1] === "remove") runningWhenRemoved = mac.running();
+    };
+    const sleep = async (ms: number): Promise<void> => {
+      await rig.crew.sleep(ms);
+      mac.tick();
+    };
+    const awake = createKiroCrewBackend({ paths: rig.paths, logger, sandboxMode: "crew", kirocrewBinary: rig.crew.binary, crewHome: rig.crew.home, run: rig.crew.run, now: rig.clock.now, sleep, timeZone: "America/Boise", postCancel: rig.crew.postCancel, sleptWatch: mac.start });
+    expect(await awake.build(rig.job)).toEqual({ ok: true, backend: "kiro-crew", ms: 2 * MINUTE, credits: 3.6, agentMs: 2 * MINUTE });
+    expect([runningWhenRemoved, mac.running()]).toEqual([0, 0]);
+    expect(lines.join("\n")).not.toContain("the Mac slept");
+  });
+
+  it("never says the agent ran for longer than it was allowed, even if a sleep in the middle of the build was never seen", async () => {
+    const rig = makeRig({ pollMs: 5 * SECOND });
+    // No watch of the test's own: the real one, on the real clock, sees none of the six hours
+    // that pass on the test's clock. The time limit is the second bound.
+    const { outcome } = await sleptThrough(null, null, rig.clock, rig);
+    expect(outcome).toMatchObject({ ok: false, reason: STOPPED_REASON, ms: 6 * HOUR + 2 * MINUTE });
     // The time limit (45 minutes) and the 90 seconds Kiro Crew is given to stop: not six hours.
     expect(outcome.agentMs).toBe(45 * MINUTE + 90 * SECOND);
   });
@@ -571,6 +634,38 @@ describe("Kiro Crew backend: what a try cost", () => {
     const outcome = await rig.backend.build(job);
     expect(rig.crew.jobs[0]?.id).toBe("76be9f71");
     expect(outcome).toMatchObject({ ok: true, credits: 2.5, agentMs: 5 * MINUTE });
+  });
+
+  it("leaves out a row that takes credits away: Kiro Crew writes none, and a job can write this file", async () => {
+    /** What a job can do from inside the gateway: add rows under its own id to the usage file. */
+    const jobAdds = (rig: Rig, rows: number[]): void => {
+      rig.crew.onJobEnd = (job) => {
+        leaveBuild(rig.job.workspace, { at: rig.clock.now() });
+        const usage = path.join(rig.crew.home, "usage", "tokens");
+        mkdirSync(usage, { recursive: true });
+        for (const credits of rows) appendFileSync(path.join(usage, "2026-10-10.jsonl"), `${JSON.stringify({ slot: `cron:${job.id}:made-up`, credits })}\n`);
+      };
+    };
+    // One row that would cancel the run's real use down to nothing.
+    const cancelled = makeRig();
+    cancelled.crew.credits = 4.6;
+    jobAdds(cancelled, [-4.6, -0.001]);
+    expect(await cancelled.backend.build(cancelled.job)).toMatchObject({ ok: true, credits: 4.6, agentMs: 2 * MINUTE });
+
+    // Nothing but such rows: Kiro Crew recorded nothing, so there is no figure and the ledger estimates.
+    const nothingElse = makeRig();
+    nothingElse.crew.credits = null;
+    jobAdds(nothingElse, [-50]);
+    const outcome = await nothingElse.backend.build(nothingElse.job);
+    expect(outcome).toMatchObject({ ok: true, agentMs: 2 * MINUTE });
+    expect(outcome).not.toHaveProperty("credits");
+
+    // A row that adds is passed on as it is read: whether the total is one the try could have
+    // used is the night flow's to judge, against the time the agent ran (night.test.ts).
+    const added = makeRig();
+    added.crew.credits = 4.6;
+    jobAdds(added, [99_995.4]);
+    expect(await added.backend.build(added.job)).toMatchObject({ ok: true, credits: 100_000, agentMs: 2 * MINUTE });
   });
 });
 

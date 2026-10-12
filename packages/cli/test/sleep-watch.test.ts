@@ -1,6 +1,7 @@
 // Nothing here sleeps or waits: the clock and the timer are made up, and each tick is given by hand.
 import { describe, expect, it } from "vitest";
-import { SLEEP_WATCH_EVERY_MS, SLEEP_WATCH_GAP_MS, SLEPT_LINE, watchForSleep } from "../src/sleep-watch.ts";
+import { MAX_BUILD_STARTS } from "@overnight/core";
+import { SLEEP_WATCH_EVERY_MS, SLEEP_WATCH_GAP_MS, SLEPT_LINE, SLEPT_THEN, sleptLine, watchForSleep } from "../src/sleep-watch.ts";
 import type { SleepWatchOptions } from "../src/sleep-watch.ts";
 
 /** A made-up timer and wall clock. `tick(lateMs)` is one firing of the timer, that much later than it was due. */
@@ -38,6 +39,14 @@ function madeUpClock(start = 1_000_000) {
     setBack(ms: number) {
       now -= ms;
     },
+    /** Time passes with no tick. */
+    advance(ms: number) {
+      now += ms;
+    },
+    /** The timer fires at the time it is now. */
+    fireNow() {
+      fire?.();
+    },
   };
 }
 
@@ -50,7 +59,18 @@ describe("watching for the Mac having slept", () => {
     expect(SLEEP_WATCH_GAP_MS).toBe(60_000);
     // unref: this timer alone never keeps the process alive.
     expect(clock.handle.unrefs).toBe(1);
-    expect(SLEPT_LINE).toBe("the Mac went to sleep during the run; what was in progress was stopped and will be tried again");
+  });
+
+  it("says in its log line what was done, and promises a second try only where there is one", () => {
+    // The shared start says what happened and nothing about what comes next.
+    expect(SLEPT_LINE).toBe("the Mac went to sleep during the run; what was in progress was stopped");
+    expect(SLEPT_LINE).not.toMatch(/tried|again/);
+    // A build on its second start is not tried again (core's MAX_BUILD_STARTS), and the line says so.
+    expect(MAX_BUILD_STARTS).toBe(2);
+    expect(sleptLine("build")).toBe(`${SLEPT_LINE}. A build that was on its first start is tried once more on a later night; one on its second start counts as failed`);
+    expect(sleptLine("deliver")).toBe(`${SLEPT_LINE}. What was not delivered waits for the next run`);
+    expect(sleptLine("byHand")).toBe(`${SLEPT_LINE}. Running the same command again carries on from there`);
+    expect(Object.keys(SLEPT_THEN)).toEqual(["build", "deliver", "byHand"]);
   });
 
   it("says nothing while the clock keeps step, however long, and however unevenly the ticks come", () => {
@@ -120,6 +140,51 @@ describe("watching for the Mac having slept", () => {
     expect(clock.slept).toEqual([]);
     // Safe to call again.
     watch.stop();
+  });
+
+  it("can be asked to look in between two ticks: it sees a jump at once, and is not fooled by the seconds since its last tick", () => {
+    const clock = madeUpClock();
+    const watch = watchForSleep(clock.options);
+    clock.tick();
+    // Four seconds after a tick, nothing has jumped.
+    clock.advance(4_000);
+    watch.look?.();
+    watch.look?.();
+    expect(clock.slept).toEqual([]);
+    // A look changes nothing for the tick that follows: it comes a second later, on time.
+    clock.advance(1_000);
+    clock.fireNow();
+    expect(clock.slept).toEqual([]);
+    // The Mac sleeps for three hours. Something else wakes first and asks before the timer ticks.
+    clock.advance(3 * 3_600_000);
+    watch.look?.();
+    expect(clock.slept).toEqual([3 * 3_600_000 - 5_000]);
+    expect(clock.ticking()).toBe(false);
+    // Once is enough: neither the late tick nor another look says it again.
+    clock.fireNow();
+    watch.look?.();
+    expect(clock.slept).toHaveLength(1);
+  });
+
+  it("leaves the tick's own measure alone: a tick exactly a minute late is a sleep whether or not something looked in between", () => {
+    const clock = madeUpClock();
+    const watch = watchForSleep(clock.options);
+    clock.tick();
+    clock.advance(4_000);
+    watch.look?.();
+    // The tick that was due a second later comes a minute late.
+    clock.advance(1_000 + 60_000);
+    clock.fireNow();
+    expect(clock.slept).toEqual([60_000]);
+  });
+
+  it("does not look once it has been stopped", () => {
+    const clock = madeUpClock();
+    const watch = watchForSleep(clock.options);
+    watch.stop();
+    clock.advance(3_600_000);
+    watch.look?.();
+    expect(clock.slept).toEqual([]);
   });
 
   it("is done even when the caller's own handling of the news throws", () => {

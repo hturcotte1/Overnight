@@ -4,7 +4,7 @@
 //
 // Nothing here holds a line Bee heard. The only words from a conversation that can reach a page
 // are an idea's short quote, and that travels as `Said`, which says when it is being hidden.
-import type { Config, Idea, IdeaEvent, IdeaState } from "@overnight/core";
+import type { BuildBudget, ClockedJob, Config, Idea, IdeaEvent, IdeaState, NightRun } from "@overnight/core";
 import type { SafeHtml } from "./render/html.ts";
 
 /** What an idea id looks like. No path or address is ever built from an id that does not match. */
@@ -91,6 +91,15 @@ export interface BuildRun {
 /** One run of the deliver command. */
 export interface DeliverRun { command: RunCommand; startedAt: string; finishedAt: string | null; delivered: number | null; failed: number | null; notified: number | null; ideaIds: string[] }
 
+// ---------- What decides whether, and when, the night's work happens ----------
+
+/**
+ * What the night clock has stored about one night job (core, night-clock.ts): the record of its
+ * latest slot, its last run that started and was closed, and when it last asked the clock. All
+ * null for a job that has never asked the clock on this data folder.
+ */
+export interface NightRecords { record: NightRun | null; last: NightRun | null; checkedAt: string | null }
+
 // ---------- One look at everything ----------
 
 /** Why the database could not be read. "missing" and "empty" mean nothing has been saved yet. */
@@ -121,6 +130,19 @@ export interface Snapshot {
   deliverRuns: DeliverRun[];
   nextBuildAt: string;
   nextDeliverAt: string;
+  /**
+   * Ideas made by `overnight rehearse new`, counted over the whole database (not only the ideas
+   * shown). A data folder that holds one is a rehearsal folder: the nightly build and the
+   * morning's run refuse to start on it.
+   */
+  rehearsalIdeas: number;
+  /**
+   * Where this month's building stands against MAX_BUILD_CREDITS_PER_MONTH: core's own reckoning
+   * (buildBudget) over the ledger of what builds cost. Null when the database could not be read.
+   */
+  buildCredits: BuildBudget | null;
+  /** The night clock's stored values for the build and the deliver job. */
+  nightClock: Record<ClockedJob, NightRecords>;
   /** Rows that did not fit their shape and were left out. */
   unreadableRows: number;
 }
@@ -180,7 +202,33 @@ export interface Night {
   deliverRun: DeliverRun | null;
 }
 
-export interface TonightQueue { at: string; paused: boolean; limit: number; rows: Array<{ idea: DashIdea; when: "building" | "tonight" | "later" }> }
+/**
+ * Why the nightly build will not simply take the waiting ideas at BUILD_TIME, as far as the data
+ * folder alone can tell (whether the night jobs are installed is not in it). The reasons, and
+ * their order, are the ones `overnight status` gives under "Tonight" and "Next build":
+ *   rehearsal    the data folder holds a rehearsal idea, so the nightly build refuses to run on it
+ *   credits      MAX_BUILD_CREDITS_PER_MONTH is reached (or is 0)
+ *   clock-ahead  the night clock's record is dated after today, so its next run is not simply the next one by the settings
+ *   late         the build's time has passed and it has not started (the Mac was asleep, or is offline)
+ * Being paused comes before all of them and is not one of them: `paused` says it.
+ *
+ * `step` goes where the Built step's time would be ("at 1:00 AM"), `line` after the title in the
+ * line over the hero, `note` on the Tonight's build lane.
+ */
+export interface BuildHold { why: "rehearsal" | "credits" | "clock-ahead" | "late"; step: string; line: string; note: string }
+
+/**
+ * The same for the morning's run, which checks, publishes and delivers what the night built.
+ * `step` goes where the Checked step's time would be ("at 6:30 AM"); null leaves it empty.
+ * `line` is a whole clause in place of "Checks start at 6:30 AM".
+ */
+export interface ChecksHold { why: "rehearsal" | "clock-ahead" | "late"; step: string | null; line: string }
+
+/** What stands between the waiting ideas and the night's two runs. Null: nothing the data folder knows of. */
+export interface NightOutlook { build: BuildHold | null; checks: ChecksHold | null }
+
+/** `hold`: why the rows will not be built at `at`, when Overnight is not paused and something else is in the way. */
+export interface TonightQueue { at: string; paused: boolean; limit: number; hold: BuildHold | null; rows: Array<{ idea: DashIdea; when: "building" | "tonight" | "later" }> }
 
 // ---------- Pages ----------
 

@@ -439,7 +439,9 @@ export function createCrewClient(options: CrewClientOptions): CrewClient {
         const file = path.join(crewHome, "usage", "tokens", `${day}.jsonl`);
         if (!existsSync(file)) continue;
         for (const row of jsonLines(readRecord(file), usageRowSchema)) {
-          if (!row.slot.startsWith(`cron:${id}:`) || !Number.isFinite(row.credits)) continue;
+          // A row that takes credits away is not one Kiro Crew writes. A job can write this file,
+          // and one such row would cancel what its run really used: it is not counted at all.
+          if (!row.slot.startsWith(`cron:${id}:`) || !Number.isFinite(row.credits) || row.credits < 0) continue;
           total += row.credits;
           found = true;
         }

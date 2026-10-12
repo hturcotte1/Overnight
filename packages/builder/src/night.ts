@@ -20,10 +20,11 @@
 // the workspace is moved to <data>/built/<idea id>, which no build job can reach (seal.ts).
 //
 // What builds cost is counted: one row in the month's ledger for every try that started an agent,
-// with the builder's own figure when it gave one and an estimate when it did not. Before each
-// idea the month's ceiling is asked (MAX_BUILD_CREDITS_PER_MONTH, core's build-budget.ts); once it
-// is reached nothing more is started until next month. It is never asked in the middle of a
-// build. A ledger that cannot be written or read never stops a build: the ceiling fails open.
+// with the builder's own figure when it gave one that fits the time its agent ran, and an
+// estimate from that time when it did not. Before each idea the month's ceiling is asked
+// (MAX_BUILD_CREDITS_PER_MONTH, core's build-budget.ts); once it is reached nothing more is
+// started until next month. It is never asked in the middle of a build. A ledger that cannot be
+// written or read never stops a build: the ceiling fails open.
 //
 // Log lines carry ids, states, counts and our own reasons. Never a title or a pitch.
 import { budgetReachedText, buildBudget, errorSummary, estimatedBuildCredits, formatLocal, HIGHEST_BUILD_CREDIT_LIMIT, isBuildAwaitingRetry, localDayBounds } from "@overnight/core";
@@ -194,18 +195,41 @@ function stopWatch(deps: Pick<BuildDeps, "signal" | "logger">): { signal: AbortS
 }
 
 /**
+ * The most a builder's own figure is believed: this many credits for each minute its agent ran.
+ * The real builds so far used 1.3 to 1.7 credits a minute (docs/spikes.md) and the estimate is 2,
+ * so an honest figure has room to spare.
+ */
+export const MOST_CREDITS_PER_AGENT_MINUTE = 10;
+/** ... and never less room than this: a one-line agent job used half a credit in a few seconds. */
+export const MOST_CREDITS_FOR_A_SHORT_TRY = 2;
+
+/**
+ * The highest figure a builder is believed about a try whose agent ran this long. With no time
+ * to go by, only the room a short try gets.
+ */
+export function mostBelievableCredits(agentMs: number | undefined): number {
+  const minutes = agentMs === undefined || !Number.isFinite(agentMs) ? 0 : Math.max(0, agentMs) / MINUTE_MS;
+  return Math.min(HIGHEST_BUILD_CREDIT_LIMIT, Math.max(MOST_CREDITS_FOR_A_SHORT_TRY, minutes * MOST_CREDITS_PER_AGENT_MINUTE));
+}
+
+/**
  * Count what one try cost, in the month's ledger. A try that started no agent cost nothing and
- * gets no row. Otherwise the row holds the builder's own figure when it gave one, and an estimate
- * from how long the agent ran when it did not. Never throws: a ledger that cannot be written is
- * logged, and the build's result stands.
+ * gets no row. Otherwise the row holds the builder's own figure when it gave one that the try
+ * could have used, and an estimate from how long the agent ran when it did not. Never throws: a
+ * ledger that cannot be written is logged, and the build's result stands.
  */
 function recordCost(outcome: BuildOutcome, ideaId: string, deps: Pick<BuildDeps, "store" | "logger">, now: () => Date): void {
   const { credits, agentMs } = outcome;
   if (credits === undefined && agentMs === undefined) return;
-  // The builder's figure comes from a file a build job can write. One that no build could have
-  // used is not believed, and the ledger would refuse it: the estimate is counted in its place.
-  const believed = credits !== undefined && Number.isFinite(credits) && credits >= 0 && credits <= HIGHEST_BUILD_CREDIT_LIMIT;
-  if (credits !== undefined && !believed) deps.logger.warn("a builder's own credit figure was not one a build could have used; counting an estimate instead", { ideaId, backend: outcome.backend });
+  // The builder's figure comes from a file a build job can write (Kiro Crew's usage file), so it
+  // is believed only when it is one this try could have used in the time its agent ran. Without
+  // that, one line added by a job closed the whole month, and a figure of 100,000 closed it so
+  // that no setting could open it again (found Oct 11). The estimate is counted in its place.
+  // What is left to a job: making the count too low, by rewriting its own lines. The night's
+  // own limit on builds still bounds what is really spent (crew/README.md, "What builds cost").
+  const mostBelieved = mostBelievableCredits(agentMs);
+  const believed = credits !== undefined && Number.isFinite(credits) && credits >= 0 && credits <= mostBelieved;
+  if (credits !== undefined && !believed) deps.logger.warn("a builder's own credit figure was not one a build could have used; counting an estimate instead", { ideaId, backend: outcome.backend, mostBelieved: Math.round(mostBelieved * 10) / 10 });
   const cost = believed ? { credits, measured: true } : agentMs === undefined ? null : { credits: estimatedBuildCredits(agentMs), measured: false };
   if (cost === null) {
     deps.logger.error("could not count what a build try cost: there was no figure to believe and no time to estimate from", { ideaId, backend: outcome.backend });
@@ -353,6 +377,10 @@ async function buildIdea(listed: Idea, deps: BuildDeps, now: () => Date, stop: A
     // Kiro Crew job could otherwise reach a Kiro CLI build too.
     const sealed = sealWorkspace({ paths: deps.paths, ideaId: idea.id, now: now() });
     if (!sealed.ok) logger.error("a finished build could not be moved out of the builders' reach; the morning uses it where it is", { ideaId: idea.id, reason: sealed.reason });
+    // Moved, but not every file in it is a new one: what its build kept open, or linked from a
+    // folder jobs may write, still leads to those (seal.ts). A person should look before trusting it.
+    else if ((sealed.notMadeAnew ?? 0) > 0) logger.error("a finished build was moved out of the builders' reach, but some of its files could not be made anew; its own build could still change those", { ideaId: idea.id, files: sealed.notMadeAnew, filesMadeAnew: sealed.madeAnew });
+    else logger.info("finished build moved out of the builders' reach", { ideaId: idea.id, filesMadeAnew: sealed.madeAnew });
   }
   return outcome.ok ? { ...outcome, ms: totalMs } : { ...outcome, ms: totalMs, reason: clip(reason) };
 }

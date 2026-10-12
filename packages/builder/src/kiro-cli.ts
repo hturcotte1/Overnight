@@ -28,6 +28,8 @@ import { BUILD_SKILL_FILE, kiroCliPrompt, readTextFile, REPO_ROOT } from "./crew
 import { createCommandRunner, isStopping, STOPPED_WHILE_RUNNING } from "./run.ts";
 import type { CommandResult, CommandRunner } from "./run.ts";
 import { realPath, realPathAllowMissing, sandboxDefines } from "./sandbox-values.ts";
+import { awakeMs, watchSlept } from "./slept.ts";
+import type { StartSleptWatch } from "./slept.ts";
 import { buildTmpDir, isSafeIdeaId } from "./workspace.ts";
 import { minutesText, STOPPED_REASON } from "./types.ts";
 import type { BuildBackend, BuildJob, BuildOptions, BuildOutcome } from "./types.ts";
@@ -67,6 +69,11 @@ export interface KiroCliBackendOptions {
   repoRoot?: string;
   /** Default: the user's home folder. */
   home?: string;
+  /**
+   * Counts the time the Mac sleeps while the agent runs, so that it is not counted as the
+   * agent's (slept.ts). Default: the real watch, on the real clock. Tests pass their own.
+   */
+  sleptWatch?: StartSleptWatch;
 }
 
 export function kiroBinaryCandidates(): string[] {
@@ -141,6 +148,7 @@ export function createKiroCliBackend(options: KiroCliBackendOptions): BuildBacke
   const now = options.now ?? (() => new Date());
   const run = options.run ?? createCommandRunner();
   const sandboxExec = options.sandboxExec ?? SANDBOX_EXEC;
+  const startSleptWatch = options.sleptWatch ?? watchSlept;
 
   /** Keep what Kiro printed, for a person looking into a failed build. Never logged. Best effort. */
   function saveOutput(ideaId: string, result: CommandResult): void {
@@ -229,11 +237,20 @@ export function createKiroCliBackend(options: KiroCliBackendOptions): BuildBacke
     logger.info("kiro cli build started", { ideaId: job.ideaId, timeoutMin: Math.round(job.timeoutMs / 60_000) });
     // Stopped at once, with everything it started, when Overnight is told to stop.
     const agentStartedMs = now().getTime();
-    const result = await run(sandboxExec, args, { cwd: workspace, env, timeoutMs: job.timeoutMs, ...withSignal });
-    // By the clock on the wall, and never more than the time limit: the run is ended at that
-    // limit, so a longer gap means the Mac slept in the middle of the build. Without this, one
-    // build slept through would be estimated at hours of credits.
-    const agentMs = Math.min(Math.max(0, now().getTime() - agentStartedMs), job.timeoutMs);
+    const slept = startSleptWatch();
+    let result: CommandResult;
+    let sleptMs: number;
+    try {
+      result = await run(sandboxExec, args, { cwd: workspace, env, timeoutMs: job.timeoutMs, ...withSignal });
+    } finally {
+      sleptMs = slept.stop();
+    }
+    // How long the agent worked: by the clock on the wall, less the time the Mac slept in the
+    // middle of the build (slept.ts). A build the lid was closed on two minutes in is two
+    // minutes of agent, however many hours later it was stopped. And never more than the time
+    // limit, at which the run is ended: a second bound, should a sleep ever go unseen.
+    const agentMs = Math.min(awakeMs(agentStartedMs, now().getTime(), sleptMs), job.timeoutMs);
+    if (sleptMs > 0) logger.info("the Mac slept during a kiro cli build; that time is not counted as the agent's", { ideaId: job.ideaId, sleptSeconds: Math.round(sleptMs / 1000), agentSeconds: Math.round(agentMs / 1000) });
     saveOutput(job.ideaId, result);
     // What the try cost. Kiro CLI gives no figure of its own, so the month's ledger takes an
     // estimate from how long the agent ran, however the run ended. Not when the program was never

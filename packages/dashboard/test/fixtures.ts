@@ -146,6 +146,9 @@ export function fakeSnapshot(over: Partial<Snapshot> = {}): Snapshot {
     deliverRuns: [],
     nextBuildAt: boise(12, 1),
     nextDeliverAt: boise(11, 6, 30),
+    rehearsalIdeas: 0,
+    buildCredits: null,
+    nightClock: { build: { record: null, last: null, checkedAt: null }, deliver: { record: null, last: null, checkedAt: null } },
     unreadableRows: 0,
     ...over,
   };
@@ -429,7 +432,7 @@ export function scene(): Scene {
     build: new Map([[packing.id, packingFacts]]),
     deliver: new Map([[packing.id, packingDeliver]]),
   });
-  const queue: TonightQueue = { at: boise(11, 1, 0), paused: false, limit: 2, rows: [{ idea: choreWheel, when: "building" }, { idea: lunchTurns, when: "tonight" }] };
+  const queue: TonightQueue = { at: boise(11, 1, 0), paused: false, limit: 2, hold: null, rows: [{ idea: choreWheel, when: "building" }, { idea: lunchTurns, when: "tonight" }] };
   return {
     s,
     hero: { idea: choreWheel, story: heroStory, extras: fakeExtras() },

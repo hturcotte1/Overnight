@@ -5,14 +5,14 @@
 // hands over, and prints one line about how the night went.
 import { errorSummary } from "@overnight/core";
 import type { Config, DataPaths, Logger, Store } from "@overnight/core";
-import { DeadlinePassed, MINUTE_MS, withDeadline } from "../deadline.ts";
+import { DeadlinePassed, MINUTE_MS, settleUnderLimit } from "../deadline.ts";
 import { watchLastResort } from "../last-resort.ts";
 import type { WatchLastResort } from "../last-resort.ts";
 import { oneLine, plural } from "../output.ts";
 import type { Write } from "../output.ts";
 import { buildLockFile } from "../single-instance.ts";
 import type { ReleaseLock } from "../single-instance.ts";
-import { SLEPT_LINE, watchForSleep } from "../sleep-watch.ts";
+import { sleptLine, watchForSleep } from "../sleep-watch.ts";
 import type { WatchForSleep } from "../sleep-watch.ts";
 import { STOP_OVERDUE, STOP_SIGNAL_LINE, stopWaitText, watchStopSignals } from "../stop-signals.ts";
 import type { WatchStopSignals } from "../stop-signals.ts";
@@ -229,15 +229,23 @@ export async function build<Backend>(deps: BuildDeps<Backend>): Promise<number> 
 
   const stop = (deps.watchStopSignals ?? watchStopSignals)({ onStop: (signal) => logger.warn(`overnight build: ${STOP_SIGNAL_LINE}`, { signal }) });
   // The Mac slept through part of the night: every time limit is long past for no good reason.
-  // The builder is told to stop, as by a stop signal, and what it was building gets another try.
+  // The builder is told to stop, as by a stop signal. A build it was on gets one more try if that
+  // was its first start (core's rule, build-retry.ts).
   let slept = false;
   const sleepWatch = (deps.watchForSleep ?? watchForSleep)({
     onSleep: (gapMs) => {
       slept = true;
-      logger.warn(SLEPT_LINE, { gapSeconds: Math.round(gapMs / 1000) });
+      logger.warn(sleptLine("build"), { gapSeconds: Math.round(gapMs / 1000) });
       stop.stopWork();
     },
   });
+  // Asked when the night's last-resort limit passes: has the builder been told to stop already?
+  // A Mac that slept past the limit wakes with the limit and the sleep watch due in the same
+  // instant, and the limit's timer can be the one that runs first. So the watch looks right now.
+  const toldToStop = (): boolean => {
+    sleepWatch.look?.();
+    return slept || stop.received() !== null;
+  };
   // An error nobody caught: one log line, the builder is told to stop, the lock goes, exit 1.
   const lastResort = (deps.watchLastResort ?? watchLastResort)({ command: "overnight build", logger, letGo: [() => stop.abort(), release], writeError: deps.writeError });
   let started = false;
@@ -254,8 +262,13 @@ export async function build<Backend>(deps: BuildDeps<Backend>): Promise<number> 
     started = true;
     hold = deps.keepAwake?.(logger) ?? null;
     logger.info("overnight build starting", { primary: chosen.primaryName, fallback: chosen.fallbackName, sandboxMode: config.buildSandbox, dataDir: paths.root });
-    const night = withDeadline(factories.runBuildNight({ store, config, paths, backends: chosen.backends, logger, signal: stop.signal, ...signInStep(factories, logger) }), deps.limitMs ?? buildNightLimitMs(config), "The night's build");
-    const result = await stop.settle(night);
+    const result = await settleUnderLimit({
+      work: factories.runBuildNight({ store, config, paths, backends: chosen.backends, logger, signal: stop.signal, ...signInStep(factories, logger) }),
+      stop,
+      limitMs: deps.limitMs ?? buildNightLimitMs(config),
+      what: "The night's build",
+      toldToStop,
+    });
     if (result === STOP_OVERDUE) {
       logger.error(`overnight build: the builder did not stop in time after ${slept && stop.received() === null ? "the Mac's sleep was noticed" : "the stop signal"}; ending anyway`, { waitedFor: stopWaitText() });
       deps.writeError(`"overnight build" was told to stop, and the builder had not stopped ${stopWaitText()} later. Ending anyway.`);
@@ -267,7 +280,8 @@ export async function build<Backend>(deps: BuildDeps<Backend>): Promise<number> 
     // After a sleep the code is still 0: nothing went wrong that a person has to fix.
     return stop.exitCode() ?? 0;
   } catch (error) {
-    // Past its last-resort limit: nobody is waiting any more, so tell the builder to stop too.
+    // Past its last-resort limit, with nothing having told it to stop: nobody is waiting any
+    // more, so tell the builder to stop too.
     if (error instanceof DeadlinePassed) stop.abort();
     logger.error("overnight build stopped on an error", { reason: errorSummary(error) });
     deps.writeError(`"overnight build" could not finish. ${errorSummary(error)}`);

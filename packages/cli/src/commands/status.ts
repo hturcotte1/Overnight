@@ -32,6 +32,7 @@ import { installCommand, installCommands, NIGHT_JOBS } from "../background.ts";
 import { oneLine, plural, toJson } from "../output.ts";
 import type { Write } from "../output.ts";
 import type { PowerSource } from "../power.ts";
+import { nextStartAt, runNotStarting } from "./night-tick.ts";
 import { isRehearsalIdea } from "./rehearse.ts";
 
 // Moved to the night clock in @overnight/core. Still offered from here, where it used to live.
@@ -100,6 +101,16 @@ export type NightClockView = NightView & {
   trigger?: JobTrigger | null;
   /** True when the job asked the clock in the last three minutes, or is running right now. A job that is neither has stopped waking, or the Mac has only just woken. */
   fresh: boolean;
+  /**
+   * When the clock next starts this job by itself (UTC): its first time after now that its record
+   * does not already cover. Usually `nextSlotAt`. Later when the record is dated on that day or
+   * after it: the job's time, TZ or the Mac's clock was moved (night-tick.ts, `nextStartAt`).
+   */
+  nextStartAt: string;
+  /** Does some process hold the job's lock right now: a run of this kind is going on this data folder, however it was started? Null if that could not be told. */
+  lockHeld: boolean | null;
+  /** True when the job has tried for minutes to start the run that is due and the work never begins. The reason is in the job's log (night-tick.ts, `runNotStarting`). */
+  notStarting: boolean;
 };
 
 export interface StatusReport {
@@ -137,11 +148,14 @@ export interface StatusReport {
   waitingForSecondTry: number;
   /** The newest delivery, or null if nothing has been delivered yet. */
   lastDelivered: { ideaId: string; url: string | null; at: string } | null;
-  /** When the build job next runs by the settings (UTC). Whether it runs at all depends on `nightJobs` and `paused`. */
+  /**
+   * When the build job next runs by the settings alone (UTC). Whether it runs at all depends on
+   * `nightJobs` and `paused`, and when its clock really starts it next is `nightClock.build.nextStartAt`.
+   */
   nextBuildAt: string;
-  /** When the deliver job next runs by the settings (UTC): 30 minutes before DELIVER_TIME. */
+  /** When the deliver job next runs by the settings alone (UTC): 30 minutes before DELIVER_TIME. */
   nextDeliverAt: string;
-  /** How many of the waiting ideas that build takes: the nightly limit, less the builds already started that local day. */
+  /** How many of the waiting ideas the next build takes: the nightly limit, less the builds already started on the local day it runs in. */
   nextBuildTakes: number;
   /** Kiro credits counted against MAX_BUILD_CREDITS_PER_MONTH this calendar month (in `timeZone`), and whether the month's limit is reached. */
   buildCredits: BuildBudget;
@@ -179,16 +193,22 @@ export function collectStatus(deps: Omit<StatusDeps, "write" | "gatewayAnswers" 
   const { store, config } = deps;
   const now = deps.now?.() ?? new Date();
   const triggers = deps.jobTriggers?.();
+  const jobsHere = deps.jobsBelongHere?.();
   const clockOf = (job: ClockedJob): NightClockView => {
+    const record = readNightRun(store, job);
     const checkedAt = readCheckedAt(store, job);
     const running = deps.jobRunning?.(job) ?? null;
     return {
-      ...describeNight({ job, now, config, record: readNightRun(store, job), last: readLastNightRun(store, job), checkedAt, running }),
+      ...describeNight({ job, now, config, record, last: readLastNightRun(store, job), checkedAt, running }),
       ...(triggers === undefined ? {} : { trigger: triggers[job] }),
       // A job that is building or delivering does not ask the clock meanwhile: its lock says it is alive.
       fresh: running === true || (checkedAt !== null && now.getTime() - Date.parse(checkedAt) <= NIGHT_CHECK_FRESH_MS),
+      nextStartAt: nextStartAt(job, now, config, record).toISOString(),
+      lockHeld: running,
+      notStarting: runNotStarting({ job, now, config, record, lockHeld: running }),
     };
   };
+  const nightClock = { tickSeconds: NIGHT_TICK_SECONDS, build: clockOf("build"), deliver: clockOf("deliver") };
   const today = localDayBounds(now, config.timeZone);
   const awaiting = store.conversationsAwaitingDetection();
   const ideas = store.countIdeasByState();
@@ -196,8 +216,11 @@ export function collectStatus(deps: Omit<StatusDeps, "write" | "gatewayAnswers" 
   const waitingForSecondTry = store.listIdeas({ states: ["build_failed"] }).filter((idea) => isBuildAwaitingRetry(idea, store.countBuildStarts(idea.id))).length;
   const waitingToBuild = (ideas.approved ?? 0) + waitingForSecondTry;
   const nextBuildAt = nextSlotAt("build", now, config);
-  // The nightly limit counts the local day the build runs in, which is usually tomorrow's.
-  const buildDay = localDayBounds(nextBuildAt, config.timeZone);
+  // The nightly limit counts the local day the build runs in, which is usually tomorrow's. That
+  // build is the one the "Next build" row names: the clock's own next start when the job goes by
+  // the clock on this data folder.
+  const buildOnClock = goesByTheClock(jobsHere, nightClock.build.trigger);
+  const buildDay = localDayBounds(buildOnClock ? new Date(nightClock.build.nextStartAt) : nextBuildAt, config.timeZone);
   const startedThatDay = store.countBuildsStartedBetween(buildDay.start.toISOString(), buildDay.end.toISOString());
   return {
     paused: store.isPaused(config.pausedByDefault),
@@ -229,9 +252,18 @@ export function collectStatus(deps: Omit<StatusDeps, "write" | "gatewayAnswers" 
     buildCredits: buildBudget(store, config, now),
     rehearsalIdeas: store.listIdeas().filter(isRehearsalIdea).length,
     ...(deps.nightJobs ? { nightJobs: deps.nightJobs() } : {}),
-    ...(deps.jobsBelongHere ? { jobsBelongHere: deps.jobsBelongHere() } : {}),
-    nightClock: { tickSeconds: NIGHT_TICK_SECONDS, build: clockOf("build"), deliver: clockOf("deliver") },
+    ...(jobsHere === undefined ? {} : { jobsBelongHere: jobsHere }),
+    nightClock,
   };
+}
+
+/**
+ * Is a job woken every minute on this data folder, as far as can be told? Only then do the
+ * clock's own words and its own next start apply: a job still on macOS's calendar, one that is
+ * not installed, and one installed for another data folder never ask this folder's clock.
+ */
+function goesByTheClock(jobsBelongHere: boolean | null | undefined, trigger: JobTrigger | null | undefined): boolean {
+  return jobsBelongHere !== false && trigger !== null && trigger !== "calendar";
 }
 
 /** "3 (heard 1, asked 2)", or just "0". */
@@ -316,8 +348,17 @@ function lastRunWords(view: NightClockView, timeZone: string): string | null {
 
 /** Is this job woken every minute on this data folder, as far as the report can tell? Only then do the clock's own words apply. */
 function onTheClock(report: StatusReport, job: ClockedJob): boolean {
-  const trigger = report.nightClock[job].trigger;
-  return report.jobsBelongHere !== false && trigger !== null && trigger !== "calendar";
+  return goesByTheClock(report.jobsBelongHere, report.nightClock[job].trigger);
+}
+
+/** What a job's work is called when talking to a person. */
+const WORK_WORDS: Record<ClockedJob, string> = { build: "build", deliver: "delivery" };
+
+/** "Oct 14, 3:00 PM", with the year when it is not the year of `beside` (a record dated far ahead). */
+export function whenWords(at: Date, timeZone: string, beside: Date): string {
+  const year = (moment: Date) => new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric" }).format(moment);
+  if (year(at) === year(beside)) return formatLocal(at, timeZone);
+  return new Intl.DateTimeFormat("en-US", { timeZone, month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }).format(at);
 }
 
 /** What a due run is waiting for, when a reason is stored. */
@@ -328,20 +369,40 @@ const WAITING_WORDS: Record<NonNullable<NightView["waiting"]>, string> = {
 };
 
 /**
- * When the job next runs. Usually its next time by the settings. But a run that is going is said
- * to be going, and a run that is due and has not started (the Mac was asleep, or the internet is
- * away) is said to be due, with what it waits for.
+ * Why a run that is due has not started, for the front of its row. What is true right now comes
+ * first (another run holds the job's lock), then the reason the job itself stored, then what the
+ * record shows (tried, and the work never began).
+ */
+function dueWords(job: ClockedJob, view: NightClockView): string {
+  if (view.lockHeld === true) return `waiting for the ${WORK_WORDS[job]} that is going on this data folder right now (a build-now, or one started by hand)`;
+  if (view.waiting !== null) return WAITING_WORDS[view.waiting];
+  if (view.notStarting && view.fresh) return `the ${job} job is awake and tries every minute, but the ${WORK_WORDS[job]} does not start (the reason is in logs/${job}.log)`;
+  return "as soon as the Mac has been awake for a minute or two";
+}
+
+/**
+ * The clock's own next start, for people. It is only ever not the job's next time when the record
+ * is dated ahead, and such a record can be far ahead: then the year is said too.
+ */
+function clockStartWords(view: NightClockView, timeZone: string): string {
+  const at = new Date(view.nextStartAt);
+  return view.recordAhead === null ? formatLocal(at, timeZone) : whenWords(at, timeZone, new Date(view.slotAt));
+}
+
+/**
+ * When the job next runs. Usually its next time. But a run that is going is said to be going, and
+ * a run that is due and has not started is said to be due, with what holds it up. For a job that
+ * goes by Overnight's clock on this data folder the time is the clock's own next start, which is
+ * not always the next time by the settings (see `nextStartAt` in night-tick.ts).
  */
 function nextRunWords(job: ClockedJob, report: StatusReport): string {
   const view = report.nightClock[job];
   if (view.state === "running" && view.lastRun !== null) return `running now, since ${formatLocal(new Date(view.lastRun.startedAt), report.timeZone)}`;
   const first = job === "build" ? ` (${report.buildBackend} first)` : "";
-  if (view.state === "due" && onTheClock(report, job)) {
-    const lead = view.waiting === null ? "as soon as the Mac has been awake for a minute or two" : WAITING_WORDS[view.waiting];
-    return `${lead}: the ${formatLocal(new Date(view.slotAt), report.timeZone)} ${job} has not run yet${first}`;
-  }
-  if (job === "build") return `${formatLocal(new Date(report.nextBuildAt), report.timeZone)}${first}`;
-  return `${formatLocal(new Date(report.nextDeliverAt), report.timeZone)}, for the link on the wrist at ${report.deliverTime}`;
+  const onClock = onTheClock(report, job);
+  if (view.state === "due" && onClock) return `${dueWords(job, view)}: the ${formatLocal(new Date(view.slotAt), report.timeZone)} ${job} has not run yet${first}`;
+  const at = onClock ? clockStartWords(view, report.timeZone) : formatLocal(new Date(job === "build" ? report.nextBuildAt : report.nextDeliverAt), report.timeZone);
+  return job === "build" ? `${at}${first}` : `${at}, for the link on the wrist at ${report.deliverTime}`;
 }
 
 /** "the build job", "the build and deliver jobs". */
@@ -354,6 +415,18 @@ export function dayWords(day: string, beside: string): string {
   const at = new Date(`${day}T12:00:00.000Z`);
   if (Number.isNaN(at.getTime())) return day;
   return new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "short", day: "numeric", ...(day.slice(0, 4) === beside.slice(0, 4) ? {} : { year: "numeric" }) }).format(at);
+}
+
+/**
+ * What it means that a job's record is dated after the day its clock has come to: the clock
+ * starts nothing until that day is past, so the next run is not the next time by the settings.
+ * One sentence, the same in `status` and `preflight`, to go after "the" or "The". `day` is the
+ * record's day (YYYY-MM-DD).
+ */
+export function recordAheadWords(job: ClockedJob, day: string, view: Pick<NightClockView, "slotDay" | "slotAt" | "nextStartAt">, timeZone: string): string {
+  const setting = job === "build" ? "BUILD_TIME" : "DELIVER_TIME";
+  const next = whenWords(new Date(view.nextStartAt), timeZone, new Date(view.slotAt));
+  return `${job} clock already has ${dayWords(day, view.slotDay)} on record, so the next ${job} is ${next} (${setting}, TZ or the Mac's clock was moved).`;
 }
 
 /** Said when two things are wrong with the night clock at once: each sentence ends in a command, so a full stop will not do. */
@@ -382,24 +455,36 @@ export function nightClockWords(report: StatusReport): string | null {
     if (view.trigger === null) {
       problems.push(`the ${job} job's settings file could not be read. See why with: ${JOB_STATUS_COMMAND} ${job}`);
     } else if (view.recordAhead !== null) {
-      problems.push(`the ${job} clock's record is dated ahead (${dayWords(view.recordAhead, view.slotDay)}), so nothing runs until then. Start it from now with: ${installCommand(job)}`);
+      problems.push(`the ${recordAheadWords(job, view.recordAhead, view, report.timeZone)} Start its clock from now with: ${installCommand(job)}`);
     } else if (!view.fresh) {
       problems.push(
         view.checkedAt === null
           ? `the ${job} job has never checked the time. If the Mac has been awake for a few minutes since it was installed, see why with: ${JOB_STATUS_COMMAND} ${job}`
           : `the ${job} job last checked the time ${formatLocal(new Date(view.checkedAt), report.timeZone)}. If the Mac has been awake for a few minutes since, see why with: ${JOB_STATUS_COMMAND} ${job}`,
       );
+    } else if (view.notStarting) {
+      problems.push(`the ${job} job checks the time, but the ${WORK_WORDS[job]} that is due does not start. See the last lines of its logs with: ${JOB_STATUS_COMMAND} ${job}`);
     }
   }
   if (problems.length > 0) return problems.join(ALSO);
   return jobs.length === 1 ? `${jobsNamed(jobs)} checks the time every minute, in ${report.timeZone}` : `${jobs.join(" and ")} check the time every minute, in ${report.timeZone}`;
 }
 
-const POWER_WORDS: Record<PowerSource, string> = {
-  mains: "mains power",
-  battery: "battery: Overnight keeps the Mac awake while the lid is open. With the lid closed nothing runs until it is opened",
-  unknown: "could not tell",
-};
+const LID_CLOSED = "With the lid closed nothing runs until it is opened";
+
+/**
+ * One plain line: mains or battery, and on battery whether anything of Overnight's is keeping the
+ * Mac awake. That is the listener's doing (a build or a delivery only holds it for as long as it
+ * runs), so the sentence goes by whether a listener is running on this data folder. It says
+ * "Overnight keeps the Mac awake" only when one is.
+ */
+function powerWords(power: PowerSource, listener: ListenerState | undefined): string {
+  if (power === "mains") return "mains power";
+  if (power === "unknown") return "could not tell";
+  if (listener?.running === true) return `battery: Overnight keeps the Mac awake while the lid is open. ${LID_CLOSED}`;
+  if (listener?.running === false) return `battery: the listener is not running, so nothing of Overnight's keeps the Mac awake between runs, and it may go to sleep. ${LID_CLOSED}`;
+  return `battery: a running listener keeps the Mac awake while the lid is open, but whether one is running could not be told. ${LID_CLOSED}`;
+}
 
 const SANDBOX_WORDS: Record<Config["buildSandbox"], string> = {
   crew: "crew (Kiro Crew's own sandbox, at its strict level: it leaves the GitHub login, the Bee login and the transcripts within a build job's reach)",
@@ -490,7 +575,7 @@ export function formatStatus(report: StatusReport): string[] {
   if (nightClock !== null) rows.push(["Night clock", nightClock]);
   if (report.gatewayAnswers !== undefined) rows.push(["Kiro Crew gateway", report.gatewayAnswers === null ? GATEWAY_WORDS.unknown : report.gatewayAnswers ? GATEWAY_WORDS.yes : GATEWAY_WORDS.no]);
   rows.push(["Build sandbox", SANDBOX_WORDS[report.buildSandbox]]);
-  if (report.power !== undefined) rows.push(["Power", POWER_WORDS[report.power]]);
+  if (report.power !== undefined) rows.push(["Power", powerWords(report.power, report.listener)]);
   rows.push(["Tonight", tonightWords(report)]);
   if (report.beeLogin !== undefined) rows.push(["Bee login", LOGIN_WORDS[report.beeLogin]]);
   rows.push(["Full check", PREFLIGHT_COMMAND]);

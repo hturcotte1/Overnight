@@ -23,7 +23,7 @@ import {
   writeNightRun,
 } from "@overnight/core";
 import type { ClockedJob, NightClockConfig, NightRun } from "@overnight/core";
-import { buildJobAlive, nightLockFile, nightTick, startClockFromNow, WAITING_FOR } from "../src/commands/night-tick.ts";
+import { buildJobAlive, nextStartAt, nightLockFile, nightTick, NOT_STARTING_AFTER_MS, runNotStarting, startClockFromNow, WAITING_FOR } from "../src/commands/night-tick.ts";
 import type { NightRunMarks, NightTickDeps } from "../src/commands/night-tick.ts";
 import type { ReleaseLock } from "../src/single-instance.ts";
 import { capture, plain } from "./helpers.ts";
@@ -939,5 +939,135 @@ describe("overnight build --from-now", () => {
     expect(startClockFromNow({ job: "build", store: t.store, config, paths, now: () => new Date(t.clock), takeLock: t.takeLock }, out.write)).toBe(1);
     expect(out.lines).toEqual(["A build is running right now on this data folder. Try again when it has finished. Nothing was changed."]);
     expect(plain(iso(t.clock))).toBe("2026-10-12T07:10:00.000Z");
+  });
+});
+
+describe("when the clock will next start a job by itself", () => {
+  const next = (job: ClockedJob, now: string, record: NightRun | null, settings: NightClockConfig = config) => nextStartAt(job, new Date(now), settings, record).toISOString();
+  /** The record of the slot at or before `at`, by the settings given, taken through the steps named. */
+  const recordOf = (job: ClockedJob, at: string, steps: { started?: boolean; closedAs?: NonNullable<NightRun["closedAs"]> } = {}, settings: NightClockConfig = config): NightRun => {
+    const noticed = new Date(at);
+    let run = noticedRun(currentSlot(job, noticed, settings), noticed);
+    if (steps.started) run = startedRun(run, noticed);
+    if (steps.closedAs !== undefined) run = closedRun(run, steps.closedAs, noticed);
+    return run;
+  };
+
+  it("is the job's next time on an ordinary day, whatever the record of an earlier slot says", () => {
+    // Noon on Oct 12, after a night that ran, was cut short, or was only adopted; and before any record.
+    const noon = "2026-10-12T18:00:00.000Z";
+    for (const record of [null, recordOf("build", BUILD_AT, { started: true, closedAs: "done" }), recordOf("build", BUILD_AT, { started: true, closedAs: "cut-short" }), recordOf("build", BUILD_AT, { closedAs: "first-check" }), recordOf("build", "2026-10-10T07:00:00.000Z", { started: true, closedAs: "done" })]) {
+      expect(next("build", noon, record)).toBe("2026-10-13T07:00:00.000Z");
+    }
+    expect(next("deliver", noon, recordOf("deliver", DELIVER_AT, { started: true, closedAs: "done" }))).toBe("2026-10-13T12:30:00.000Z");
+    // A slot that is due and not yet run does not change what comes after it.
+    expect(next("build", "2026-10-12T07:00:30.000Z", recordOf("build", "2026-10-11T07:00:00.000Z", { closedAs: "done", started: true }))).toBe("2026-10-13T07:00:00.000Z");
+  });
+
+  it("is a day later when the job's time was moved later on a day whose run had already happened", () => {
+    // Oct 12: the build ran at 1:00 am. BUILD_TIME is then set to 15:00.
+    const ran = recordOf("build", BUILD_AT, { started: true, closedAs: "done" });
+    const moved: NightClockConfig = { ...config, buildTime: "15:00", deliverTime: "16:00" };
+    // 2:30 pm: today's 3:00 pm is the next time by the settings, and the record already holds Oct 12.
+    expect(next("build", "2026-10-12T20:30:00.000Z", ran, moved)).toBe("2026-10-13T21:00:00.000Z");
+    // 3:36 pm: the same answer, now also the next time by the settings.
+    expect(next("build", "2026-10-12T21:36:00.000Z", ran, moved)).toBe("2026-10-13T21:00:00.000Z");
+    // The delivery, moved from 6:30 am to 3:30 pm, the same way.
+    expect(next("deliver", "2026-10-12T20:30:00.000Z", recordOf("deliver", DELIVER_AT, { started: true, closedAs: "done" }), moved)).toBe("2026-10-13T21:30:00.000Z");
+  });
+
+  it("agrees with the clock's own rule, minute by minute: nothing starts before the time it names, and a run starts at it", async () => {
+    // The same day, driven through the real check: the build runs at 1:00 am, then BUILD_TIME moves to 15:00.
+    const t = awakeSince({ at: "2026-10-12T07:00:30.000Z" }, "2026-10-12T06:59:30.000Z");
+    expect(await t.tick()).toBe(0);
+    expect(t.runs).toBe(1);
+    const moved: NightClockConfig = { ...config, buildTime: "15:00" };
+    const named = nextStartAt("build", new Date("2026-10-12T20:30:00.000Z"), moved, t.record());
+    expect(named.toISOString()).toBe("2026-10-13T21:00:00.000Z");
+    // A check a minute from 2:30 pm on Oct 12 until a minute after the time named, with the new setting.
+    const late = setUp({ at: "2026-10-12T20:30:00.000Z" });
+    for (const [key, value] of t.values) late.values.set(key, value);
+    const startedAt: string[] = [];
+    const deps = { job: "build" as const, store: late.store, config: moved, paths, now: () => new Date(late.clock), logger: () => late.log.logger, takeLock: late.takeLock, lockHeld: () => false, isOnline: async () => true, sleep: async () => {}, writeError: late.err.write };
+    while (late.clock <= named.getTime() + MINUTE) {
+      await nightTick({
+        ...deps,
+        run: async (hand) => {
+          startedAt.push(iso(late.clock));
+          hand.marks.started();
+          hand.marks.ended("finished");
+          return 0;
+        },
+      });
+      late.clock += MINUTE;
+    }
+    // Not at 3:00 pm on Oct 12, which the settings alone would promise: at the time named, and once.
+    expect(startedAt).toEqual(["2026-10-13T21:00:00.000Z"]);
+  });
+
+  it("follows a record that is dated ahead: nothing before its day is past, and on its day only a run that was noticed and never begun", () => {
+    const noon = "2026-10-12T18:00:00.000Z";
+    // TZ was set ahead for a while: the record is of Oct 14. Tomorrow's and the day after's times start nothing.
+    const ahead = recordOf("build", "2026-10-14T07:00:00.000Z", { started: true, closedAs: "done" });
+    expect(next("build", noon, ahead)).toBe("2026-10-15T07:00:00.000Z");
+    // The Mac's clock once read January 5.
+    expect(next("build", noon, recordOf("build", "2027-01-05T08:00:00.000Z", { closedAs: "first-check" }))).toBe("2027-01-06T08:00:00.000Z");
+    // Started on that day and never closed: closed as cut short when its day comes, and not run again.
+    expect(next("build", noon, recordOf("build", "2026-10-14T07:00:00.000Z", { started: true }))).toBe("2026-10-15T07:00:00.000Z");
+    // Noticed on that day and never begun: that is the one run the clock still starts on the record's own day.
+    expect(next("build", noon, recordOf("build", "2026-10-14T07:00:00.000Z"))).toBe("2026-10-14T07:00:00.000Z");
+    // The last day of a month, and of a year.
+    expect(next("build", noon, recordOf("build", "2026-10-31T07:00:00.000Z", { closedAs: "done", started: true }))).toBe("2026-11-01T07:00:00.000Z");
+    expect(next("build", noon, recordOf("build", "2026-12-31T08:00:00.000Z", { closedAs: "done", started: true }))).toBe("2027-01-01T08:00:00.000Z");
+  });
+});
+
+describe("a run that is due and does not start", () => {
+  const NOW = "2026-10-12T07:29:30.000Z";
+  const asked = (record: NightRun | null, lockHeld: boolean | null = false, now: string = NOW, job: ClockedJob = "build") => runNotStarting({ job, now: new Date(now), config, record, lockHeld });
+  const tried = (at: string, job: ClockedJob = "build") => noticedRun(currentSlot(job, new Date(at), config), new Date(at));
+
+  it("is what the record shows after tries that ended before the work began: open, started by nothing, waiting for nothing, for over three minutes", async () => {
+    // The real check, with a builder that will not load: one try a minute from 1:00 am, each exiting 1.
+    const t = awakeSince({ at: "2026-10-12T07:00:30.000Z", work: () => 1 }, "2026-10-12T06:59:30.000Z");
+    expect(await t.tick()).toBe(1);
+    expect(asked(t.record(), false, iso(t.clock))).toBe(false);
+    expect(await t.minutes(3)).toEqual([1, 1, 1]);
+    // Three minutes after the first try, to the millisecond: not yet. A moment later: yes.
+    expect(NOT_STARTING_AFTER_MS).toBe(3 * MINUTE);
+    expect(t.record()).toMatchObject({ noticedAt: "2026-10-12T07:00:30.000Z", startedAt: null, closedAt: null, waiting: null });
+    expect(asked(t.record(), false, "2026-10-12T07:03:30.000Z")).toBe(false);
+    expect(asked(t.record(), false, "2026-10-12T07:03:30.001Z")).toBe(true);
+    expect(await t.minutes(26)).toEqual(new Array(26).fill(1));
+    expect(t.runs).toBe(30);
+    expect(asked(t.record(), false, iso(t.clock))).toBe(true);
+    // Nothing about the tries is stored anywhere else: the record and the heartbeat are all there is.
+    expect([...new Set(t.writes)].sort()).toEqual(["night.build.checkedAt", "night.build.run"]);
+  });
+
+  it("is not said while some process holds the job's lock, of a run that started, was closed or is waiting for something, or of another day's record", () => {
+    const record = tried("2026-10-12T07:00:30.000Z");
+    expect(asked(record)).toBe(true);
+    // Not being able to tell about the lock does not hide it.
+    expect(asked(record, null)).toBe(true);
+    // A try is going right now (its work is still loading), or a build-now has the lock.
+    expect(asked(record, true)).toBe(false);
+    expect(asked(null)).toBe(false);
+    expect(asked(startedRun(record, new Date("2026-10-12T07:00:31.000Z")))).toBe(false);
+    expect(asked(closedRun(record, "first-check", new Date("2026-10-12T07:00:31.000Z")))).toBe(false);
+    expect(asked(waitingRun(record, "offline"))).toBe(false);
+    expect(asked(waitingRun(tried("2026-10-12T12:30:30.000Z", "deliver"), "build-running"), false, "2026-10-12T12:45:00.000Z", "deliver")).toBe(false);
+    // Yesterday's record, left open: today's slot gets a record of its own at the job's next check.
+    expect(asked(record, false, "2026-10-13T07:10:00.000Z")).toBe(false);
+    // The delivery's is seen the same way.
+    expect(asked(tried("2026-10-12T12:30:30.000Z", "deliver"), false, "2026-10-12T12:45:00.000Z", "deliver")).toBe(true);
+  });
+
+  it("is not what a job whose lock was busy leaves behind: that check writes no record at all", async () => {
+    const t = awakeSince({ at: "2026-10-12T07:00:30.000Z" }, "2026-10-12T06:59:30.000Z");
+    t.heldElsewhere.add("build.lock");
+    expect(await t.tick()).toBe(0);
+    expect(await t.minutes(10)).toEqual(new Array(10).fill(0));
+    expect(asked(t.record(), false, iso(t.clock))).toBe(false);
   });
 });

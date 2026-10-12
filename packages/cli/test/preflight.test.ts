@@ -1,7 +1,7 @@
 // All text in this file is made up for the tests. No Bee, Kiro, Kiro Crew, GitHub or network
 // call is made: every one of preflight's questions is answered by a fake.
 import { describe, expect, it } from "vitest";
-import { BeeError, closedRun, currentSlot, noteChecked, noticedRun, Store, writeNightRun } from "@overnight/core";
+import { BeeError, closedRun, currentSlot, noteChecked, noticedRun, startedRun, Store, waitingRun, writeNightRun } from "@overnight/core";
 import type { ClockedJob } from "@overnight/core";
 import { CROSS, DASH, formatCheck, preflight, PREFLIGHT_READY, PREFLIGHT_STOPPED, PREFLIGHT_TITLE, TICK, verdict } from "../src/commands/preflight.ts";
 import type { PreflightProbes } from "../src/commands/preflight.ts";
@@ -76,7 +76,7 @@ describe("overnight preflight", () => {
       `  ${TICK} Playwright's headless browser is installed.`,
       `  ${TICK} The three background jobs are installed: build, deliver and the Kiro Crew gateway.`,
       `  ${TICK} The build and deliver jobs wake every minute and go by Overnight's own clock (America/Boise). Both checked the time in the last 3 minutes.`,
-      `  ${TICK} The gateway job was installed for BUILD_SANDBOX=overnight.`,
+      `  ${TICK} The gateway job was installed for BUILD_SANDBOX=overnight, and its copy of the sandbox rules is the repo's.`,
       PREFLIGHT_READY,
     ]);
     // Thirteen checks, and the title and the verdict around them.
@@ -290,11 +290,15 @@ describe("overnight preflight", () => {
   });
 
   it("crosses the last line when the gateway is running behind a copy of the sandbox rules that is not the repo's, or has none", async () => {
-    for (const copy of ["different", "missing"] as const) {
-      const ran = await broken({ gatewayProfileCopy: () => copy });
-      expect(ran.code, copy).toBe(1);
-      expect(ran.marked, copy).toEqual([`  ${CROSS} The gateway is running behind an older copy of the sandbox rules. Fix: scripts/install-agents.sh install crew`]);
-    }
+    // The line says what was compared: the job's own copy and the repo's file.
+    const different = await broken({ gatewayProfileCopy: () => "different" });
+    expect(different.code).toBe(1);
+    expect(different.marked).toEqual([
+      `  ${CROSS} The gateway job's copy of the sandbox rules (sandbox/crew-gateway.sb in the data folder) is not the repo's, so the gateway is not running behind the rules in this repo. Fix: scripts/install-agents.sh install crew`,
+    ]);
+    const missing = await broken({ gatewayProfileCopy: () => "missing" });
+    expect(missing.code).toBe(1);
+    expect(missing.marked).toEqual([`  ${CROSS} The gateway job's copy of the sandbox rules is missing (sandbox/crew-gateway.sb in the data folder). Fix: scripts/install-agents.sh install crew`]);
     // In crew mode the gateway has no rules of ours to copy: the copy is not looked at.
     const crew = await run({ crewJobSandbox: () => "crew", gatewayProfileCopy: () => "missing" }, { settings: { BUILD_SANDBOX: "crew" } });
     expect(crew.code).toBe(0);
@@ -426,19 +430,76 @@ describe("overnight preflight", () => {
       expect(unknown.marked[0]).toContain("The build job has not checked the time since");
     });
 
-    it("crosses the line when a clock's record is dated ahead, so that job starts nothing until then", async () => {
+    it("crosses the line when a clock's record is dated ahead, and says when that job's next run really is", async () => {
       const store = awakeStore();
       // The Mac's clock once read January 5: the deliver job's record is from then.
       const then = new Date("2027-01-05T14:00:00.000Z");
       writeNightRun(store, "deliver", closedRun(noticedRun(currentSlot("deliver", then, testConfig()), then), "first-check", then), then);
       const ran = await broken({}, { store });
       expect(ran.code).toBe(1);
-      expect(ran.marked).toEqual([`  ${CROSS} The deliver clock's record is dated ahead (Jan 5, 2027), so nothing runs until then. Fix: scripts/install-agents.sh install deliver`]);
+      expect(ran.marked).toEqual([
+        `  ${CROSS} The deliver clock already has Jan 5, 2027 on record, so the next deliver is Jan 6, 2027, 6:30 AM (DELIVER_TIME, TZ or the Mac's clock was moved). Fix: scripts/install-agents.sh install deliver   (that starts the deliver clock from now)`,
+      ]);
       // A record of today's slot, or of an earlier one, is as it should be.
       const usual = awakeStore();
       const noon = new Date(at(0));
       for (const job of ["build", "deliver"] as const) writeNightRun(usual, job, closedRun(noticedRun(currentSlot(job, noon, testConfig()), noon), "first-check", noon), noon);
       expect((await run({}, { store: usual })).code).toBe(0);
+    });
+
+    it("does not promise today's new time after BUILD_TIME was moved later on a day whose build had already run", async () => {
+      // Oct 9: the build ran at 1:00 am. At noon BUILD_TIME is 15:00. The clock starts nothing at 3:00 pm today.
+      const store = awakeStore();
+      const ranAt = new Date("2026-10-09T07:00:05.000Z");
+      writeNightRun(store, "build", closedRun(startedRun(noticedRun(currentSlot("build", ranAt, testConfig()), ranAt), ranAt), "done", new Date("2026-10-09T07:20:00.000Z")), ranAt);
+      const ran = await broken({}, { store, settings: { BUILD_TIME: "15:00" } });
+      expect(ran.code).toBe(1);
+      expect(ran.marked).toEqual([
+        `  ${CROSS} The build clock already has Oct 9 on record, so the next build is Oct 10, 3:00 PM (BUILD_TIME, TZ or the Mac's clock was moved). Fix: scripts/install-agents.sh install build   (that starts the build clock from now)`,
+      ]);
+      expect(ran.lines.join("\n")).not.toContain("nothing runs until then");
+      // Once today's new time has come round, the record is today's and nothing is wrong: the next build is tomorrow's.
+      const later = awakeStore({ build: "2026-10-09T21:29:30.000Z", deliver: "2026-10-09T21:29:30.000Z" });
+      writeNightRun(later, "build", closedRun(startedRun(noticedRun(currentSlot("build", ranAt, testConfig()), ranAt), ranAt), "done", new Date("2026-10-09T07:20:00.000Z")), ranAt);
+      expect((await run({}, { store: later, settings: { BUILD_TIME: "15:00" }, now: "2026-10-09T21:30:00.000Z" })).code).toBe(0);
+    });
+
+    it("crosses the line when a job is awake and the run that is due does not start, and says where the reason is", async () => {
+      // 1:29 am on Oct 9. The build's time came at 1:00 am; it was first tried then, and every try since has ended before the work began.
+      const NOW = "2026-10-09T07:29:30.000Z";
+      const tried = (job: ClockedJob, firstTry: string): Store => {
+        const store = awakeStore({ build: "2026-10-09T07:29:00.000Z", deliver: "2026-10-09T07:29:00.000Z" });
+        const first = new Date(firstTry);
+        writeNightRun(store, job, noticedRun(currentSlot(job, first, testConfig()), first), first);
+        return store;
+      };
+      const stuck = await broken({}, { store: tried("build", "2026-10-09T07:00:05.000Z"), now: NOW });
+      expect(stuck.code).toBe(1);
+      expect(stuck.marked).toEqual([
+        `  ${CROSS} The build job is awake and tries every minute, but the build that was due at Oct 9, 1:00 AM does not start. Fix: the reason is in the last lines of logs/build.log: scripts/install-agents.sh status build`,
+      ]);
+      // Three minutes after the first try, to the millisecond, is not yet long enough to say so.
+      expect((await run({}, { store: tried("build", "2026-10-09T07:26:30.000Z"), now: NOW })).code).toBe(0);
+      expect((await broken({}, { store: tried("build", "2026-10-09T07:26:29.999Z"), now: NOW })).marked[0]).toContain("does not start");
+      // While some run holds the build lock, a try may be going, or another build is: that is the "running right now" line.
+      const held = await run({ nightJobRunning: (job) => job === "build" }, { store: tried("build", "2026-10-09T07:00:05.000Z"), now: NOW });
+      expect(held.code).toBe(0);
+      expect(held.text).toContain("The build job is running right now");
+      // A run that is waiting for something it has stored (the internet) is not one that does not start.
+      const waiting = tried("build", "2026-10-09T07:00:05.000Z");
+      const first = new Date("2026-10-09T07:00:05.000Z");
+      writeNightRun(waiting, "build", waitingRun(noticedRun(currentSlot("build", first, testConfig()), first), "offline"), first);
+      expect((await run({}, { store: waiting, now: NOW })).code).toBe(0);
+
+      // Both jobs at once, in the morning: one line for the two.
+      const morning = "2026-10-09T12:45:30.000Z";
+      const both = awakeStore({ build: "2026-10-09T12:45:00.000Z", deliver: "2026-10-09T12:45:00.000Z" });
+      for (const [job, firstTry] of [["build", "2026-10-09T07:00:05.000Z"], ["deliver", "2026-10-09T12:30:05.000Z"]] as const) {
+        writeNightRun(both, job, noticedRun(currentSlot(job, new Date(firstTry), testConfig()), new Date(firstTry)), new Date(firstTry));
+      }
+      expect((await broken({}, { store: both, now: morning })).marked).toEqual([
+        `  ${CROSS} The build and deliver jobs are awake and try every minute, but the build that was due at Oct 9, 1:00 AM and the delivery that was due at Oct 9, 6:30 AM do not start. Fix: the reason is in the last lines of logs/build.log and logs/deliver.log: scripts/install-agents.sh status build   then: scripts/install-agents.sh status deliver`,
+      ]);
     });
 
     it("names the time zone from the settings", async () => {

@@ -22,9 +22,9 @@ import { renderProblem } from "./render/problem.ts";
 import { renderSettings } from "./render/settings.ts";
 import { renderToday } from "./render/today.ts";
 import type { SafeHtml } from "./render/html.ts";
-import { groupNights, heroIdea, lastNightOf, nowLine, pollMsFor, storyOf, tonightQueue } from "./story.ts";
+import { groupNights, heroIdea, lastNightOf, nightOutlook, nowLine, pollMsFor, storyOf, tonightQueue } from "./story.ts";
 import { IDEA_ID } from "./types.ts";
-import type { Chrome, DashIdea, FilmingPolicy, IdeaExtras, Night, PageRoute, RenderContext, Site, Snapshot, Story, View } from "./types.ts";
+import type { Chrome, DashIdea, FilmingPolicy, IdeaExtras, Night, NightOutlook, PageRoute, RenderContext, Site, Snapshot, Story, View } from "./types.ts";
 
 export interface SiteOptions {
   config: Config;
@@ -62,6 +62,9 @@ export function createSite(o: SiteOptions): Site {
 
   // ---------- What one look means ----------
 
+  /** What stands in the night's way (the month's credits, a rehearsal folder, a late run): the same for every story of one look. */
+  const outlookOf = oncePerLook((s): NightOutlook => nightOutlook(s, config));
+
   const storyWith = (s: Snapshot, idea: DashIdea, extras: Pick<IdeaExtras, "report" | "marks"> | null, now: Date): Story =>
     storyOf(idea, s.events.get(idea.id) ?? [], s.build.get(idea.id) ?? null, s.deliver.get(idea.id) ?? null, extras, {
       now,
@@ -70,6 +73,7 @@ export function createSite(o: SiteOptions): Site {
       nextBuildAt: s.nextBuildAt,
       nextDeliverAt: s.nextDeliverAt,
       config,
+      outlook: outlookOf(s, now),
     });
 
   /**

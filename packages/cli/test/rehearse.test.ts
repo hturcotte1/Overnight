@@ -635,7 +635,7 @@ describe("overnight rehearse run", () => {
       "  Stopping: the Mac went to sleep during the run. Ending what is running first.",
       '  Stopped, because the Mac went to sleep during the run. The idea is now "building". Run the same command again to carry on.',
     ]);
-    expect(t.logs.build.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: "the Mac went to sleep during the run; what was in progress was stopped and will be tried again", ideaId: id, gapSeconds: 600 }]);
+    expect(t.logs.build.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: "the Mac went to sleep during the run; what was in progress was stopped. Running the same command again carries on from there", ideaId: id, gapSeconds: 600 }]);
     expect(t.sleepWatch.watching()).toBe(0);
     expect(beePackage).toEqual({ loaded: 0, gatewaysMade: 0 });
   });

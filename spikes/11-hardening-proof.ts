@@ -363,6 +363,8 @@ async function selfCheck(places: Places): Promise<void> {
       ["connect to a socket file in the build's temporary folder", "/usr/bin/nc", ["-U", "proof-open.sock"], tmpDir],
       ["connect to a socket file in a folder that is closed to it", "/usr/bin/nc", ["-U", "proof-closed.sock"], places.paths.root],
       [`connect to the dashboard's port (${DASHBOARD_PORT})`, "/usr/bin/nc", ["-z", "-w", "1", "127.0.0.1", String(DASHBOARD_PORT)], workspace],
+      // The same address written as an IPv6 one: a rule for "localhost" let this through (found Oct 11).
+      ["connect to the dashboard's port by ::ffff:127.0.0.1", "/usr/bin/nc", ["-z", "-w", "1", "::ffff:127.0.0.1", String(DASHBOARD_PORT)], workspace],
       ["connect to a local port nothing listens on (9)", "/usr/bin/nc", ["-z", "-w", "1", "127.0.0.1", "9"], workspace],
     ];
     for (const [label, shipped, copy, defines] of [

@@ -229,6 +229,9 @@ describe("overnight (command line)", () => {
     expect(USAGE).toContain("Exit code 0 only if");
     expect(USAGE).toContain("stop cleanly on Ctrl-C or a stop signal");
     expect(USAGE).toContain("Mac slept through part of a run");
+    // A second try is promised only to a build that has one left.
+    expect(USAGE).toContain("a build stopped on its first start gets\n                              one more try on a later night, and a delivery waits for the next run.");
+    expect(USAGE).not.toContain("what was stopped is tried again");
   });
 
   it("shows the night's readiness in status: jobs, their clock, gateway, sandbox mode, power, and never loads the builder", async () => {
@@ -237,7 +240,8 @@ describe("overnight (command line)", () => {
     const powerSource = vi.fn<CliIo["powerSource"]>(async () => "battery");
     const jobLockHeld = vi.fn<CliIo["jobLockHeld"]>(() => false);
     const jobsBelongHere = vi.fn<CliIo["jobsBelongHere"]>(() => true);
-    const h = harness({ gatewayAnswers, powerSource, jobLockHeld, jobsBelongHere, nightJobsState: () => ({ build: true, deliver: true, crew: true }), jobTriggers: () => ({ build: "timer", deliver: "timer" }) });
+    const night = { nightJobsState: () => ({ build: true, deliver: true, crew: true }), jobTriggers: () => ({ build: "timer" as const, deliver: "timer" as const }) };
+    const h = harness({ gatewayAnswers, powerSource, jobLockHeld, jobsBelongHere, ...night, listenerState: () => ({ running: true, jobInstalled: true }) });
     // Both jobs asked the clock a minute before the harness's noon.
     for (const job of ["build", "deliver"] as const) noteChecked(h.context.store, job, new Date(at(-60)));
     expect(await h.run("status")).toBe(0);
@@ -256,6 +260,12 @@ describe("overnight (command line)", () => {
     ]);
     // Whether each job is running is asked of its own lock in this data folder, and the jobs' folder of this one.
     expect(jobLockHeld.mock.calls.map(([file]) => file)).toEqual([path.join(h.context.paths.root, "build.lock"), path.join(h.context.paths.root, "deliver.lock")]);
+    // On battery with no listener running on this data folder, nothing of Overnight's holds the Mac awake, and the row says so.
+    const stopped = harness({ powerSource, ...night, listenerState: () => ({ running: false, jobInstalled: true }) });
+    expect(await stopped.run("status")).toBe(0);
+    expect(stopped.out.lines.find((line) => line.startsWith("  Power"))).toBe(
+      "  Power              battery: the listener is not running, so nothing of Overnight's keeps the Mac awake between runs, and it may go to sleep. With the lid closed nothing runs until it is opened",
+    );
     expect(jobsBelongHere).toHaveBeenCalledWith(h.context.paths);
 
     // What scripts/install-agents.sh reads.

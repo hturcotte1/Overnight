@@ -397,5 +397,10 @@
 ;;     Overnight's dashboard shows what Bee heard. No job may read it, or take its port. (Every
 ;;     other port on this Mac stays open: the gateway's own has to, and a build serves its own
 ;;     preview on one.)
-(deny network-outbound (remote ip "localhost:4321"))
-(deny network-bind (local ip "localhost:4321"))
+;;     The port is refused by its number alone, on every address ("*"), not on "localhost". A
+;;     rule written with "localhost" does not cover this Mac's own address written the long way
+;;     round, as an IPv6 one (::ffff:127.0.0.1). Measured Oct 11: by that spelling a job read a
+;;     page served on 127.0.0.1, and with the page gone it took the port and served its own.
+;;     The price: a job cannot reach port 4321 on any other machine either. No build needs to.
+(deny network-outbound (remote ip "*:4321"))
+(deny network-bind (local ip "*:4321"))

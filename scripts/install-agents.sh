@@ -52,6 +52,9 @@
 #     `overnight status --json`, as the background jobs see it). "overnight", the standard: inside
 #     Overnight's own macOS sandbox, packages/builder/sandbox/crew-gateway.sb, with every path
 #     written out with its links followed. "crew": bare, under Kiro Crew's own sandbox.
+#     In "overnight" mode the job is given its own copy of that profile,
+#     <data folder>/sandbox/crew-gateway.sb. The copy is replaced at one moment only: after the old
+#     gateway has stopped and before the new one starts. An install that refuses leaves it alone.
 #   - It waits up to 60 seconds for the gateway to answer, and says so plainly if it does not.
 #
 # It never changes a Kiro Crew setting. `install crew` reads them, and if one is not what the
@@ -456,28 +459,84 @@ make_gateway_folders() {
 # Where the gateway job's own copy of the sandbox profile is kept: <data>/sandbox/crew-gateway.sb.
 installed_profile_of() { printf '%s/sandbox/crew-gateway.sb' "$1"; }
 
-# Give the gateway job its own copy of the sandbox profile, and print where it is.
+# The gateway job has its own copy of the sandbox profile.
 # macOS's privacy rules do not let a background job whose program is sandbox-exec read a file
 # under ~/Documents, which is where this repo may live: the job then dies at once with
 # "sandbox-exec: ...crew-gateway.sb: Operation not permitted" (seen on Oct 10). The data folder
 # is not covered by those rules, and a sandboxed job can neither read nor write it. The copy is
 # made again by every `install crew`, so it never stays behind the repo's file for long;
 # `overnight preflight` says when the two differ.
-#   place_gateway_profile <data dir>
-place_gateway_profile() {
+#
+# The copy is the rules the gateway starts behind, also when macOS starts it again by itself
+# (after a crash, at login). So it is replaced at one moment only: when `install crew` has
+# stopped the old gateway and is about to start the new one. A refusal before that leaves the
+# copy, like everything else, as it was. That takes three steps:
+#   require_safe_profile_place   looks, and changes nothing (with everything else that can refuse)
+#   stage_gateway_profile        writes the new copy beside the old one, under another name
+#   place_staged_profile         one rename, once the old gateway is gone
+
+# Stop if the place for the copy is not what it should be. Changes nothing.
+#   require_safe_profile_place <data dir> <what to say last: what was, or was not, changed>
+require_safe_profile_place() {
+  local data_dir="$1" last="$2" dir file
+  file="$(installed_profile_of "$data_dir")"
+  dir="$(dirname -- "$file")"
+  if [[ -L "$dir" || ( -e "$dir" && ! -d "$dir" ) ]]; then
+    die "$dir is not a plain folder (a symbolic link?), so the sandbox profile cannot be kept there. $last"
+  fi
+  if [[ -L "$file" ]]; then
+    die "$file is a symbolic link, so the sandbox profile cannot be kept there. Remove it, then run install again. $last"
+  fi
+  if [[ -e "$file" && ! -f "$file" ]]; then
+    die "$file is not a plain file, so the sandbox profile cannot be kept there. Remove it, then run install again. $last"
+  fi
+}
+
+# The new copy, written and waiting beside the one in use. Empty when there is none.
+STAGED_PROFILE=""
+
+# Write the repo's profile into the copy's folder under a name of its own. The copy in use is not
+# touched: the gateway that is running, and one macOS starts again meanwhile, still go by it.
+#   stage_gateway_profile <data dir>
+stage_gateway_profile() {
   local data_dir="$1" dir file tmp
+  # Looked at once already, before anything was changed. Again now, right before writing.
+  require_safe_profile_place "$data_dir" "The Kiro Crew gateway job was left as it was."
   file="$(installed_profile_of "$data_dir")"
   dir="$(dirname -- "$file")"
   (umask 077 && mkdir -p -- "$dir") || die "Could not create $dir, where the gateway job's copy of the sandbox profile is kept. The Kiro Crew gateway job was left as it was."
   [[ -d "$dir" && ! -L "$dir" ]] || die "$dir is not a plain folder (a symbolic link?), so the sandbox profile cannot be kept there. The Kiro Crew gateway job was left as it was."
-  [[ ! -L "$file" ]] || die "$file is a symbolic link, so the sandbox profile cannot be kept there. Remove it, then run install again. The Kiro Crew gateway job was left as it was."
   chmod 700 "$dir" || die "Could not make $dir private. The Kiro Crew gateway job was left as it was."
   tmp="$(mktemp "$dir/.crew-gateway.sb.XXXXXX")" || die "Could not write in $dir. The Kiro Crew gateway job was left as it was."
-  if ! { cat -- "$SANDBOX_PROFILE" >"$tmp" && chmod 600 "$tmp" && mv -f -- "$tmp" "$file"; }; then
+  if ! { cat -- "$SANDBOX_PROFILE" >"$tmp" && chmod 600 "$tmp"; }; then
     rm -f -- "$tmp"
-    die "Could not copy the sandbox profile to $file. The Kiro Crew gateway job was left as it was."
+    die "Could not copy the sandbox profile into $dir. The Kiro Crew gateway job was left as it was."
   fi
-  printf '%s\n' "$file"
+  STAGED_PROFILE="$tmp"
+  # However this script ends from here on (a refusal, Ctrl-C), a copy still waiting is removed.
+  trap discard_staged_profile EXIT
+}
+
+# Throw the waiting copy away: the install stopped before the old gateway did.
+discard_staged_profile() {
+  if [[ -n "$STAGED_PROFILE" ]]; then
+    rm -f -- "$STAGED_PROFILE"
+    STAGED_PROFILE=""
+  fi
+}
+
+# Put the waiting copy in place: one rename. Only ever called with the old gateway stopped.
+#   place_staged_profile <data dir>
+place_staged_profile() {
+  local file
+  [[ -n "$STAGED_PROFILE" ]] || return 0
+  file="$(installed_profile_of "$1")"
+  # -h: if the name has become a link to a folder meanwhile, replace the link, not something in the folder.
+  if ! mv -f -h -- "$STAGED_PROFILE" "$file"; then
+    discard_staged_profile
+    die "Could not put the gateway job's copy of the sandbox profile in place at $file. The old Kiro Crew gateway job was stopped and nothing was started in its place: run \"scripts/install-agents.sh install crew\" again."
+  fi
+  STAGED_PROFILE=""
 }
 
 # The names a sandbox profile wants values for: every (param "NAME") in it, once each, in the
@@ -523,8 +582,9 @@ crew_command() {
     printf '%s\n' "$kirocrew" gateway --no-open --no-tunnel
     return 0
   fi
-  # The file the job is pointed at: its own copy when install has made one (GATEWAY_PROFILE),
-  # otherwise the repo's. The names are always read from the repo's file; the copy is the same text.
+  # The file the job is pointed at: its own copy when install keeps one (GATEWAY_PROFILE names its
+  # place, also before the copy is there), otherwise the repo's. The names are always read from
+  # the repo's file; the copy is the same text.
   profile="$(real_path "${GATEWAY_PROFILE:-$SANDBOX_PROFILE}")" || die "Could not work out the real path of the sandbox profile (${GATEWAY_PROFILE:-$SANDBOX_PROFILE}). Nothing was changed."
   program="$(real_path "$kirocrew")" || die "Could not work out the real path of Kiro Crew's program ($kirocrew). Nothing was changed."
   while IFS= read -r name; do
@@ -1035,7 +1095,7 @@ CREW_PROGRAM=""
 #   prepare_job <job> <node> <data dir> <what `overnight status --json` printed>
 prepare_job() {
   local job="$1" node="$2" data_dir="$3" report="$4" content zone time at sandbox kirocrew hour minute word words
-  local -a command=()
+  local -a command=() trial=()
   case "$job" in
     listen)
       content="$(render_plist listen "$node" "$REPO" "$data_dir" "$HOME")"
@@ -1085,19 +1145,28 @@ prepare_job() {
       if gateway_port_busy && ! job_loaded crew; then
         die "Something is already listening on port $CREW_PORT, where the Kiro Crew gateway listens: a gateway started by hand, or by \"kirocrew service install\". Only one can run. Stop it first (\"$kirocrew\" stop; if it is Kiro Crew's own service, \"$kirocrew\" service uninstall), then run install again. Nothing was changed."
       fi
-      # The job's own copy of the profile, outside ~/Documents (see place_gateway_profile). It is
-      # ours, in our own data folder, and harmless if the install stops further down.
+      # The job is pointed at its own copy of the profile, outside ~/Documents (see
+      # stage_gateway_profile). Here only its place is named and looked at: the copy itself is
+      # made when this job's turn comes, and put in place once the old gateway has stopped.
       GATEWAY_PROFILE=""
       if [[ "$sandbox" == overnight ]]; then
-        GATEWAY_PROFILE="$(place_gateway_profile "$data_dir")" || exit 1
+        require_safe_profile_place "$data_dir" "Nothing was changed."
+        GATEWAY_PROFILE="$(installed_profile_of "$data_dir")"
       fi
       # A refusal inside crew_command ends this script too: its message is already printed.
       words="$(crew_command "$sandbox" "$kirocrew" "$HOME" "$data_dir" "$node")" || exit 1
       while IFS= read -r word; do
         command+=("$word")
       done <<<"$words"
-      if [[ "$sandbox" == overnight ]] && ! sandbox_command_loads "${command[@]}"; then
-        die "macOS would not start a program inside the sandbox profile as this script would run it ($SANDBOX_EXEC -f ${GATEWAY_PROFILE:-$SANDBOX_PROFILE} ...): the profile does not load, or wants a value it was not given. The gateway job would fail every 30 seconds, so it was not installed. Nothing was changed."
+      if [[ "$sandbox" == overnight ]]; then
+        # macOS is asked about the repo's own file, in the third place of the command: it is the
+        # text the job's copy will hold, and the copy that is there now may hold older rules, or
+        # not be there yet. (This script, unlike a background job, may read the repo's file.)
+        trial=("${command[@]}")
+        trial[2]="$(real_path "$SANDBOX_PROFILE")" || die "Could not work out the real path of the sandbox profile ($SANDBOX_PROFILE). Nothing was changed."
+        if ! sandbox_command_loads "${trial[@]}"; then
+          die "macOS would not start a program inside the sandbox profile as this script would run it ($SANDBOX_EXEC -f $SANDBOX_PROFILE ...): the profile does not load, or wants a value it was not given. The gateway job would fail every 30 seconds, so it was not installed. Nothing was changed."
+        fi
       fi
       content="$(render_plist crew "$node" "$REPO" "$data_dir" "$HOME" "${command[@]}")"
       CREW_MODE="$sandbox"
@@ -1123,6 +1192,11 @@ apply_job() {
       # Kiro Crew looks for skills in its own folder. Ours is copied there, never linked, so that
       # nothing the gateway does can reach back into the repo.
       install_skill
+      # The new copy of the sandbox profile is written now, where everything that can go wrong
+      # with it still leaves the old gateway as it was, and waits under another name.
+      if [[ "$CREW_MODE" == overnight ]]; then
+        stage_gateway_profile "$data_dir"
+      fi
       ;;
     build | deliver)
       # The stop below would cut off a run that is going.
@@ -1136,7 +1210,15 @@ apply_job() {
         || die "Could not start the $job job's clock (\"overnight $job --from-now\" failed; its message is above). $(untouched_words "$job")"
       ;;
   esac
-  stop_job "$job" || die "The old copy of the $job job would not stop. Its settings file was not changed. Try again in a minute."
+  if ! stop_job "$job"; then
+    discard_staged_profile
+    die "The old copy of the $job job would not stop. Its settings file was not changed. Try again in a minute."
+  fi
+  # Only now, with the old gateway gone and before the new one starts, do the rules it starts
+  # behind change.
+  if [[ "$job" == crew ]]; then
+    place_staged_profile "$data_dir"
+  fi
   (umask 177 && printf '%s\n' "${!rendered}" >"$plist") || die "Could not write $plist."
   chmod 600 "$plist"
   plutil -lint "$plist" >/dev/null || die "$plist did not come out valid."

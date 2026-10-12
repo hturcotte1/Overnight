@@ -36,6 +36,14 @@ function dateKeyPlusDays(at: Date, timeZone: string, days: number): string {
   return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
 }
 
+/** "Oct 9, 6:02 PM": a moment by its date, which reads the same whatever day it is looked at. */
+export function dateTime(at: string | Date, timeZone: string): string {
+  const date = toDate(at);
+  if (date === null) return UNKNOWN_TIME;
+  const p = localPieces(date, timeZone, { month: "short", day: "numeric" });
+  return `${p.month} ${p.day}, ${clockTime(date, timeZone)}`;
+}
+
 /** "today, 1:02 AM", "yesterday, 7:00 AM", "tomorrow, 1:00 AM", and for any other day "Oct 9, 6:02 PM". */
 export function dayTime(at: string | Date, timeZone: string, now: Date): string {
   const date = toDate(at);
@@ -45,8 +53,7 @@ export function dayTime(at: string | Date, timeZone: string, now: Date): string 
   if (day === localDateKey(now, timeZone)) return `today, ${clock}`;
   if (day === dateKeyPlusDays(now, timeZone, -1)) return `yesterday, ${clock}`;
   if (day === dateKeyPlusDays(now, timeZone, 1)) return `tomorrow, ${clock}`;
-  const p = localPieces(date, timeZone, { month: "short", day: "numeric" });
-  return `${p.month} ${p.day}, ${clock}`;
+  return dateTime(date, timeZone);
 }
 
 /** A number with at most one decimal, and no ".0". */
@@ -86,6 +93,11 @@ export function bytes(n: number): string {
     value /= 1000;
   }
   return `${oneDecimal(value)} GB`;
+}
+
+/** A sum of credits as `overnight status` writes it: one decimal, and none for a whole number ("10.4", "400"). */
+export function credits(n: number): string {
+  return Number.isFinite(n) ? oneDecimal(n) : "0";
 }
 
 /** "1 line", "214 lines", "1,204 lines", "4.59 Kiro credits". The plural is the word plus "s" unless one is given. */

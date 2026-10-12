@@ -1,7 +1,8 @@
 // The pages, rendered from hand-made fixtures. Every title, pitch, quote and time here is invented.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { IdeaState } from "@overnight/core";
+import { buildBudget } from "@overnight/core";
+import type { BuildBudget, IdeaState } from "@overnight/core";
 import { buildSeconds, checksRow, count, dotted, ideaCard, ideaHref, live, miniStory, openTheApp, shortTime, shotSrc, sinceClock, stateLabel, statePill, stateTime, storySteps } from "../src/render/components.ts";
 import type { Clock } from "../src/render/components.ts";
 import { html } from "../src/render/html.ts";
@@ -12,7 +13,7 @@ import { renderNights } from "../src/render/nights.ts";
 import { renderProblem } from "../src/render/problem.ts";
 import { renderSettings } from "../src/render/settings.ts";
 import { renderToday } from "../src/render/today.ts";
-import type { DashIdea, HeardGroup, Night, Story, View } from "../src/types.ts";
+import type { BuildHold, DashIdea, HeardGroup, Night, Story, TonightQueue, View } from "../src/types.ts";
 import { boise, DAY_START, fakeChrome, fakeConfig, fakeContext, fakeEvents, fakeExtras, fakeIdea, fakeReport, fakeSnapshot, fakeStory, HOME, HOSTILE, NOW, scene, TIME_ZONE } from "./fixtures.ts";
 
 const K: Clock = { timeZone: TIME_ZONE, now: NOW, dayStart: DAY_START };
@@ -456,7 +457,7 @@ describe("Today", () => {
     const sc = scene();
     expect(renderToday(sc.s, sc.hero, sc.line, sc.lastNight, sc.queue, sc.stories, sc.c).title).toBe("Today");
     expect(liveIds(todayOf(sc))).toEqual(["lastnight", "story", "lane-heard", "lane-asked", "lane-tonight", "cards"]);
-    const bare = renderToday(fakeSnapshot(), null, { over: "Today", before: "No ideas yet", title: null, after: "" }, null, { at: boise(12, 1), paused: false, limit: 2, rows: [] }, new Map(), sc.c).main.text;
+    const bare = renderToday(fakeSnapshot(), null, { over: "Today", before: "No ideas yet", title: null, after: "" }, null, { at: boise(12, 1), paused: false, limit: 2, hold: null, rows: [] }, new Map(), sc.c).main.text;
     expect(liveIds(bare)).toEqual(["lastnight", "story", "lane-heard", "lane-asked", "lane-tonight", "cards"]);
     // A region with nothing in it is really empty, so the stylesheet can hide it.
     expect(bare).toMatch(/<section id="lastnight" class="lastnight" data-live data-rev="[0-9a-f]{12}"><\/section>/);
@@ -676,7 +677,7 @@ describe("Today", () => {
 
     it("says tonight when nothing is being built yet, and which ideas wait for another night", () => {
       const sc = scene();
-      const queue = { at: boise(11, 1), paused: false, limit: 1, rows: [{ idea: sc.ideas.lunchTurns, when: "tonight" as const }, { idea: sc.ideas.cutShort, when: "later" as const }] };
+      const queue = { at: boise(11, 1), paused: false, limit: 1, hold: null, rows: [{ idea: sc.ideas.lunchTurns, when: "tonight" as const }, { idea: sc.ideas.cutShort, when: "later" as const }] };
       const lane = region(renderToday(sc.s, sc.hero, sc.line, null, queue, sc.stories, sc.c).main.text, "lane-tonight");
       expect(Array.from(lane.matchAll(/<small>([^<]+)<\/small><\/li>/g), (match) => match[1])).toEqual(["tonight", "waits for another night"]);
       expect(lane).toContain("2 to build · up to 1 a night");
@@ -691,6 +692,48 @@ describe("Today", () => {
       expect(lane(false)).not.toContain("Paused");
       expect(lane(true, sc.queue.rows)).toContain("Paused: nothing will be built");
       expect(lane(true, sc.queue.rows)).toContain("Chore Wheel");
+    });
+
+    // The lane used to read "tonight" for ideas that the month's credits, or a rehearsal folder, kept from being built at all.
+    describe("when something stands in the build's way", () => {
+      const sc = scene();
+      const waiting = [{ idea: sc.ideas.lunchTurns, when: "tonight" as const }, { idea: sc.ideas.cutShort, when: "later" as const }];
+      const held: BuildHold = { why: "credits", step: "(step)", line: "(line)", note: "Not tonight: this month's build credits are used up (10.4 of 5 counted)." };
+      const late: BuildHold = { why: "late", step: "(step)", line: "(line)", note: "Running late: the Oct 11, 1:00 AM build is waiting for the internet." };
+      const lane = (queue: Partial<TonightQueue>): string => region(renderToday(sc.s, sc.hero, sc.line, null, { ...sc.queue, rows: waiting, ...queue }, sc.stories, sc.c).main.text, "lane-tonight");
+      const words = (text: string): string[] => Array.from(text.matchAll(/<small>([^<]+)<\/small><\/li>/g), (match) => match[1] ?? "");
+
+      it("says why nothing will be built, and that the ideas wait", () => {
+        const text = lane({ hold: held });
+        expect(text).toContain('<p class="lane__note lane__note--warn">Not tonight: this month&#39;s build credits are used up (10.4 of 5 counted).</p>');
+        expect(words(text)).toEqual(["waiting", "waiting"]);
+        // An idea that is being built is being built, whatever holds the rest.
+        expect(words(lane({ hold: held, rows: [{ idea: sc.ideas.choreWheel, when: "building" }, ...waiting] }))).toEqual(["building", "waiting", "waiting"]);
+        // Nothing waits: the reason still shows, in place of "Nothing is waiting".
+        expect(lane({ hold: held, rows: [] })).toContain("Not tonight:");
+        expect(lane({ hold: held, rows: [] })).not.toContain("Nothing is waiting");
+      });
+
+      it("says a late build is late, and that its ideas are next", () => {
+        const text = lane({ hold: late });
+        expect(text).toContain('<p class="lane__note lane__note--warn">Running late: the Oct 11, 1:00 AM build is waiting for the internet.</p>');
+        expect(words(text)).toEqual(["next", "waits for another night"]);
+        // With nothing waiting for it, a late build is not worth a warning.
+        expect(lane({ hold: late, rows: [] })).not.toContain("Running late");
+        expect(lane({ hold: late, rows: [] })).toContain('<p class="lane__note">Nothing is waiting to be built.</p>');
+      });
+
+      it("says paused first, as before", () => {
+        const text = lane({ paused: true, hold: held });
+        expect(text).toContain("Paused: nothing will be built");
+        expect(text).not.toContain("Not tonight");
+        expect(words(text)).toEqual(["tonight", "waits for another night"]);
+      });
+
+      it("says nothing more when nothing is in the way", () => {
+        expect(lane({ hold: null })).not.toContain("lane__note");
+        expect(words(lane({ hold: null }))).toEqual(["tonight", "waits for another night"]);
+      });
     });
   });
 
@@ -1051,9 +1094,9 @@ describe("Nights", () => {
 
 describe("Settings", () => {
   const sc = scene();
-  const settings = (over: { paused?: boolean; env?: Record<string, string>; filming?: string[] | null; demo?: boolean; port?: number; unreadableRows?: number } = {}): string => {
+  const settings = (over: { paused?: boolean; env?: Record<string, string>; filming?: string[] | null; demo?: boolean; port?: number; unreadableRows?: number; buildCredits?: BuildBudget | null } = {}): string => {
     const c = fakeContext({ config: fakeConfig(over.env), filming: { on: over.filming !== undefined && over.filming !== null, showQuoteFor: new Set(over.filming ?? []) } });
-    return renderSettings(fakeSnapshot({ paused: over.paused ?? false, unreadableRows: over.unreadableRows ?? 0 }), c, { demo: over.demo ?? false, port: over.port ?? 4321 }).main.text;
+    return renderSettings(fakeSnapshot({ paused: over.paused ?? false, unreadableRows: over.unreadableRows ?? 0, buildCredits: over.buildCredits ?? null }), c, { demo: over.demo ?? false, port: over.port ?? 4321 }).main.text;
   };
   const row = (text: string, label: string): string => new RegExp(`<div class="setting"><dt>${label}(?:<small>[A-Z_]+</small>)?</dt><dd>(.*?)</dd></div>`).exec(text)?.[1]?.replace(/<small>/g, " | ").replace(/<[^>]+>/g, "") ?? "(no such row)";
 
@@ -1098,6 +1141,28 @@ describe("Settings", () => {
     expect(row(text, "Builds a night")).toBe("At most 4");
     expect(row(text, "Apps are published to")).toContain("night-apps");
     expect(row(text, "Time zone")).toContain("America/Denver");
+  });
+
+  // The page used to show the limit and never what had been counted against it.
+  it("says what has been counted against the month's credit limit, as status does", () => {
+    const counted = (credits: number, limit: number, estimated = 0): string => {
+      const env = { MAX_BUILD_CREDITS_PER_MONTH: String(limit) };
+      const budget = buildBudget({ buildCreditsBetween: () => ({ credits, estimated, tries: 2 }) }, fakeConfig(env), NOW);
+      return row(settings({ env, buildCredits: budget }), "Kiro credits a month");
+    };
+    const rule = "Once this many are counted for the month, nothing more is built until the next one.";
+    expect(counted(0, 400)).toBe(`At most 400 | 0 of 400 counted this month. ${rule}`);
+    expect(counted(123.456, 400)).toBe(`At most 400 | 123.5 of 400 counted this month. ${rule}`);
+    expect(counted(10.38, 400, 4.09)).toBe(`At most 400 | 10.4 of 400 counted this month (4.1 of that is an estimate). ${rule}`);
+    // Reached: when building starts again, in the settings' zone.
+    expect(counted(10.38, 5, 4.09)).toBe("At most 5 | 10.4 of 5 counted this month (4.1 of that is an estimate): nothing more is built until Nov 1, or until this limit is raised.");
+    expect(counted(5, 5)).toBe("At most 5 | 5 of 5 counted this month: nothing more is built until Nov 1, or until this limit is raised.");
+    // A limit of 0 is a choice: next month changes nothing.
+    expect(counted(3.09, 0)).toBe("At most 0 | 3.1 counted this month. At 0, nothing is ever built.");
+    // An estimate too small to show is not mentioned.
+    expect(counted(1, 400, 0.04)).toBe(`At most 400 | 1 of 400 counted this month. ${rule}`);
+    // The ledger could not be read: the limit and the rule, and no number.
+    expect(row(settings({ buildCredits: null }), "Kiro credits a month")).toBe(`At most 400 | ${rule}`);
   });
 
   it("says whether asking and building are on from the database, and what .env starts them as", () => {

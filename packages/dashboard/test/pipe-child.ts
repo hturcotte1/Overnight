@@ -10,5 +10,5 @@ if (file === undefined || (what !== "lock" && what !== "database")) {
   console.error("usage: pipe-child.ts lock|database <file>");
   process.exit(2);
 }
-const answer = what === "lock" ? peekLock(file) : readDatabase(file, { dayStart: "2026-10-10T13:00:00.000Z", filming: { on: false, showQuoteFor: new Set() }, pausedByDefault: true });
+const answer = what === "lock" ? peekLock(file) : readDatabase(file, { dayStart: "2026-10-10T13:00:00.000Z", month: { start: "2026-10-01T06:00:00.000Z", end: "2026-11-01T06:00:00.000Z" }, filming: { on: false, showQuoteFor: new Set() }, pausedByDefault: true });
 console.log(JSON.stringify(answer));

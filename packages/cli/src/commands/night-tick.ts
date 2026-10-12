@@ -29,14 +29,17 @@ import {
   NIGHT_CHECK_FRESH_MS,
   noteChecked,
   noticedRun,
+  parseHhMm,
   readCheckedAt,
   readNightRun,
   SETTLE_MS,
   slotIsOpen,
+  slotTime,
   startedRun,
   waitingRun,
   WOKE_GAP_MS,
   writeNightRun,
+  zonedTimeToUtc,
 } from "@overnight/core";
 import type { ClockedJob, DataPaths, Logger, NightClockConfig, NightDecision, NightFacts, NightRun, NightWait, Store } from "@overnight/core";
 import type { Write } from "../output.ts";
@@ -287,4 +290,65 @@ export function startClockFromNow(deps: Pick<NightTickDeps, "job" | "store" | "c
   } finally {
     release();
   }
+}
+
+// ---------- for `status` and `preflight`: what the clock will do, and whether it is getting anywhere ----------
+
+/** The moment the job's time comes on the local day named (YYYY-MM-DD): that day's slot. */
+function slotOn(job: ClockedJob, day: string, config: NightClockConfig): Date {
+  const { hour, minute } = parseHhMm(slotTime(job, config));
+  const [year = 0, month = 1, date = 1] = day.split("-").map(Number);
+  return zonedTimeToUtc(year, month, date, hour, minute, config.timeZone);
+}
+
+/** The day after the one named, as YYYY-MM-DD. */
+function dayAfter(day: string): string {
+  const [year = 0, month = 1, date = 1] = day.split("-").map(Number);
+  // Date.UTC normalises day overflow (for example day 32).
+  return new Date(Date.UTC(year, month - 1, date + 1)).toISOString().slice(0, 10);
+}
+
+/**
+ * When the clock next starts the job by itself: the first of its times after `now` that its
+ * record does not already cover. `record` is the job's stored record (`readNightRun`).
+ *
+ * Usually that is simply the job's next time. It is a later one when the record is dated on that
+ * day or after it, which happens when BUILD_TIME or DELIVER_TIME is moved later on a day whose
+ * run has already happened, and when TZ or the Mac's clock is moved back: the clock starts
+ * nothing before the record's day, and on that day only a run that was noticed and never begun
+ * (`decideNight` in @overnight/core). So saying "today at the new time" would promise a run the
+ * clock will not start.
+ */
+export function nextStartAt(job: ClockedJob, now: Date, config: NightClockConfig, record: NightRun | null): Date {
+  const next = nextSlotAt(job, now, config);
+  if (record === null) return next;
+  // `next` is itself a slot's time, so the slot "at or before" it is that one: this is its day.
+  if (record.day < currentSlot(job, next, config).day) return next;
+  const stillToRun = record.startedAt === null && record.closedAt === null;
+  return slotOn(job, stillToRun ? record.day : dayAfter(record.day), config);
+}
+
+/**
+ * How long a due run may stand tried and not begun before it is said not to start. The job
+ * tries once a minute, so by then two or three tries have ended before the work began.
+ */
+export const NOT_STARTING_AFTER_MS = 180_000;
+
+/**
+ * True when the job keeps trying to start the run that is due and the work never begins: every
+ * try ends first (the builder will not load, say), with exit code 1 and a line in the job's log.
+ * Nothing is stored about such a try, on purpose: it is tried again a minute later. But the
+ * record shows it. A check writes the current slot's record open, started by nothing and waiting
+ * for nothing, only at the moment it hands over to the work (`runSlot`); the work then writes the
+ * start within moments, or the try has failed. So a record that still stands like that minutes
+ * later, with nobody holding the job's lock, is a run that does not start.
+ * `lockHeld` is whether some process holds the job's lock right now (null: could not tell).
+ */
+export function runNotStarting(input: { job: ClockedJob; now: Date; config: NightClockConfig; record: NightRun | null; lockHeld: boolean | null }): boolean {
+  const { record, now } = input;
+  if (record === null || record.startedAt !== null || record.closedAt !== null || record.waiting !== null) return false;
+  // A try is going right now (its work is still loading), or another run has the lock.
+  if (input.lockHeld === true) return false;
+  if (record.day !== currentSlot(input.job, now, input.config).day) return false;
+  return now.getTime() - Date.parse(record.noticedAt) > NOT_STARTING_AFTER_MS;
 }

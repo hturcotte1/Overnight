@@ -8,7 +8,7 @@
 // started, or where a tool is not installed.
 import { spawn, spawnSync } from "node:child_process";
 import type { ChildProcess, SpawnSyncReturns } from "node:child_process";
-import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -832,7 +832,7 @@ describe.skipIf(!canSandbox)("the Kiro Crew gateway profile, run for real on a m
 
     // Our own code, outside the sandbox: the one rename the night flow does when an idea is built.
     const sealed = sealWorkspace({ paths: dataPaths(w.data), ideaId: "idea_other", now: new Date("2026-10-10T07:40:00.000Z") });
-    expect(sealed).toEqual({ ok: true, dir: path.join(w.built, "idea_other"), movedAside: null });
+    expect(sealed).toEqual({ ok: true, dir: path.join(w.built, "idea_other"), movedAside: null, madeAnew: 1, notMadeAnew: 0 });
 
     const app = path.join(w.built, "idea_other", "index.html");
     expect(w.gateway.canRead(app)).toBe(false);
@@ -1161,16 +1161,21 @@ describe("the sandbox profiles: what section 11 and the Kiro CLI extras say", ()
     ]);
   });
 
-  it("refuse the dashboard's port by its number, the one core gives the dashboard, for connecting and for taking it", () => {
+  it("refuse the dashboard's port by its number, the one core gives the dashboard, for connecting and for taking it, on every address", () => {
     expect(DASHBOARD_PORT).toBe(4321);
     for (const profile of [GATEWAY, KIRO]) {
       const rules = rulesOf(profile);
-      expect(rules).toContain(`(deny network-outbound (remote ip "localhost:${DASHBOARD_PORT}"))`);
-      expect(rules).toContain(`(deny network-bind (local ip "localhost:${DASHBOARD_PORT}"))`);
+      expect(rules).toContain(`(deny network-outbound (remote ip "*:${DASHBOARD_PORT}"))`);
+      expect(rules).toContain(`(deny network-bind (local ip "*:${DASHBOARD_PORT}"))`);
+      // Never "localhost": that word leaves this Mac's own address open when it is written as an
+      // IPv6 one (::ffff:127.0.0.1), and by that spelling a job read the page and took the port.
+      expect(rules).not.toContain('"localhost:');
       // No other port is named: the gateway's own has to stay open, and a build serves its preview on one.
-      expect(rules.match(/"localhost:[^"]*"/g)).toEqual([`"localhost:${DASHBOARD_PORT}"`, `"localhost:${DASHBOARD_PORT}"`]);
+      expect(rules.match(/\((?:remote|local) ip "[^"]*"\)/g)).toEqual([`(remote ip "*:${DASHBOARD_PORT}")`, `(local ip "*:${DASHBOARD_PORT}")`]);
       // No new value is asked for: the port is written into the profile.
       expect(profileParams(profile)).not.toContain("PORT");
+      // The profile says what the rule costs, and why it is written this way.
+      expect(profile).toContain("::ffff:127.0.0.1");
     }
   });
 
@@ -1306,16 +1311,20 @@ function appsListed(box: Inside | null): number {
  * the workspace), and prints one word for each try: "connected", "bound", or the error's code.
  * Nothing has to listen on the dashboard's port: a refusal by the sandbox is EPERM, and a port
  * nobody listens on is ECONNREFUSED.
+ *
+ * Every way of writing "this Mac" is tried, because the sandbox judges the address as it was
+ * written. ::ffff:127.0.0.1 is 127.0.0.1 written as an IPv6 address: it reaches whatever listens
+ * on 127.0.0.1, and a rule written for "localhost" did not cover it (found Oct 11).
  */
 const PORT_TRIES = `
 const net = require("net");
 const [dashboard, free] = process.argv.slice(1).map(Number);
-const connect = (port) => new Promise((done) => { const s = net.connect(port, "127.0.0.1"); s.on("connect", () => { s.destroy(); done("connected"); }); s.on("error", (e) => done(e.code)); });
+const connect = (port, host) => new Promise((done) => { const s = net.connect(port, host); s.on("connect", () => { s.destroy(); done("connected"); }); s.on("error", (e) => done(e.code)); });
 const bind = (port, host) => new Promise((done) => { const s = net.createServer(); s.on("error", (e) => done(e.code)); s.listen(port, host, () => s.close(() => done("bound"))); });
 (async () => {
-  console.log("connect to the dashboard's port: " + await connect(dashboard));
-  for (const host of ["127.0.0.1", "0.0.0.0", "::1", "::"]) console.log("take the dashboard's port on " + host + ": " + await bind(dashboard, host));
-  console.log("connect to another port: " + await connect(free));
+  for (const host of ["127.0.0.1", "::1", "::ffff:127.0.0.1", "0.0.0.0"]) console.log("connect to the dashboard's port on " + host + ": " + await connect(dashboard, host));
+  for (const host of ["127.0.0.1", "0.0.0.0", "::1", "::", "::ffff:127.0.0.1", "::ffff:0.0.0.0"]) console.log("take the dashboard's port on " + host + ": " + await bind(dashboard, host));
+  for (const host of ["127.0.0.1", "::ffff:127.0.0.1"]) console.log("connect to another port on " + host + ": " + await connect(free, host));
   console.log("take a free port: " + await bind(0, "127.0.0.1"));
 })();
 `;
@@ -1331,32 +1340,59 @@ function listenOnFreePort(): Promise<number> {
   });
 }
 
-function portAnswers(w: World, box: Inside, freePort: number): string[] {
-  return box.run(w.binaries.inWorkspace, ["-e", PORT_TRIES, String(DASHBOARD_PORT), String(freePort)]).stdout.trim().split("\n");
+/** The tries, inside a profile or (with no box) outside any sandbox. `port` stands in for the dashboard's. */
+function portAnswers(w: World, box: Inside | null, freePort: number, port: number = DASHBOARD_PORT): string[] {
+  const args = ["-e", PORT_TRIES, String(port), String(freePort)];
+  const result = box === null ? spawnSync(w.binaries.inWorkspace, args, { encoding: "utf8", timeout: 15_000 }) : box.run(w.binaries.inWorkspace, args);
+  return result.stdout.trim().split("\n");
 }
 
 const REFUSED_BY_THE_SANDBOX = [
-  "connect to the dashboard's port: EPERM",
+  "connect to the dashboard's port on 127.0.0.1: EPERM",
+  "connect to the dashboard's port on ::1: EPERM",
+  "connect to the dashboard's port on ::ffff:127.0.0.1: EPERM",
+  "connect to the dashboard's port on 0.0.0.0: EPERM",
   "take the dashboard's port on 127.0.0.1: EPERM",
   "take the dashboard's port on 0.0.0.0: EPERM",
   "take the dashboard's port on ::1: EPERM",
   "take the dashboard's port on ::: EPERM",
-  "connect to another port: connected",
+  "take the dashboard's port on ::ffff:127.0.0.1: EPERM",
+  "take the dashboard's port on ::ffff:0.0.0.0: EPERM",
+  "connect to another port on 127.0.0.1: connected",
+  "connect to another port on ::ffff:127.0.0.1: connected",
   "take a free port: bound",
 ];
 
 async function expectDashboardPortClosed(w: World, box: Inside, profileFile: string): Promise<void> {
   const freePort = await listenOnFreePort();
   expect(freePort).toBeGreaterThan(1023);
+  // The test's own tool, outside any sandbox and with the listener's port standing in for the
+  // dashboard's: a page served on 127.0.0.1 only, as the dashboard serves, answers by three of
+  // the four spellings (nothing listens on ::1), and the port cannot be taken while it is served.
+  expect(portAnswers(w, null, freePort, freePort).slice(0, 5)).toEqual([
+    "connect to the dashboard's port on 127.0.0.1: connected",
+    "connect to the dashboard's port on ::1: ECONNREFUSED",
+    "connect to the dashboard's port on ::ffff:127.0.0.1: connected",
+    "connect to the dashboard's port on 0.0.0.0: connected",
+    "take the dashboard's port on 127.0.0.1: EADDRINUSE",
+  ]);
   expect(portAnswers(w, box, freePort)).toEqual(REFUSED_BY_THE_SANDBOX);
   // With the two rules taken back (a deliberately loosened copy) the sandbox no longer has a say:
   // whatever the answers are then (a dashboard may or may not be running on this Mac), none is EPERM.
-  const loose = w.loosened(profileFile, `(allow network-outbound (remote ip "localhost:${DASHBOARD_PORT}"))\n(allow network-bind (local ip "localhost:${DASHBOARD_PORT}"))`);
+  const loose = w.loosened(profileFile, `(allow network-outbound (remote ip "*:${DASHBOARD_PORT}"))\n(allow network-bind (local ip "*:${DASHBOARD_PORT}"))`);
   const loosened = portAnswers(w, loose, freePort);
-  expect(loosened).toHaveLength(7);
+  expect(loosened).toHaveLength(REFUSED_BY_THE_SANDBOX.length);
   expect(loosened.join("\n")).not.toContain("EPERM");
-  expect(loosened[0]).toMatch(/: (connected|ECONNREFUSED)$/);
-  for (const line of loosened.slice(1, 5)) expect(line).toMatch(/: (bound|EADDRINUSE)$/);
+  for (const line of loosened.slice(0, 4)) expect(line).toMatch(/: (connected|ECONNREFUSED)$/);
+  for (const line of loosened.slice(4, 10)) expect(line).toMatch(/: (bound|EADDRINUSE)$/);
+  // The rule as it was first written, for "localhost" only, is not enough: on a copy that has it
+  // in place of ours, this Mac's own address written as an IPv6 one gets through, to connect and
+  // to take the port. (The sandbox's answer is then the network's own, never EPERM.)
+  const localhostOnly = w.loosened(profileFile, `(allow network-outbound (remote ip "*:${DASHBOARD_PORT}"))\n(allow network-bind (local ip "*:${DASHBOARD_PORT}"))\n(deny network-outbound (remote ip "localhost:${DASHBOARD_PORT}"))\n(deny network-bind (local ip "localhost:${DASHBOARD_PORT}"))`);
+  const narrow = portAnswers(w, localhostOnly, freePort);
+  expect(narrow[0]).toBe("connect to the dashboard's port on 127.0.0.1: EPERM");
+  expect(narrow[2]).toMatch(/^connect to the dashboard's port on ::ffff:127\.0\.0\.1: (connected|ECONNREFUSED)$/);
+  expect(narrow[8]).toMatch(/^take the dashboard's port on ::ffff:127\.0\.0\.1: (bound|EADDRINUSE)$/);
 }
 
 describe.skipIf(!canSandbox)("section 11, run for real: other programs' socket files", () => {
@@ -1408,6 +1444,91 @@ describe.skipIf(!canSandbox)("section 11, run for real: the dashboard's port", (
     const w = world();
     await expectDashboardPortClosed(w, w.gateway, CREW_GATEWAY_SANDBOX_PROFILE);
   });
+});
+
+/**
+ * Stands in for a program a build left running. It opens the page before the seal and holds it.
+ * When told to go on (after the seal) it writes through the file it has open, and then tries, by
+ * names in the folder it was started in (which has moved with the seal), everything that would
+ * change what a name in the finished build leads to. It prints "worked" or "refused" for each.
+ * Usage: holder.pl <page> <file to make when ready> <file to wait for> <file to make when done>
+ */
+const HOLDER = `# Synthetic test tool, made for one test.
+use strict; use warnings;
+my ($page, $ready, $go, $done) = @ARGV;
+open(my $held, "+<", $page) or die "open: $!";
+open(my $r, ">", $ready) or die "ready: $!"; close $r;
+for (1 .. 400) { last if -e $go; select(undef, undef, undef, 0.05); }
+my $said = sub { print $_[0], ": ", ($_[1] ? "worked" : "refused"), "\\n" };
+seek($held, 0, 0); truncate($held, 0);
+my $wrote = print {$held} "CHANGED AFTER THE SEAL, THROUGH A FILE OPENED BEFORE IT";
+$said->("write through the file it had open", $wrote && close($held));
+$said->("open the page again by its name", open(my $again, "+<", $page));
+$said->("make a new file beside it", open(my $new, ">", "dist/planted.js"));
+$said->("give the page another name", rename($page, "dist/moved.html"));
+$said->("remove the page", unlink($page));
+$said->("put a link beside it", symlink("/etc/hosts", "dist/link"));
+$said->("make a folder beside it", mkdir("dist/planted"));
+$said->("move the folder it is in", rename("dist", "dist-moved"));
+open(my $d, ">", $done) or die "done: $!"; close $d;
+`;
+
+describe.skipIf(!canSandbox)("a finished build after the seal, run for real: what its build kept does not lead to its files", () => {
+  for (const [label, pick] of [
+    ["the Kiro CLI profile", (w: World) => w.kiro],
+    ["the gateway profile", (w: World) => w.gateway],
+  ] as const) {
+    it(
+      `${label}: a program the build left running, and a hard link it left where jobs may write, change nothing in the sealed build`,
+      () => {
+        const w = world("usual");
+        const box = pick(w);
+        const [holder, ready, go, done, said, kept] = ["holder.pl", "ready", "go", "done", "said.txt", "kept.html"].map((name) => path.join(w.buildTmp, name)) as [string, string, string, string, string, string];
+        writeFileSync(holder, HOLDER);
+        // Whatever happens below, the stand-in is told to go on, so that it ends.
+        cleanups.push(() => writeFileSync(go, ""));
+
+        // The build, inside the sandbox: it makes the page, a second name for it in the build
+        // jobs' temporary folder, and a program that outlives it with the page open.
+        expect(box.run("/bin/sh", ["-c", "mkdir dist && printf 'AS BUILT' > dist/index.html"]).status).toBe(0);
+        expect(box.run("/bin/ln", [path.join(w.workspace, "dist", "index.html"), kept]).status).toBe(0);
+        expect(box.run("/bin/sh", ["-c", `/usr/bin/perl "${holder}" dist/index.html "${ready}" "${go}" "${done}" > "${said}" 2>&1 < /dev/null &`]).status).toBe(0);
+        waitForFile(ready);
+
+        // Our own code, outside the sandbox: what the night flow does when the idea is built.
+        const sealed = sealWorkspace({ paths: dataPaths(w.data), ideaId: ID, now: new Date("2026-10-10T07:40:00.000Z") });
+        expect(sealed).toMatchObject({ ok: true, dir: path.join(w.built, ID), notMadeAnew: 0 });
+        const page = path.join(w.built, ID, "dist", "index.html");
+        expect(readFileSync(page, "utf8")).toBe("AS BUILT");
+
+        writeFileSync(go, "");
+        waitForFile(done);
+        expect(readFileSync(said, "utf8").trim().split("\n")).toEqual([
+          // The write goes through: nothing stops a program writing to a file it has open. It lands in the old file.
+          "write through the file it had open: worked",
+          // By name the finished build is closed, also to a program that was started inside it.
+          "open the page again by its name: refused",
+          "make a new file beside it: refused",
+          "give the page another name: refused",
+          "remove the page: refused",
+          "put a link beside it: refused",
+          "make a folder beside it: refused",
+          "move the folder it is in: refused",
+        ]);
+        // A later job writes through the second name. That works too, and lands in the old file as well.
+        // (Started in the temporary folder: the workspace it would have been started in is gone.)
+        expect(box.runIn(w.buildTmp, "/bin/sh", ["-c", `printf ' AND THROUGH THE HARD LINK' >> "${kept}"`]).status).toBe(0);
+        expect(readFileSync(kept, "utf8")).toBe("CHANGED AFTER THE SEAL, THROUGH A FILE OPENED BEFORE IT AND THROUGH THE HARD LINK");
+
+        // The sealed build is as it was built: the same words, the same names, one name for the page.
+        expect(readFileSync(page, "utf8")).toBe("AS BUILT");
+        expect(readdirSync(path.join(w.built, ID, "dist"))).toEqual(["index.html"]);
+        expect(lstatSync(page).nlink).toBe(1);
+        expect(existsSync(path.join(w.built, ID, "dist-moved"))).toBe(false);
+      },
+      FENCE_TEST_TIMEOUT_MS,
+    );
+  }
 });
 
 describe.skipIf(!canSandbox)("the Kiro CLI profile's two extras, run for real: the lists of running programs and apps", () => {

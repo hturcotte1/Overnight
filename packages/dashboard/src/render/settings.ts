@@ -1,8 +1,9 @@
 // Settings: every setting in plain words, whether asking and building are on, and which mode
 // this dashboard is in. The page changes nothing: settings live in the .env file.
+import type { BuildBudget } from "@overnight/core";
 import type { RenderContext, Snapshot, View } from "../types.ts";
 import { count, live } from "./components.ts";
-import { backendLabel, clockTime, homeTilde, plural } from "./format.ts";
+import { backendLabel, clockTime, credits, homeTilde, plural } from "./format.ts";
 import { html } from "./html.ts";
 import type { SafeHtml } from "./html.ts";
 
@@ -22,6 +23,26 @@ function clockWords(hhmm: string): string {
   if (match === null) return hhmm;
   const hour = Number(match[1]);
   return `${hour % 12 === 0 ? 12 : hour % 12}:${match[2]} ${hour < 12 ? "AM" : "PM"}`;
+}
+
+/** "Nov 1": the day a month ends on and the next one's count starts, in the settings' zone. */
+function monthDay(at: string, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone, month: "short", day: "numeric" }).format(new Date(at));
+}
+
+/**
+ * What goes under the month's credit limit: what has been counted against it so far, and what
+ * happens when it is reached. The count is the ledger's (the same one `overnight status` shows
+ * under "Build credits"); it is left out when the database could not be read.
+ */
+function creditsNote(budget: BuildBudget | null, limit: number, timeZone: string): string {
+  const rule = limit === 0 ? "At 0, nothing is ever built." : "Once this many are counted for the month, nothing more is built until the next one.";
+  if (budget === null) return rule;
+  const estimate = budget.estimated > 0 && credits(budget.estimated) !== "0" ? ` (${credits(budget.estimated)} of that is an estimate)` : "";
+  if (limit === 0) return `${credits(budget.counted)} counted this month${estimate}. ${rule}`;
+  const counted = `${credits(budget.counted)} of ${credits(limit)} counted this month${estimate}`;
+  if (budget.reached) return `${counted}: nothing more is built until ${monthDay(budget.monthEnd, timeZone)}, or until this limit is raised.`;
+  return `${counted}. ${rule}`;
 }
 
 /**
@@ -54,7 +75,7 @@ function settingRows(s: Snapshot, c: RenderContext): Record<keyof Config, Row> {
       label: "Kiro credits a month",
       env: "MAX_BUILD_CREDITS_PER_MONTH",
       value: `At most ${count(config.maxBuildCreditsPerMonth)}`,
-      note: config.maxBuildCreditsPerMonth === 0 ? "At 0, nothing is ever built." : "Once this many are counted for the month, nothing more is built until the next one.",
+      note: creditsNote(s.buildCredits, config.maxBuildCreditsPerMonth, config.timeZone),
     },
     buildBackend: { label: "Builder", env: "BUILD_BACKEND", value: `${backendLabel(config.buildBackend)} first`, note: `If it fails, ${backendLabel(other)} gets one try.` },
     buildSandbox: {

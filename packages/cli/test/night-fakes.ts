@@ -207,15 +207,30 @@ export function fakeLastResort() {
 
 /**
  * A made-up watch for the Mac having slept. No timer is set: the test says when the Mac "slept"
- * by calling `fire`, which is what the real watch's timer would do on its first late tick.
+ * by calling `fire`, which is what the real watch's timer would do on its first late tick. Or by
+ * calling `sleepUnnoticed`: the Mac slept and has woken, but the watch's timer has not ticked
+ * yet, so the sleep is only seen when the command asks the watch to look.
  */
 export function fakeSleepWatch() {
   const watches: Array<{ options: SleepWatchOptions; stopped: boolean }> = [];
+  let unnoticedMs: number | null = null;
+  const tell = (one: { options: SleepWatchOptions; stopped: boolean }, gapMs: number): void => {
+    if (one.stopped) return;
+    one.stopped = true;
+    one.options.onSleep(gapMs);
+  };
   const watch: WatchForSleep = (options) => {
     const one = { options, stopped: false };
     watches.push(one);
-    return { stop: () => void (one.stopped = true) };
+    return {
+      stop: () => void (one.stopped = true),
+      look: () => {
+        looks += 1;
+        if (unnoticedMs !== null) tell(one, unnoticedMs);
+      },
+    };
   };
+  let looks = 0;
   return {
     watch,
     /** How many watches were ever started. */
@@ -224,12 +239,12 @@ export function fakeSleepWatch() {
     watching: () => watches.filter((one) => !one.stopped).length,
     /** The Mac slept for `gapMs` (default two hours) and has just woken. Like the real watch, it fires once and is done. */
     fire: (gapMs = 2 * 3_600_000) => {
-      for (const one of watches) {
-        if (one.stopped) continue;
-        one.stopped = true;
-        one.options.onSleep(gapMs);
-      }
+      for (const one of watches) tell(one, gapMs);
     },
+    /** The Mac slept for `gapMs` and has just woken, and the watch's own timer has not come round yet. */
+    sleepUnnoticed: (gapMs = 2 * 3_600_000) => void (unnoticedMs = gapMs),
+    /** How often a command asked a watch to look at the clock right now. */
+    looks: () => looks,
   };
 }
 

@@ -11,14 +11,14 @@
 //     same command carries on from there when it is run again.
 import { BUILD_INTERRUPTED_REASON, errorSummary, formatLocal } from "@overnight/core";
 import type { Config, DataPaths, Idea, IdeaState, Logger, Store } from "@overnight/core";
-import { DeadlinePassed, MINUTE_MS, withDeadline } from "../deadline.ts";
+import { DeadlinePassed, MINUTE_MS, settleUnderLimit } from "../deadline.ts";
 import { watchLastResort } from "../last-resort.ts";
 import type { WatchLastResort } from "../last-resort.ts";
 import { oneLine } from "../output.ts";
 import type { Write } from "../output.ts";
 import { buildLockFile, deliverLockFile } from "../single-instance.ts";
 import type { ReleaseLock } from "../single-instance.ts";
-import { SLEPT_LINE, watchForSleep } from "../sleep-watch.ts";
+import { sleptLine, watchForSleep } from "../sleep-watch.ts";
 import type { WatchForSleep } from "../sleep-watch.ts";
 import { STOP_OVERDUE, STOP_SIGNAL_LINE, stopWaitText, watchStopSignals } from "../stop-signals.ts";
 import type { StopWatch, WatchStopSignals } from "../stop-signals.ts";
@@ -205,16 +205,24 @@ export async function buildNow<Backend>(ideaId: string, deps: BuildNowDeps<Backe
     },
   });
   // The Mac slept through part of the run: the step that is running is told to stop, as by a
-  // stop signal. A build stopped that way is tried again; a delivery picks up where it was.
+  // stop signal. Running the same command again builds the idea again, or delivers it from where
+  // it was.
   let slept = false;
   const sleepWatch = (deps.watchForSleep ?? watchForSleep)({
     onSleep: (gapMs) => {
       slept = true;
-      stepLogger.warn(SLEPT_LINE, { ideaId: idea.id, gapSeconds: Math.round(gapMs / 1000) });
+      stepLogger.warn(sleptLine("byHand"), { ideaId: idea.id, gapSeconds: Math.round(gapMs / 1000) });
       writeError("  Stopping: the Mac went to sleep during the run. Ending what is running first.");
       stop.stopWork();
     },
   });
+  // Asked when a step's last-resort limit passes: has the step been told to stop already? A Mac
+  // that slept past the limit wakes with the limit and the sleep watch due in the same instant,
+  // and the limit's timer can be the one that runs first. So the watch looks right now.
+  const toldToStop = (): boolean => {
+    sleepWatch.look?.();
+    return slept || stop.received() !== null;
+  };
   // An error nobody caught: one log line (in the log of the step that is running), the step is
   // told to stop, whatever a step holds right now (its lock, its bee program) is let go, exit 1.
   const held: HeldNow = new Set();
@@ -242,7 +250,7 @@ export async function buildNow<Backend>(ideaId: string, deps: BuildNowDeps<Backe
     hold = deps.keepAwake?.(stepLogger) ?? null;
     // ---------- step 1: build ----------
     if (plan === "build") {
-      const outcome = await buildStep(idea.id, deps, stop, held);
+      const outcome = await buildStep(idea.id, deps, { stop, toldToStop }, held);
       const stopped = stoppedCode();
       if (stopped !== null) return stopped;
       if (outcome === null) return 1;
@@ -262,7 +270,7 @@ export async function buildNow<Backend>(ideaId: string, deps: BuildNowDeps<Backe
 
     // ---------- step 2: check, publish, deliver ----------
     stepLogger = deps.deliverLogger;
-    const delivered = await deliverStep(idea.id, deps, stop, held);
+    const delivered = await deliverStep(idea.id, deps, { stop, toldToStop }, held);
     const stopped = stoppedCode();
     if (stopped !== null) return stopped;
     if (delivered === null) return 1;
@@ -288,6 +296,12 @@ export async function buildNow<Backend>(ideaId: string, deps: BuildNowDeps<Backe
 /** What the step that is running holds right now: how to let go of each thing (its lock, its bee program). */
 type HeldNow = Set<() => void>;
 
+/** How a step is told to stop: the command's stop watch, and whether it has already told the step to stop (asked when the step's last-resort limit passes). */
+interface Stopping {
+  stop: StopWatch;
+  toldToStop: () => boolean;
+}
+
 /** Let go of everything in `held`, each one tried on its own. For the last resort only: a step lets go of its own things when it ends. */
 function letGoOf(held: HeldNow): void {
   for (const letGo of [...held]) {
@@ -300,7 +314,7 @@ function letGoOf(held: HeldNow): void {
 }
 
 /** Run the build under the build lock. Null means it could not even start, or was cut short (the reason is already printed). */
-async function buildStep<Backend>(ideaId: string, deps: BuildNowDeps<Backend>, stop: StopWatch, held: HeldNow): Promise<BuildOutcome | null> {
+async function buildStep<Backend>(ideaId: string, deps: BuildNowDeps<Backend>, { stop, toldToStop }: Stopping, held: HeldNow): Promise<BuildOutcome | null> {
   const { store, config, paths, write, writeError } = deps;
   const logger = deps.buildLogger;
   let release: ReleaseLock | null;
@@ -322,8 +336,13 @@ async function buildStep<Backend>(ideaId: string, deps: BuildNowDeps<Backend>, s
     const chosen = chooseBackends(factories, { config, paths, logger });
     write(`1. Build: starting with ${chosen.primaryName} (${chosen.fallbackName} if that fails). This can take up to ${config.buildTimeoutMin} minutes each.`);
     logger.info(`${nameOf(deps)}: build starting`, { ideaId, primary: chosen.primaryName, fallback: chosen.fallbackName, sandboxMode: config.buildSandbox });
-    const building = withDeadline(factories.buildOne(ideaId, { store, config, paths, backends: chosen.backends, logger, signal: stop.signal, ...signInStep(factories, logger) }), deps.buildLimitMs ?? buildOneLimitMs(config), "The build");
-    const outcome = await stop.settle(building);
+    const outcome = await settleUnderLimit({
+      work: factories.buildOne(ideaId, { store, config, paths, backends: chosen.backends, logger, signal: stop.signal, ...signInStep(factories, logger) }),
+      stop,
+      limitMs: deps.buildLimitMs ?? buildOneLimitMs(config),
+      what: "The build",
+      toldToStop,
+    });
     if (outcome === STOP_OVERDUE) {
       logger.error(`${nameOf(deps)}: the builder did not stop in time after ${stop.received() === null ? "it was told to stop" : "the stop signal"}; ending anyway`, { ideaId, waitedFor: stopWaitText() });
       return null;
@@ -331,7 +350,8 @@ async function buildStep<Backend>(ideaId: string, deps: BuildNowDeps<Backend>, s
     logger.info(`${nameOf(deps)}: build finished`, { ideaId, ok: outcome.ok, backend: outcome.backend, ms: outcome.ms, stoppedBySignal: stop.received() ?? undefined });
     return outcome;
   } catch (error) {
-    // Past its last-resort limit: nobody is waiting any more, so tell the builder to stop too.
+    // Past its last-resort limit, with nothing having told it to stop: nobody is waiting any
+    // more, so tell the builder to stop too.
     if (error instanceof DeadlinePassed) stop.abort();
     logger.error(`${nameOf(deps)}: the build stopped on an error`, { ideaId, reason: errorSummary(error) });
     writeError(`  The build could not be run. ${errorSummary(error)}`);
@@ -343,7 +363,7 @@ async function buildStep<Backend>(ideaId: string, deps: BuildNowDeps<Backend>, s
 }
 
 /** Run the deliver step under the deliver lock. Null means it could not even start, or was cut short (the reason is already printed). */
-async function deliverStep<Backend>(ideaId: string, deps: BuildNowDeps<Backend>, stop: StopWatch, held: HeldNow): Promise<DeliverOutcome | null> {
+async function deliverStep<Backend>(ideaId: string, deps: BuildNowDeps<Backend>, { stop, toldToStop }: Stopping, held: HeldNow): Promise<DeliverOutcome | null> {
   const { store, config, paths, write, writeError } = deps;
   const logger = deps.deliverLogger;
   let release: ReleaseLock | null;
@@ -368,8 +388,13 @@ async function deliverStep<Backend>(ideaId: string, deps: BuildNowDeps<Backend>,
     bee = factories.createBee({ logger });
     write("2. Deliver: installing, building and testing a clean copy inside the sandbox, then publishing.");
     logger.info(`${nameOf(deps)}: deliver starting`, { ideaId });
-    const delivering = withDeadline(factories.deliverOne(ideaId, { store, bee, config, paths, logger, signal: stop.signal }), deps.deliverLimitMs ?? DELIVER_ONE_LIMIT_MS, "Checking and publishing");
-    const outcome = await stop.settle(delivering);
+    const outcome = await settleUnderLimit({
+      work: factories.deliverOne(ideaId, { store, bee, config, paths, logger, signal: stop.signal }),
+      stop,
+      limitMs: deps.deliverLimitMs ?? DELIVER_ONE_LIMIT_MS,
+      what: "Checking and publishing",
+      toldToStop,
+    });
     if (outcome === STOP_OVERDUE) {
       logger.error(`${nameOf(deps)}: the deliver step did not stop in time after ${stop.received() === null ? "it was told to stop" : "the stop signal"}; ending anyway`, { ideaId, waitedFor: stopWaitText() });
       return null;
@@ -377,7 +402,8 @@ async function deliverStep<Backend>(ideaId: string, deps: BuildNowDeps<Backend>,
     logger.info(`${nameOf(deps)}: deliver finished`, { ideaId, ok: outcome.ok, stoppedBySignal: stop.received() ?? undefined });
     return outcome;
   } catch (error) {
-    // Past its last-resort limit: nobody is waiting any more, so tell the deliver step to stop too.
+    // Past its last-resort limit, with nothing having told it to stop: nobody is waiting any
+    // more, so tell the deliver step to stop too.
     if (error instanceof DeadlinePassed) stop.abort();
     logger.error(`${nameOf(deps)}: deliver stopped on an error`, { ideaId, reason: errorSummary(error) });
     writeError(`  Checking and publishing could not be run. ${errorSummary(error)}`);

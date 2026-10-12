@@ -11,6 +11,8 @@
 //     read row by row and left half-read is an open read. Nothing but SQL happens inside the
 //     transaction, and the connection is closed whatever happens.
 //   - What was heard is never read. The only thing asked about a line is how long it is.
+//   - A table that an older database does not have yet (the ledger of what builds cost) is asked
+//     for by name first, and left alone when it is not there: this connection never upgrades.
 //
 // Every row is checked against its shape after the connection is closed. A row that does not fit
 // is left out and counted, never shown and never a reason to fail.
@@ -18,12 +20,12 @@
 // Filming is applied in this file, so what it hides never leaves it.
 import { lstatSync } from "node:fs";
 import Database from "better-sqlite3";
-import { IDEA_STATES, isBuildAwaitingRetry } from "@overnight/core";
-import type { IdeaEvent, IdeaState } from "@overnight/core";
+import { CLOCKED_JOBS, IDEA_STATES, isBuildAwaitingRetry, readCheckedAt, readLastNightRun, readNightRun } from "@overnight/core";
+import type { BuildCreditsTotal, ClockedJob, IdeaEvent, IdeaState } from "@overnight/core";
 import { z } from "zod";
 import { REHEARSAL_CONVERSATION_KEY } from "../log-messages.ts";
 import { IDEA_ID } from "../types.ts";
-import type { DashIdea, DbProblem, FilmingPolicy, HeardGroup, HeardOutcome, Said, Snapshot } from "../types.ts";
+import type { DashIdea, DbProblem, FilmingPolicy, HeardGroup, HeardOutcome, NightRecords, Said, Snapshot } from "../types.ts";
 import { sqliteWouldWait } from "./safe-read.ts";
 
 /** How long a look waits for the database before it gives up and says "busy". */
@@ -33,7 +35,8 @@ const MAX_HEARD_GROUPS = 6;
 // ---------- every statement the dashboard runs (test/db.test.ts reads this block) ----------
 // SQL-START
 const SQL = {
-  flags: "SELECT key, value FROM kv WHERE key IN ('paused', 'dashboard_demo')",
+  // The two flags, and what the night clock has stored. Its keys all start "night."; core names them and reads them.
+  smallValues: "SELECT key, value FROM kv WHERE key IN ('paused', 'dashboard_demo') OR key GLOB 'night.*'",
   ideas: "SELECT * FROM ideas ORDER BY created_at DESC, id DESC LIMIT 200",
   events: `SELECT id, idea_id, at, from_state, to_state, note FROM idea_events
     WHERE idea_id IN (SELECT id FROM ideas ORDER BY created_at DESC, id DESC LIMIT 200) ORDER BY id`,
@@ -47,6 +50,12 @@ const SQL = {
     FROM utterances WHERE spoken_at >= ? GROUP BY conversation_key ORDER BY last_at DESC LIMIT ${MAX_HEARD_GROUPS}`,
   lineLengths: "SELECT length(text) AS chars FROM utterances WHERE conversation_key = ? AND spoken_at >= ? ORDER BY spoken_at DESC, id DESC LIMIT 8",
   detectorRun: "SELECT outcome, reason FROM detector_runs WHERE id = ?",
+  // Counted over every idea there is, as the commands that refuse a rehearsal folder count them.
+  rehearsalIdeas: "SELECT COUNT(*) AS n FROM ideas WHERE conversation_key = ?",
+  ledgerThere: "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'build_costs'",
+  // The same sum the Store makes for the month's ceiling (core, store.ts, buildCreditsBetween).
+  creditsBetween: `SELECT COALESCE(SUM(credits), 0) AS credits, COALESCE(SUM(CASE WHEN measured = 0 THEN credits ELSE 0 END), 0) AS estimated, COUNT(*) AS tries
+    FROM build_costs WHERE at >= ? AND at < ?`,
 } as const;
 // SQL-END
 
@@ -77,21 +86,30 @@ interface RawLook {
   asks: unknown;
   detector: unknown[];
   conversations: Array<{ row: unknown; lengths: unknown[]; run: unknown }>;
+  rehearsals: unknown;
+  /** Null when this database has no ledger yet: nothing has been counted. */
+  credits: unknown;
 }
+
+/** When the look counts from: the page's day, and the calendar month the credit ceiling goes by. All UTC instants. */
+interface LookTimes { dayStart: string; month: { start: string; end: string } }
 
 function property(row: unknown, name: string): unknown {
   return typeof row === "object" && row !== null ? (row as Record<string, unknown>)[name] : undefined;
 }
 
-function look(db: Database.Database, dayStart: string): RawLook {
+function look(db: Database.Database, when: LookTimes): RawLook {
+  const { dayStart } = when;
   return db.transaction((): RawLook => {
     const version = db.pragma("user_version", { simple: true });
     // A file with nothing in it yet has no tables to ask.
-    if (version === 0) return { version, flags: [], ideas: [], events: [], lines: null, newest: null, asks: null, detector: [], conversations: [] };
+    if (version === 0) return { version, flags: [], ideas: [], events: [], lines: null, newest: null, asks: null, detector: [], conversations: [], rehearsals: null, credits: null };
     const conversations = db.prepare(SQL.conversations).all(dayStart);
+    // A database from before Milestone 3 has no ledger. Asking it for one would fail the whole look.
+    const ledgerThere = property(db.prepare(SQL.ledgerThere).get(), "n") === 1;
     return {
       version,
-      flags: db.prepare(SQL.flags).all(),
+      flags: db.prepare(SQL.smallValues).all(),
       ideas: db.prepare(SQL.ideas).all(),
       events: db.prepare(SQL.events).all(),
       lines: db.prepare(SQL.linesSince).get(dayStart),
@@ -107,6 +125,8 @@ function look(db: Database.Database, dayStart: string): RawLook {
           run: typeof lastRun === "number" ? db.prepare(SQL.detectorRun).get(lastRun) : undefined,
         };
       }),
+      rehearsals: db.prepare(SQL.rehearsalIdeas).get(REHEARSAL_CONVERSATION_KEY),
+      credits: ledgerThere ? db.prepare(SQL.creditsBetween).get(when.month.start, when.month.end) : null,
     };
   })();
 }
@@ -165,6 +185,8 @@ const detectorCountRow = z.object({ outcome: z.enum(["idea", "not_idea", "skippe
 const conversationRow = z.object({ key: z.string(), lines: count, first_at: z.string(), last_at: z.string(), waiting: count, last_run_id: orNull(z.number().int()) });
 const lengthRow = z.object({ chars: count });
 const runRow = z.object({ outcome: z.enum(["idea", "not_idea", "skipped", "failed"]), reason: orNull(z.string()) });
+const amount = z.number().nonnegative();
+const creditsRow = z.object({ credits: amount, estimated: amount, tries: count });
 
 /** Reads rows against a shape and keeps count of the ones that did not fit. */
 class RowReader {
@@ -247,7 +269,25 @@ function heardOutcome(waiting: number, run: z.output<typeof runRow> | null): Hea
   return (run.reason !== null && Object.hasOwn(SKIP_REASONS, run.reason) ? SKIP_REASONS[run.reason] : undefined) ?? "skipped";
 }
 
-type DatabaseData = Pick<Snapshot, "demoMark" | "paused" | "linesHeard" | "lastHeardAt" | "asks" | "detector" | "heard" | "ideas" | "events" | "unreadableRows">;
+/** What the database part of one look gives. The month's credits come as the ledger's bare sum (null: it could not be read); the look's caller holds them against the limit. */
+export type DatabaseData = Pick<Snapshot, "demoMark" | "paused" | "linesHeard" | "lastHeardAt" | "asks" | "detector" | "heard" | "ideas" | "events" | "rehearsalIdeas" | "nightClock" | "unreadableRows"> & {
+  creditsThisMonth: BuildCreditsTotal | null;
+};
+
+/** A sum of credits to three decimals, as the Store gives it: adding fractions leaves stray digits otherwise. */
+function toThreeDecimals(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+/**
+ * The night clock's stored values for one job, read by core's own readers from the rows of this
+ * look. A record that does not fit core's shape comes back as null, as it does for every other
+ * program: it is never shown and never a reason to fail.
+ */
+function nightRecords(values: ReadonlyMap<string, string>, job: ClockedJob): NightRecords {
+  const stored = { getValue: (key: string): string | null => values.get(key) ?? null };
+  return { record: readNightRun(stored, job), last: readLastNightRun(stored, job), checkedAt: readCheckedAt(stored, job) };
+}
 
 function shape(raw: RawLook, q: { filming: FilmingPolicy; pausedByDefault: boolean }): DatabaseData {
   const rows = new RowReader();
@@ -287,6 +327,9 @@ function shape(raw: RawLook, q: { filming: FilmingPolicy; pausedByDefault: boole
     });
   }
 
+  // No ledger yet: nothing has been counted, which is what the Store will say once it has made one.
+  const credits = raw.credits === null ? { credits: 0, estimated: 0, tries: 0 } : rows.one(creditsRow, raw.credits);
+
   return {
     demoMark: flags.get("dashboard_demo") === "true",
     // No row yet: nobody has run `overnight pause` or `resume`, so the setting decides (the same rule as core's).
@@ -298,6 +341,9 @@ function shape(raw: RawLook, q: { filming: FilmingPolicy; pausedByDefault: boole
     heard,
     ideas,
     events,
+    rehearsalIdeas: raw.rehearsals === null ? 0 : (rows.one(countRow, raw.rehearsals)?.n ?? 0),
+    creditsThisMonth: credits === null ? null : { credits: toThreeDecimals(credits.credits), estimated: toThreeDecimals(credits.estimated), tries: credits.tries },
+    nightClock: Object.fromEntries(CLOCKED_JOBS.map((job) => [job, nightRecords(flags, job)])) as Record<ClockedJob, NightRecords>,
     unreadableRows: rows.unreadable,
   };
 }
@@ -340,7 +386,7 @@ function problemOf(error: unknown, file: string): DbProblem {
  */
 export function readDatabase(
   file: string,
-  q: { dayStart: string; filming: FilmingPolicy; pausedByDefault: boolean },
+  q: LookTimes & { filming: FilmingPolicy; pausedByDefault: boolean },
   options?: { open?: (file: string) => Database.Database },
 ): { ok: true; data: DatabaseData } | { ok: false; problem: DbProblem } {
   // Looked at before anything is opened: a named pipe under the database's name (or beside it) would make SQLite wait for ever.
@@ -349,7 +395,7 @@ export function readDatabase(
   try {
     const db = (options?.open ?? openReadOnly)(file);
     try {
-      raw = look(db, q.dayStart);
+      raw = look(db, q);
     } finally {
       // Whatever happened: no connection, and so no read, outlives the look.
       db.close();

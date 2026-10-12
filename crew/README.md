@@ -32,7 +32,7 @@ The installed file must be an exact copy of `crew/build-skill.md`. Before every 
    **Kiro CLI:** Overnight first asks Kiro whether its two content-sharing settings are off, and refuses to build if either is not. It empties the build's temporary folder. Then it runs `kiro-cli chat --no-interactive` in the workspace, inside its own macOS sandbox (`packages/builder/sandbox/kiro-cli-build.sb`).
 3. The agent writes the app and, last of all, `BUILD_STATUS.json`.
 4. Overnight decides whether the build worked from three things only: `BUILD_STATUS.json` says `"built"`, that file was written after the build started, and `dist/index.html` exists. Kiro Crew's own "success" is ignored: it only means a session ended.
-5. Overnight records the idea as built and then moves the whole workspace to `~/.overnight/built/<idea id>/`. No build job can reach that folder (see "Finished builds" below).
+5. Overnight records the idea as built, then moves the whole workspace to `~/.overnight/built/<idea id>/` and makes every file in it anew. No build job can reach that folder, or those files (see "Finished builds" below).
 6. In the morning the deliver step rebuilds the app from a clean copy of that folder, runs its own browser test, and only then publishes.
 
 The agent never runs the `overnight` command, never sees the database, and never publishes.
@@ -67,11 +67,19 @@ So a finished build does not stay there:
 
 - As soon as an idea is recorded as built, its workspace is renamed to `~/.overnight/built/<idea id>/` (`packages/builder/src/seal.ts`). Whichever builder made it.
 - Both sandbox profiles close all of the data folder except `workspaces/`, `tmp/build/` and `tmp/build-probe/`, so nothing in `built/` can be read, listed, written, run or moved by a build job. The sandbox check tries it every night (below).
-- The order is "record, then move". If Overnight is killed between the two, the app is still in `workspaces/` and the morning uses it from there.
+- **Then every file in it is made anew.** A rename moves the same files, and a build can have kept two other ways to them (shown for real in both profiles, Oct 11): a program it left running that had a file open, and a hard link it made in a folder jobs may write, which any later job could write through. So each plain file is copied and the copy put in the old one's place, with the same name, permissions and time. The file the morning reads is then one that no build ever had open and no second name leads to. What a build kept still works, on the old file, which nothing reads any more.
+- That takes a second or three (10,000 files, 590 MB: 1.3 to 2.8 seconds). It has 8 seconds; installed packages (`node_modules`) are done last, and a file over 1 GB is left alone. The log says how many files were made anew.
+- The order is "record, then move, then make anew". If Overnight is killed before the move, the app is still in `workspaces/` and the morning uses it from there. If it is killed while the files are being made anew, the app is whole and in `built/`; the files not yet done are as the build left them.
 - Before an idea is built again, an older finished build of it is renamed to `built/<idea id>.old-<time>`, never deleted. If that cannot be done, the build is not started.
 - If the move itself fails, the idea stays built, the log has an error ("a finished build could not be moved out of the builders' reach"), and the morning uses the app where it is.
+- If the move works but a file cannot be made anew (out of time, over 1 GB, or marked "locked" by its build so that nothing can be put in its place), the idea stays built and the log has an error with the count ("some of its files could not be made anew"). The build that made those files could still change them, so look before trusting that app.
 
-What this does not cover: a workspace while it is being built, and the `<idea id>.old-<time>` folders that failed tries leave in `workspaces/`. A Kiro Crew job can still reach those.
+What this does not cover:
+
+- A workspace while it is being built, and the `<idea id>.old-<time>` folders that failed tries leave in `workspaces/`. A Kiro Crew job can still reach those.
+- The moment between the move and a file being made anew (a second or so). A change made then is the same as one made just before the build finished: it is part of what the morning tests.
+- A file the seal could not make anew, as above.
+- `BUILD_SANDBOX=crew`. There Overnight's profile is not in force and a job can write in `built/` directly.
 
 ### What builds cost
 
@@ -79,8 +87,10 @@ Overnight counts what its builds use, and stops building for the month at a ceil
 
 - **One row per try that started an agent.** A build that needed both builders has two rows. A try that could not start has none.
 - **Kiro Crew's own figure when there is one.** After the run is over (cancelled, if it had to be) Overnight reads Kiro Crew's usage file for that job. This goes for a build that failed, ran past its time limit or was stopped as much as for one that worked.
-- **An estimate when there is none:** 2 credits for each minute the agent ran, at least 0.1. Kiro CLI gives no figure, so its builds are always estimated. The agent's time is never taken to be longer than the build's time limit: if the Mac slept in the middle of a build, the hours asleep are not the agent's.
-- A figure no build could have used (negative, or above 100,000) is not believed; the estimate is counted in its place. Kiro Crew's usage file is one a build job can write.
+- **An estimate when there is none:** 2 credits for each minute the agent ran, at least 0.1. Kiro CLI gives no figure, so its builds are always estimated.
+- **Time asleep is not the agent's.** If the Mac sleeps in the middle of a build (the lid closed on battery), the build is stopped when it wakes and tried again another night. Its agent's time is the time it was at work, to within 5 seconds: a build slept through for six hours, two minutes in, counts as two minutes (about 4 credits), not as a full-length try (90). Overnight sees a sleep the way its own sleep watch does: a timer that ticks every 5 seconds arrives a minute or more late (`packages/builder/src/slept.ts`). As a second bound, the agent's time is never taken to be longer than the build's time limit.
+- **Kiro Crew's figure is believed only when the try could have used it:** at most 10 credits for each minute the agent ran (the real builds used 1.3 to 1.7 a minute), and at most 2 for a try of a few seconds. Anything above that, or negative, is not believed, and the estimate is counted in its place with a warning in the log. A line in the usage file that takes credits away is not counted at all. The reason: Kiro Crew's usage file is one a build job can write. Before this rule one added line closed the month, and a figure of 100,000 closed it so that no setting could open it again.
+- What that leaves a job able to do: make the count too low, by rewriting its own lines in that file, and make one try count for up to 10 credits a minute (465 for a try that ran its full 45 minutes). The first is bounded by `MAX_BUILDS_PER_NIGHT`, which limits what is really spent whatever the count says. The second is one try's worth, which raising the ceiling opens again.
 - **Asked before each idea, never during one.** One build can take the month over the line; the next one waits. `overnight build` then says "this month's build credits are used up (… of … counted)", and `build-now` refuses with the same words. Nothing buzzes.
 - **It fails open.** If the count cannot be read or written, that is logged as an error and the build goes ahead. A fault in the ceiling must not cost a night.
 
@@ -134,12 +144,12 @@ A build **cannot**:
 
 - read, list or run anything else in the home folder: `~/Documents`, `~/Desktop`, `~/Downloads`, `~/Library` (browser profiles, other programs' data), `~/.claude` and `/private/tmp/claude-<number>` (Claude Code's session records and scratch folders), `~/.ssh`, `~/.config`, this repo
 - read Overnight's data folder (apart from the folders named above) or the repo's `.env`
-- read, list, write, run or move anything among the finished builds in `~/.overnight/built/`
+- read, list, write, run or move anything among the finished builds in `~/.overnight/built/`, or change a finished build's files through a file it kept open or a hard link it made beforehand (see "Finished builds")
 - run `gh`, or the Bee program that is installed on this Mac
 - write where programs are run from or settings are read from: `~/.local`, the Node.js folder, `~/.kiro/crew-venv`, `~/.kiro/crew-python`, `/Applications`, this repo, `~/.zshenv` and the other shell start-up files, `~/.gitconfig`, `~/.config`, `~/Library/LaunchAgents`, `~/Library/Preferences`, `~/.kiro/settings`, Kiro's steering, skills and prompts folders, `~/.npm/_npx`
 - use the Keychain, the clipboard or the ssh agent, start other apps, run `launchctl`
 - connect to another program's socket file (the way a terminal that keeps sessions, a container tool, an editor or a password manager's helper is reached). Every socket file is refused, except the system's name service (without it no host name can be looked up) and those inside folders a build may write anyway: the temporary folder, its workspace and Kiro CLI's own folder, and with Kiro Crew also Kiro Crew's own folders, the other workspaces and the sandbox check's results folder
-- connect to Overnight's dashboard (port 4321 on this Mac), or take that port for itself
+- connect to Overnight's dashboard (port 4321 on this Mac), or take that port for itself. The port is refused by its number on every address, however the address is written. (A rule for "localhost" alone left `::ffff:127.0.0.1` open, which is 127.0.0.1 written as an IPv6 address: found and closed on Oct 11.) The price is that a build cannot reach port 4321 on any other machine either
 - Kiro CLI only: list the running programs, or the running apps
 - send a signal to, look at, or read the command line of any program it did not start itself. (This mattered most while the detector handed Kiro what was just said as a command-line argument. Since Oct 10 it sends that text on standard input instead; a listener started before the change keeps the old way until it is restarted.)
 

@@ -9,14 +9,14 @@
 // that one place.
 import { errorSummary } from "@overnight/core";
 import type { BeeGateway, Config, DataPaths, Logger, Store } from "@overnight/core";
-import { DeadlinePassed, MINUTE_MS, withDeadline } from "../deadline.ts";
+import { DeadlinePassed, MINUTE_MS, settleUnderLimit } from "../deadline.ts";
 import { watchLastResort } from "../last-resort.ts";
 import type { WatchLastResort } from "../last-resort.ts";
 import { oneLine } from "../output.ts";
 import type { Write } from "../output.ts";
 import { deliverLockFile } from "../single-instance.ts";
 import type { ReleaseLock } from "../single-instance.ts";
-import { SLEPT_LINE, watchForSleep } from "../sleep-watch.ts";
+import { sleptLine, watchForSleep } from "../sleep-watch.ts";
 import type { WatchForSleep } from "../sleep-watch.ts";
 import { STOP_OVERDUE, STOP_SIGNAL_LINE, stopWaitText, watchStopSignals } from "../stop-signals.ts";
 import type { WatchStopSignals } from "../stop-signals.ts";
@@ -189,10 +189,17 @@ export async function deliver(deps: DeliverDeps): Promise<number> {
   const sleepWatch = (deps.watchForSleep ?? watchForSleep)({
     onSleep: (gapMs) => {
       slept = true;
-      logger.warn(SLEPT_LINE, { gapSeconds: Math.round(gapMs / 1000) });
+      logger.warn(sleptLine("deliver"), { gapSeconds: Math.round(gapMs / 1000) });
       stop.stopWork();
     },
   });
+  // Asked when the morning's last-resort limit passes: has the deliver step been told to stop
+  // already? A Mac that slept past the limit wakes with the limit and the sleep watch due in the
+  // same instant, and the limit's timer can be the one that runs first. So the watch looks right now.
+  const toldToStop = (): boolean => {
+    sleepWatch.look?.();
+    return slept || stop.received() !== null;
+  };
   let bee: ReturnType<DeliverFactories["createBee"]> | null = null;
   // An error nobody caught: one log line, the deliver step is told to stop, any bee program still
   // running is stopped, the lock goes, exit 1.
@@ -216,8 +223,13 @@ export async function deliver(deps: DeliverDeps): Promise<number> {
     started = true;
     hold = deps.keepAwake?.(logger) ?? null;
     logger.info("overnight deliver starting", { dataDir: paths.root, timeZone: config.timeZone, deliverTime: config.deliverTime });
-    const morning = withDeadline(factories.runDeliver({ store, bee, config, paths, logger, signal: stop.signal }), deps.limitMs ?? deliverLimitMs(store), "The morning's deliver");
-    const result = await stop.settle(morning);
+    const result = await settleUnderLimit({
+      work: factories.runDeliver({ store, bee, config, paths, logger, signal: stop.signal }),
+      stop,
+      limitMs: deps.limitMs ?? deliverLimitMs(store),
+      what: "The morning's deliver",
+      toldToStop,
+    });
     if (result === STOP_OVERDUE) {
       logger.error(`overnight deliver: the deliver step did not stop in time after ${slept && stop.received() === null ? "the Mac's sleep was noticed" : "the stop signal"}; ending anyway`, { waitedFor: stopWaitText() });
       deps.writeError(`"overnight deliver" was told to stop, and the deliver step had not stopped ${stopWaitText()} later. Ending anyway.`);
@@ -229,7 +241,8 @@ export async function deliver(deps: DeliverDeps): Promise<number> {
     // After a sleep the code is still 0: nothing went wrong that a person has to fix.
     return stop.exitCode() ?? 0;
   } catch (error) {
-    // Past its last-resort limit: nobody is waiting any more, so tell the deliver step to stop too.
+    // Past its last-resort limit, with nothing having told it to stop: nobody is waiting any
+    // more, so tell the deliver step to stop too.
     if (error instanceof DeadlinePassed) stop.abort();
     logger.error("overnight deliver stopped on an error", { reason: errorSummary(error) });
     deps.writeError(`"overnight deliver" could not finish. ${errorSummary(error)}`);

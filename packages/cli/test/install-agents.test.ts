@@ -25,6 +25,7 @@
 // night clock under real launchd with throwaway jobs. Here nothing of it is run but its own
 // refusals and the text it would hand to macOS: no job is loaded.
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -865,6 +866,14 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
         store.close();
       ' "$REPO/packages/core/src/index.ts" "$DATA/overnight.db" "$1"
     }
+    # What the gateway job's own copy of the sandbox profile holds at this moment: the first
+    # letters of its checksum, or "none". And how many new copies are waiting beside it.
+    profile_now() {
+      local copy="$DATA/sandbox/crew-gateway.sb" sum=none waiting
+      if [[ -f "$copy" ]]; then sum="$(/usr/bin/shasum <"$copy" | cut -c1-12)"; fi
+      waiting="$(find "$DATA/sandbox" -name '.crew-gateway.sb.*' 2>/dev/null | wc -l | tr -d ' ')"
+      printf '%s copy=%s waiting=%s\\n' "$1" "$sum" "$waiting" >>"$CALLS.profile"
+    }
     launchctl() {
       printf '%s\\n' "$*" >>"$CALLS"
       printf 'launchctl %s\\n' "$*" >>"$ORDER"
@@ -872,7 +881,9 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
       case "$1" in
         bootout)
           job="\${2##*/}"
-          echo down >"$STATE.$job"
+          profile_now "stop $job"
+          # A job that will not stop stays on macOS's list however often it is asked.
+          if [[ "$MODE" != "wont-stop" ]]; then echo down >"$STATE.$job"; fi
           ;;
         bootstrap)
           if [[ "$MODE" == "bootstrap-fails" ]]; then
@@ -880,6 +891,7 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
             return 5
           fi
           job="$(basename -- "$3" .plist)"
+          profile_now "start $job"
           if [[ "$MODE" != "not-listed" ]]; then echo up >"$STATE.$job"; fi
           if [[ "$MODE" != "not-listed" && "$MODE" != "never-looks" ]] && [[ "$job" == com.overnight.build || "$job" == com.overnight.deliver ]]; then
             first_look "\${job##*.}" "$3"
@@ -977,9 +989,11 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
     kirocrew: string[];
     /** The sandbox commands macOS was "asked" to load (a stand-in answered), one per line. */
     sandboxChecks: string[];
+    /** What the gateway job's copy of the sandbox profile held each time a job was stopped or started: "stop com.overnight.crew copy=<checksum or none> waiting=<new copies beside it>". */
+    profileAt: string[];
   }
 
-  type DryRunMode = "ok" | "job-dies" | "bootstrap-fails" | "pause-fails" | "bad-setting" | "not-listed" | "never-looks";
+  type DryRunMode = "ok" | "job-dies" | "bootstrap-fails" | "pause-fails" | "bad-setting" | "not-listed" | "never-looks" | "wont-stop";
 
   interface DryRunOptions {
     mode?: DryRunMode;
@@ -1088,7 +1102,7 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
       ...options.env,
     });
     const linesOf = (file: string) => (existsSync(file) ? readFileSync(file, "utf8").trimEnd().split("\n") : []);
-    return { ...ran, home: fakeHome, plist: jobSettingsFile(fakeHome), dataDir, calls: linesOf(callsFile), cli: linesOf(cliCallsFile), order: linesOf(`${callsFile}.order`), kirocrew: linesOf(kirocrewCalls), sandboxChecks: linesOf(`${callsFile}.sandbox`) };
+    return { ...ran, home: fakeHome, plist: jobSettingsFile(fakeHome), dataDir, calls: linesOf(callsFile), cli: linesOf(cliCallsFile), order: linesOf(`${callsFile}.order`), kirocrew: linesOf(kirocrewCalls), sandboxChecks: linesOf(`${callsFile}.sandbox`), profileAt: linesOf(`${callsFile}.profile`) };
   }
   /** The name the tests written for the listener alone know it by. */
   const dryRunInstall = dryRun;
@@ -1327,6 +1341,8 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
     expect(existsSync(skillOf(run))).toBe(false);
     // None of the folders `install crew` makes for the gateway was made either.
     for (const folder of [path.join(run.home, "workplace"), path.join(run.home, ".kiro", "sessions"), path.join(run.home, ".npm")]) expect(existsSync(folder), folder).toBe(false);
+    // Nor was the gateway job given a copy of the sandbox profile, or even a folder for one.
+    expect(existsSync(path.join(run.dataDir, "sandbox")), "the folder for the gateway's copy of the sandbox profile").toBe(false);
     expect(run.stdout).not.toContain("Installed.");
   };
   /** The folders in the home folder a sandboxed gateway writes in but cannot create: Kiro Crew's work folder, Kiro CLI's sessions, npm's cache. */
@@ -1513,8 +1529,13 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
         const place = word.includes("=/") ? word.slice(word.indexOf("=") + 1) : word;
         if (place.startsWith("/")) expect(realpathSync(place), word).toBe(place);
       }
-      // macOS was asked, before anything was changed, whether that very command loads.
-      expect(run.sandboxChecks).toEqual([command.join(" ")]);
+      // macOS was asked, before anything was changed, whether that command loads: the same words,
+      // with the repo's own profile in the copy's place. The copy is only made once the old
+      // gateway has stopped, and what is there until then may be an older one.
+      expect(run.sandboxChecks).toEqual([command.map((word, index) => (index === 2 ? realpathSync(MADE_UP_PROFILE()) : word)).join(" ")]);
+      expect(readFileSync(installedProfile(run), "utf8")).toBe(readFileSync(MADE_UP_PROFILE(), "utf8"));
+      expect(mode(installedProfile(run))).toBe(0o600);
+      expect(mode(path.dirname(installedProfile(run)))).toBe(0o700);
       // Only the one setting this mode needs was read (agent.sandbox means nothing in this mode),
       // nothing was set, and after the start the gateway was asked whether it is there.
       expect(run.kirocrew).toEqual(["config get agent.sandbox_allow_unsandboxed_exec", "status"]);
@@ -1595,8 +1616,8 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
       `CREW_HOME=${realHome}/.kiro/crew`,
     ]);
     expect(realpathSync(path.join(run.dataDir, "tmp", "build"))).toBe(`${realpathSync(run.dataDir)}/tmp/build`);
-    // That very line was the one macOS was asked to load, before anything was changed.
-    expect(run.sandboxChecks).toEqual([args.join(" ")]);
+    // That line was the one macOS was asked to load, before anything was changed, with the repo's own file in the copy's place.
+    expect(run.sandboxChecks).toEqual([args.map((word, index) => (index === 2 ? realpathSync(wider) : word)).join(" ")]);
 
     // A name the installer does not know: stop, and say which.
     const odd = path.join(scratch, "odd profile.sb");
@@ -1691,6 +1712,130 @@ describeOnMac("scripts/install-agents.sh install (dry run: nothing real is insta
     });
     expect(again.status).toBe(1);
     expect(again.stderr).toContain("install-agents: Could not read Kiro Crew's settings");
+  }, 60_000);
+
+  it("replaces the gateway job's copy of the sandbox profile at one moment only: after the old gateway has stopped and before the new one starts, and never when it refuses", () => {
+    const sum = (file: string) => createHash("sha1").update(readFileSync(file)).digest("hex").slice(0, 12);
+    const crewLines = (run: DryRun, from: number) => run.profileAt.slice(from).filter((line) => line.includes(label("crew")));
+    const waiting = (run: DryRun) => readdirSync(path.dirname(installedProfile(run))).filter((name) => name !== "crew-gateway.sb");
+
+    // A first install, of every job: no copy yet when the old gateway is "stopped", the repo's when the new one starts.
+    const installed = dryRun({ jobs: [] });
+    expect(installed.status).toBe(0);
+    const older = sum(MADE_UP_PROFILE());
+    expect(crewLines(installed, 0)).toEqual([`stop ${label("crew")} copy=none waiting=1`, `start ${label("crew")} copy=${older} waiting=0`]);
+    expect(sum(installedProfile(installed))).toBe(older);
+    expect(waiting(installed)).toEqual([]);
+
+    // The repo's rules change (a merge). Until `install crew` has run through, the gateway that is
+    // running, and one macOS starts again by itself, must go on behind the copy it has.
+    const newer = path.join(scratch, "newer rules.sb");
+    writeFileSync(newer, [";; Made up for the tests: the made-up profile with one more rule.", "(version 1)", "(allow default)", '(define home (param "HOME"))', '(define data-dir (param "DATA_DIR"))', '(define repo (param "REPO"))', '(deny file-write* (subpath "/made-up/nowhere"))', ""].join("\n"));
+    expect(sum(newer)).not.toBe(older);
+    const withNewRules = { DRY_PROFILE: newer };
+    let seen = installed.profileAt.length;
+    const untouchedBy = (run: DryRun, why: string) => {
+      expect(sum(installedProfile(run)), why).toBe(older);
+      expect(waiting(run), why).toEqual([]);
+      expect(run.profileAt.slice(seen), why).toEqual([]);
+      expect(readFileSync(plistOf(run, "crew"), "utf8"), why).toBe(crewSettings);
+    };
+    const crewSettings = readFileSync(plistOf(installed, "crew"), "utf8");
+
+    // The nightly build is at work: the gateway and the build were named together, and the build's turn refuses.
+    const busy = dryRun({ jobs: ["crew", "build"], into: installed, env: { ...withNewRules, DRY_BUSY_LOOKS: "all" } });
+    expect(busy.status).toBe(1);
+    expect(busy.stderr).toBe("install-agents: The nightly build is running right now, and installing would cut it off. Run this again when it has finished. Nothing was changed.\n");
+    untouchedBy(busy, "refused because the build is at work");
+    // The same with no job named, which is every job.
+    const busyAll = dryRun({ jobs: [], into: installed, env: { ...withNewRules, DRY_BUSY_LOOKS: "all" } });
+    expect(busyAll.status).toBe(1);
+    expect(busyAll.stderr).toContain("Nothing was changed.");
+    untouchedBy(busyAll, "refused with every job named");
+
+    // The gateway alone, and macOS will not load the new rules.
+    const wontLoad = dryRun({ jobs: ["crew"], into: installed, env: { ...withNewRules, DRY_PROFILE_LOADS: "no" } });
+    expect(wontLoad.status).toBe(1);
+    expect(wontLoad.stderr).toContain("the profile does not load, or wants a value it was not given.");
+    expect(wontLoad.stderr).toContain("Nothing was changed.");
+    // It was the new rules macOS was asked about, not the copy the gateway is running behind.
+    expect(wontLoad.sandboxChecks.at(-1)?.startsWith(`/usr/bin/sandbox-exec -f ${realpathSync(newer)} -D `)).toBe(true);
+    untouchedBy(wontLoad, "refused because the profile does not load");
+
+    // Rules that ask for a value the installer cannot fill.
+    const odd = path.join(scratch, "odd newer rules.sb");
+    writeFileSync(odd, ["(version 1)", "(allow default)", '(define home (param "HOME"))', '(define other (param "SOMEWHERE_ELSE"))', ""].join("\n"));
+    const unknown = dryRun({ jobs: ["crew"], into: installed, env: { DRY_PROFILE: odd } });
+    expect(unknown.status).toBe(1);
+    expect(unknown.stderr).toContain("Nothing was changed.");
+    untouchedBy(unknown, "refused because of a value it cannot fill");
+
+    // The old gateway will not stop: the new copy had been written beside the old one, and is thrown away.
+    const stuck = dryRun({ jobs: ["crew"], into: installed, mode: "wont-stop", env: withNewRules });
+    expect(stuck.status).toBe(1);
+    expect(stuck.stderr).toBe("install-agents: The old copy of the crew job would not stop. Its settings file was not changed. Try again in a minute.\n");
+    expect(stuck.profileAt.slice(seen)).toEqual([`stop ${label("crew")} copy=${older} waiting=1`]);
+    seen = stuck.profileAt.length;
+    untouchedBy(stuck, "the old gateway would not stop");
+
+    // A restart is not an install: the gateway comes back behind the copy it has.
+    const restarted = dryRun({ jobs: ["crew"], into: installed, action: "cmd_restart", env: withNewRules });
+    expect(restarted.status).toBe(0);
+    expect(restarted.profileAt.slice(seen)).toEqual([`stop ${label("crew")} copy=${older} waiting=0`, `start ${label("crew")} copy=${older} waiting=0`]);
+    seen = restarted.profileAt.length;
+    untouchedBy(restarted, "a restart");
+
+    // The install that runs through: the old gateway is stopped behind the old copy, and the new one starts behind the new.
+    const done = dryRun({ jobs: ["crew"], into: installed, env: withNewRules });
+    expect(done.stderr).toBe("");
+    expect(done.status).toBe(0);
+    expect(done.profileAt.slice(seen)).toEqual([`stop ${label("crew")} copy=${older} waiting=1`, `start ${label("crew")} copy=${sum(newer)} waiting=0`]);
+    expect(readFileSync(installedProfile(done), "utf8")).toBe(readFileSync(newer, "utf8"));
+    expect(mode(installedProfile(done))).toBe(0o600);
+    expect(waiting(done)).toEqual([]);
+  }, 180_000);
+
+  it("looks at the place for that copy before anything is changed, and never writes it through a symbolic link", () => {
+    const elsewhere = path.join(scratch, "a file the copy must not reach.txt");
+    writeFileSync(elsewhere, "made up: not a sandbox profile\n");
+    // The copy's own name is a link.
+    const linkedFile = dryRun({
+      jobs: ["crew"],
+      before: (dataDir) => {
+        mkdirSync(path.join(dataDir, "sandbox"), { recursive: true });
+        symlinkSync(elsewhere, path.join(dataDir, "sandbox", "crew-gateway.sb"));
+      },
+    });
+    expect(linkedFile.status).toBe(1);
+    expect(linkedFile.stderr).toContain("crew-gateway.sb is a symbolic link, so the sandbox profile cannot be kept there. Remove it, then run install again. Nothing was changed.");
+    expect(linkedFile.calls).toEqual([]);
+    expect(existsSync(plistOf(linkedFile, "crew"))).toBe(false);
+    expect(readFileSync(elsewhere, "utf8")).toBe("made up: not a sandbox profile\n");
+    // Its folder is a link.
+    const outside = path.join(scratch, "a folder the copy must not land in");
+    mkdirSync(outside, { recursive: true });
+    const linkedFolder = dryRun({
+      jobs: ["crew"],
+      before: (dataDir) => {
+        mkdirSync(dataDir, { recursive: true });
+        symlinkSync(outside, path.join(dataDir, "sandbox"));
+      },
+    });
+    expect(linkedFolder.status).toBe(1);
+    expect(linkedFolder.stderr).toContain("is not a plain folder (a symbolic link?), so the sandbox profile cannot be kept there. Nothing was changed.");
+    expect(linkedFolder.calls).toEqual([]);
+    expect(readdirSync(outside)).toEqual([]);
+    // In crew mode there is no copy, so its place is not looked at.
+    const crewMode = dryRun({
+      jobs: ["crew"],
+      sandbox: "crew",
+      before: (dataDir) => {
+        mkdirSync(dataDir, { recursive: true });
+        symlinkSync(outside, path.join(dataDir, "sandbox"));
+      },
+    });
+    expect(crewMode.status).toBe(0);
+    expect(readdirSync(outside)).toEqual([]);
   }, 60_000);
 
   it("refuses a second gateway: one already listening on the port that is not our own job", () => {

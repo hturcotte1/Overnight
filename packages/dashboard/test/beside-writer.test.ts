@@ -27,6 +27,8 @@ const LEAST_LOOKS = 200;
 const WAL_LIMIT_BYTES = 8 * 1024 * 1024;
 const SLOWEST_WRITE_MS = 250;
 const NOT_FILMING: FilmingPolicy = { on: false, showQuoteFor: new Set() };
+/** The month the look sums the credit ledger over. Any month will do here: the writer adds nothing to the ledger. */
+const MONTH = { start: "2026-10-01T06:00:00.000Z", end: "2026-11-01T06:00:00.000Z" };
 
 interface WriterResult { lines: number; ideas: number; moves: number; errors: number; worstMs: number; walBytes: number }
 
@@ -104,7 +106,7 @@ describe("looking at the database beside a writer", () => {
     let last = { lines: 0, ideas: 0, events: 0, asks: 0 };
     const until = Date.now() + 60_000;
     while ((looks < LEAST_LOOKS || writer.written() < LEAST_LINES) && Date.now() < until) {
-      const read = readDatabase(file, { dayStart, filming: NOT_FILMING, pausedByDefault: true });
+      const read = readDatabase(file, { dayStart, month: MONTH, filming: NOT_FILMING, pausedByDefault: true });
       looks += 1;
       if (!read.ok) problems.push(read.problem);
       else {
@@ -147,7 +149,7 @@ describe("looking at the database beside a writer", () => {
     }
 
     // And a last look, with the writer gone, sees everything it wrote.
-    const after = readDatabase(file, { dayStart, filming: NOT_FILMING, pausedByDefault: true });
+    const after = readDatabase(file, { dayStart, month: MONTH, filming: NOT_FILMING, pausedByDefault: true });
     expect(after.ok && after.data.linesHeard).toBe(result.lines);
     expect(after.ok && after.data.ideas.length).toBe(Math.min(200, result.ideas));
   }, 90_000);

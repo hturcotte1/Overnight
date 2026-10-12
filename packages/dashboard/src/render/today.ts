@@ -145,11 +145,16 @@ function askedLane(s: Snapshot, c: RenderContext, k: Clock): SafeHtml {
 
 function tonightLane(queue: TonightQueue, k: Clock): SafeHtml {
   const building = queue.rows.some((row) => row.when === "building");
-  const words = (when: "building" | "tonight" | "later"): string => (when === "building" ? "building" : when === "later" ? "waits for another night" : building ? "next" : "tonight");
+  // A build that is running late still takes its rows, and soon. Anything else in the way means the rows wait, for as long as it lasts.
+  const late = !queue.paused && queue.hold?.why === "late";
+  const held = !queue.paused && queue.hold !== null && !late;
+  const words = (when: "building" | "tonight" | "later"): string => (when === "building" ? "building" : held ? "waiting" : when === "later" ? "waits for another night" : building || late ? "next" : "tonight");
   const rows = queue.rows.map((row, index) => html`<li class="row"><span class="num">${index + 1}</span>${titleLink(row.idea)}<small>${words(row.when)}</small></li>`);
-  const paused = queue.paused ? html`<p class="lane__note lane__note--warn">Paused: nothing will be built</p>` : null;
-  const list = rows.length === 0 ? (paused === null ? html`<p class="lane__note">Nothing is waiting to be built.</p>` : null) : html`<ul class="rows">${rows}</ul>`;
-  return html`<h2>Tonight's build</h2><div class="lane__big">${clockTime(queue.at, k.timeZone)}</div><p class="lane__sub">${count(queue.rows.length)} to build · up to ${count(queue.limit)} a night</p>${paused}${list}`;
+  // Why nothing will be built, or not at its time. That a build is late is only worth saying while something waits for it.
+  const why = queue.paused ? "Paused: nothing will be built" : held || (late && rows.length > 0) ? (queue.hold?.note ?? null) : null;
+  const note = why === null ? null : html`<p class="lane__note lane__note--warn">${why}</p>`;
+  const list = rows.length === 0 ? (note === null ? html`<p class="lane__note">Nothing is waiting to be built.</p>` : null) : html`<ul class="rows">${rows}</ul>`;
+  return html`<h2>Tonight's build</h2><div class="lane__big">${clockTime(queue.at, k.timeZone)}</div><p class="lane__sub">${count(queue.rows.length)} to build · up to ${count(queue.limit)} a night</p>${note}${list}`;
 }
 
 // ---------- The other ideas ----------

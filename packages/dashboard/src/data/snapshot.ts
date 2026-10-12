@@ -1,20 +1,34 @@
 // One look at everything a page needs: the database, the three locks and the ends of the two
 // job logs. Nothing is kept open between looks, and nothing here writes or throws.
 import path from "node:path";
-import { nextLocalTime, previousLocalTime } from "@overnight/core";
-import type { Config, DataPaths } from "@overnight/core";
+import { buildBudget, localMonthBounds, nextLocalTime, previousLocalTime } from "@overnight/core";
+import type { BuildBudget, BuildCreditsTotal, Config, DataPaths } from "@overnight/core";
 import { DELIVER_LEAD_MINUTES } from "../log-messages.ts";
 import { minusMinutes } from "../render/format.ts";
 import type { DashIdea, DbProblem, FilmingPolicy, IdeaExtras, Snapshot } from "../types.ts";
 import { readDatabase } from "./db.ts";
+import type { DatabaseData } from "./db.ts";
 import { hasScreenshot, readBrief, readBuildNotes, readReport, workspaceMarks } from "./files.ts";
 import { readRunning } from "./locks.ts";
 import { readLogTail } from "./logs.ts";
 import { readBuildLog, readDeliverLog } from "./night-log.ts";
 
 /** What the database part of a look is when the database could not be read. */
-function nothingRead(pausedByDefault: boolean): Pick<Snapshot, "demoMark" | "paused" | "linesHeard" | "lastHeardAt" | "asks" | "detector" | "heard" | "ideas" | "events" | "unreadableRows"> {
-  return { demoMark: false, paused: pausedByDefault, linesHeard: 0, lastHeardAt: null, asks: 0, detector: { idea: 0, not_idea: 0, skipped: 0, failed: 0 }, heard: [], ideas: [], events: new Map(), unreadableRows: 0 };
+function nothingRead(pausedByDefault: boolean): DatabaseData {
+  const noRecords = { record: null, last: null, checkedAt: null };
+  return {
+    demoMark: false, paused: pausedByDefault, linesHeard: 0, lastHeardAt: null, asks: 0, detector: { idea: 0, not_idea: 0, skipped: 0, failed: 0 }, heard: [], ideas: [], events: new Map(),
+    rehearsalIdeas: 0, creditsThisMonth: null, nightClock: { build: noRecords, deliver: noRecords }, unreadableRows: 0,
+  };
+}
+
+/**
+ * The month's sum held against MAX_BUILD_CREDITS_PER_MONTH by core's own rule (build-budget.ts),
+ * so the page calls the month used up exactly when the builder does. The sum was read for the
+ * same month, of the same moment, that core works out here. Null when it could not be read.
+ */
+function budgetOf(total: BuildCreditsTotal | null, config: Config, now: Date): BuildBudget | null {
+  return total === null ? null : buildBudget({ buildCreditsBetween: () => total }, config, now);
 }
 
 /**
@@ -25,7 +39,9 @@ export function collectSnapshot(d: { config: Config; paths: DataPaths; filming: 
   const { config, paths, now } = d;
   // "Since 7:00 AM": the day on the page starts at the latest DELIVER_TIME (story.ts, overnightDayStart).
   const dayStart = previousLocalTime(now, config.deliverTime, config.timeZone).at.toISOString();
-  const read = readDatabase(paths.database, { dayStart, filming: d.filming, pausedByDefault: config.pausedByDefault });
+  const month = localMonthBounds(now, config.timeZone);
+  const read = readDatabase(paths.database, { dayStart, month: { start: month.start.toISOString(), end: month.end.toISOString() }, filming: d.filming, pausedByDefault: config.pausedByDefault });
+  const { creditsThisMonth, ...data } = read.ok ? read.data : nothingRead(config.pausedByDefault);
   const build = readBuildLog(readLogTail(path.join(paths.logs, "build.log")));
   const deliver = readDeliverLog(readLogTail(path.join(paths.logs, "deliver.log")));
   return {
@@ -34,7 +50,8 @@ export function collectSnapshot(d: { config: Config; paths: DataPaths; filming: 
     staleSince: null,
     running: readRunning(paths.root),
     dayStart,
-    ...(read.ok ? read.data : nothingRead(config.pausedByDefault)),
+    ...data,
+    buildCredits: budgetOf(creditsThisMonth, config, now),
     build: build.byIdea,
     deliver: deliver.byIdea,
     buildRuns: build.runs,

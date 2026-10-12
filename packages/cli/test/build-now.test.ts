@@ -9,7 +9,7 @@ import { BUILD_CUT_OFF_REASON, BUILD_NOW_BUILD_BUSY, BUILD_NOW_DELIVER_BUSY, BUI
 import type { BuildNowDeps } from "../src/commands/build-now.ts";
 import { addIdea, at, capture, fixedNow, moveIdea, SAMPLE_IDEAS, testContext } from "./helpers.ts";
 import { LAST_RESORT_LINE } from "../src/last-resort.ts";
-import { SLEPT_LINE } from "../src/sleep-watch.ts";
+import { sleptLine } from "../src/sleep-watch.ts";
 import { aborted, collectingLogger, fakeBuild, fakeDeliver, fakeKeepAwake, fakeLastResort, fakeLocks, fakeSleepWatch, fakeStopSignals, never } from "./night-fakes.ts";
 import type { BuildFakes, DeliverFakes, FakeBackend } from "./night-fakes.ts";
 
@@ -655,7 +655,8 @@ describe("overnight build-now: a page not seen live, a hold on the Mac's sleep, 
       "  Stopping: the Mac went to sleep during the run. Ending what is running first.",
       '  Stopped, because the Mac went to sleep during the run. The idea is now "build_failed". Run the same command again to carry on.',
     ]);
-    expect(t.buildLog.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: SLEPT_LINE, ideaId: t.idea.id, gapSeconds: 1800 }]);
+    expect(t.buildLog.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: sleptLine("byHand"), ideaId: t.idea.id, gapSeconds: 1800 }]);
+    expect(sleptLine("byHand")).toBe("the Mac went to sleep during the run; what was in progress was stopped. Running the same command again carries on from there");
     expect(t.deliverLog.lines).toEqual([]);
     expect(t.out.text()).not.toContain("Link:");
     expect(t.stop.handlers()).toBe(0);
@@ -677,7 +678,7 @@ describe("overnight build-now: a page not seen live, a hold on the Mac's sleep, 
       '  Stopped, because the Mac went to sleep during the run. The idea is now "built". Run the same command again to carry on.',
     ]);
     // The line is in the log of the step that was running.
-    expect(t.deliverLog.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: SLEPT_LINE, ideaId: t.idea.id, gapSeconds: 7200 }]);
+    expect(t.deliverLog.lines.filter((line) => line.level === "warn")).toMatchObject([{ message: sleptLine("byHand"), ideaId: t.idea.id, gapSeconds: 7200 }]);
     expect(t.buildLog.lines).toEqual([]);
   });
 
@@ -701,6 +702,104 @@ describe("overnight build-now: a page not seen live, a hold on the Mac's sleep, 
     expect(hung.order.at(-1)).toBe("release build.lock");
     expect(hung.buildLog.lines.at(-1)).toMatchObject({ level: "error", message: "overnight build-now: the builder did not stop in time after it was told to stop; ending anyway" });
     expect(hung.deliver.loads).toBe(0);
+  });
+
+  // A sleep that outlasts a step's own last-resort limit: on waking, the sleep watch and the limit
+  // come due in the same instant, and the step still needs its few seconds to stop.
+  describe("when the sleep outlasted a step's last-resort limit", () => {
+    const LIMIT_MS = 20;
+    const longerThanTheLimit = () => new Promise((resolve) => setTimeout(resolve, LIMIT_MS + 60));
+
+    it("waits for the builder, which gets to record where the build stood: no \"could not be run\", and the command carries on later", async () => {
+      for (const order of ["the watch's timer first", "the limit's timer first"] as const) {
+        const woke = { now: () => {} };
+        const t = setUp({ buildLimitMs: LIMIT_MS });
+        const build = fakeBuild({
+          order: t.order,
+          one: async (ideaId, deps) => {
+            t.context.store.transitionIdea(ideaId, "building", { buildBackend: "kiro-crew", buildStartedAt: at(0) }, at(0));
+            woke.now();
+            await aborted(deps.signal);
+            await longerThanTheLimit();
+            // What the real builder writes once its Kiro Crew job is cancelled. It needs the database open.
+            t.context.store.transitionIdea(ideaId, "build_failed", { failureReason: "the build was stopped" }, at(5));
+            t.order.push("builder came back");
+            return { ok: false, backend: "kiro-crew", ms: 5_000, reason: "the build was stopped", couldNotStart: false };
+          },
+        });
+        t.deps.loadBuildFactories = build.load;
+        woke.now = order === "the watch's timer first" ? () => t.sleep.fire() : () => t.sleep.sleepUnnoticed();
+        expect(await t.run(), order).toBe(1);
+        expect(t.order, order).toEqual(["lock build.lock", "load builder", `buildOne ${t.idea.id}`, "builder came back", "release build.lock"]);
+        expect(t.err.lines, order).toEqual([
+          "  Stopping: the Mac went to sleep during the run. Ending what is running first.",
+          '  Stopped, because the Mac went to sleep during the run. The idea is now "build_failed". Run the same command again to carry on.',
+        ]);
+        expect(t.buildLog.text(), order).not.toContain("past its time limit");
+        expect(t.buildLog.lines.filter((line) => line.level === "error"), order).toEqual([]);
+        expect(t.deliver.loads, order).toBe(0);
+      }
+    });
+
+    it("waits for the deliver step the same way, and the idea stays where it was", async () => {
+      for (const order of ["the watch's timer first", "the limit's timer first"] as const) {
+        const woke = { now: () => {} };
+        const steps: string[] = [];
+        const deliver = fakeDeliver({
+          one: async (_ideaId, deps) => {
+            woke.now();
+            await aborted(deps.signal);
+            await longerThanTheLimit();
+            steps.push("deliver step came back");
+            return { ok: false, reason: "made-up: stopped half way", stopped: true };
+          },
+        });
+        const t = setUp({ state: "built", deliver, deliverLimitMs: LIMIT_MS });
+        woke.now = order === "the watch's timer first" ? () => t.sleep.fire() : () => t.sleep.sleepUnnoticed();
+        expect(await t.run(), order).toBe(1);
+        expect(steps, order).toEqual(["deliver step came back"]);
+        expect(t.order.slice(-2), order).toEqual(["dispose bee", "release deliver.lock"]);
+        expect(t.err.lines, order).toEqual([
+          "  Stopping: the Mac went to sleep during the run. Ending what is running first.",
+          '  Stopped, because the Mac went to sleep during the run. The idea is now "built". Run the same command again to carry on.',
+        ]);
+        expect(t.deliverLog.text(), order).not.toContain("past its time limit");
+      }
+    });
+
+    it("waits the same way when a step's limit passes while it is stopping after a stop signal: the signal's code, and no \"could not be run\"", async () => {
+      const told = { now: () => {} };
+      const t = setUp({ buildLimitMs: LIMIT_MS });
+      const build = fakeBuild({
+        order: t.order,
+        one: async (ideaId, deps) => {
+          t.context.store.transitionIdea(ideaId, "building", { buildBackend: "kiro-crew", buildStartedAt: at(0) }, at(0));
+          told.now();
+          await aborted(deps.signal);
+          await longerThanTheLimit();
+          t.context.store.transitionIdea(ideaId, "build_failed", { failureReason: "the build was stopped" }, at(5));
+          t.order.push("builder came back");
+          return { ok: false, backend: "kiro-crew", ms: 5_000, reason: "the build was stopped", couldNotStart: false };
+        },
+      });
+      t.deps.loadBuildFactories = build.load;
+      told.now = () => t.stop.send("SIGINT");
+      expect(await t.run()).toBe(130);
+      expect(t.order).toEqual(["lock build.lock", "load builder", `buildOne ${t.idea.id}`, "builder came back", "release build.lock"]);
+      expect(t.err.lines).toEqual(["  Stopping: told to stop. Ending what is running first.", '  Stopped. The idea is now "build_failed".']);
+      expect(t.buildLog.text()).not.toContain("past its time limit");
+    });
+
+    it("a limit that passes with no sleep and no stop signal is still the last resort for each step", async () => {
+      const hung = setUp({ build: fakeBuild({ one: () => never() }), buildLimitMs: LIMIT_MS });
+      expect(await hung.run()).toBe(1);
+      expect(hung.sleep.looks()).toBe(1);
+      expect(hung.err.lines.at(-1)).toBe("  The build could not be run. The build was still going after 0 minutes, which is past its time limit.");
+      const stuck = setUp({ state: "built", deliver: fakeDeliver({ one: () => never() }), deliverLimitMs: LIMIT_MS });
+      expect(await stuck.run()).toBe(1);
+      expect(stuck.sleep.looks()).toBe(1);
+      expect(stuck.err.lines.at(-1)).toBe("  Checking and publishing could not be run. Checking and publishing was still going after 0 minutes, which is past its time limit.");
+    });
   });
 });
 

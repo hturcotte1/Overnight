@@ -1,13 +1,15 @@
 // Synthetic test data: all text in this file is made up for the tests. None of it is Bee data.
 // The night flow on an in-memory store, temp folders and scripted backends.
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { appendFileSync, closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import path from "node:path";
 import { budgetReachedText, buildBudget, finishedBuildDir, HIGHEST_BUILD_CREDIT_LIMIT } from "@overnight/core";
 import type { Config, DataPaths, Store } from "@overnight/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildOne, failInterruptedBuilds, INTERRUPTED_REASON, runBuildNight, SKIPPED_NOTHING_APPROVED, SKIPPED_PAUSED, STOPPED_REASON } from "../src/index.ts";
+import { BUILD_SKILL_FILE, buildOne, createKiroCliBackend, createKiroCrewBackend, failInterruptedBuilds, INTERRUPTED_REASON, runBuildNight, SKIPPED_NOTHING_APPROVED, SKIPPED_PAUSED, STOPPED_REASON } from "../src/index.ts";
 import type { BuildBackend, BuildDeps, BuildJob, BuildOutcome } from "../src/index.ts";
-import { approvedIdea, collectingLogger, fakeBackend, leaveBuild, memoryStore, MINUTE, movableClock, SECOND, T0, tempDir, testConfig, testPaths } from "./helpers.ts";
+import { MOST_CREDITS_FOR_A_SHORT_TRY, MOST_CREDITS_PER_AGENT_MINUTE, mostBelievableCredits } from "../src/night.ts";
+import { approvedIdea, clockedSleptWatch, collectingLogger, FakeCrew, fakeBackend, HOUR, leaveBuild, memoryStore, MINUTE, movableClock, recordingRunner, reply, SECOND, T0, tempDir, testConfig, testPaths } from "./helpers.ts";
 import type { Clock, FakeBackend } from "./helpers.ts";
 
 interface Rig {
@@ -685,6 +687,67 @@ describe("a finished build is moved out of the build jobs' reach", () => {
     expect(errors[0]).toContain('"level":"error"');
     expect(errors[0]).toContain(`"ideaId":"${idea.id}"`);
   });
+
+  it("makes the build's files anew: a file the builder kept open, and a hard link it left where jobs may write, do not lead to the sealed app", async () => {
+    let keptOpen = -1;
+    let keptLink = "";
+    const rig = makeRig({
+      primary: fakeBackend("kiro-crew", [
+        (job) => {
+          leaveBuild(job.workspace);
+          const built = path.join(job.workspace, "dist", "index.html");
+          writeFileSync(built, "<!doctype html><title>as built</title>");
+          // What a build can keep: the page open for writing (in a program it leaves running),
+          // and a second name for it in the build jobs' temporary folder.
+          keptOpen = openSync(built, "r+");
+          keptLink = path.join(rig.paths.buildTmp, "kept.html");
+          mkdirSync(rig.paths.buildTmp, { recursive: true });
+          linkSync(built, keptLink);
+          return { ok: true, backend: "kiro-crew", ms: 1 };
+        },
+      ]),
+    });
+    const idea = approvedIdea(rig.store);
+    try {
+      expect((await runBuildNight(rig.deps)).built).toEqual([idea.id]);
+      writeSync(keptOpen, "CHANGED AFTER THE SEAL, THROUGH A FILE OPENED BEFORE IT", 0);
+      appendFileSync(keptLink, "CHANGED AFTER THE SEAL, THROUGH THE HARD LINK");
+    } finally {
+      closeSync(keptOpen);
+    }
+    expect(page(path.join(rig.paths.built, idea.id))).toBe("<!doctype html><title>as built</title>");
+    expect(readdirSync(rig.paths.built)).toEqual([idea.id]);
+    const moved = rig.lines.map((entry) => JSON.parse(entry) as Record<string, unknown>).filter((entry) => entry.message === "finished build moved out of the builders' reach");
+    expect(moved).toHaveLength(1);
+    expect(moved[0]).toMatchObject({ level: "info", ideaId: idea.id, filesMadeAnew: 3 });
+    expect(rig.lines.join("\n")).not.toContain("could not be made anew");
+  });
+
+  // macOS's "locked" mark on a file: it can be read, but nothing can be put in its place.
+  it.skipIf(process.platform !== "darwin")("leaves the idea built, with an error in the log, when some of its files could not be made anew", async () => {
+    const rig = makeRig({
+      primary: builds("kiro-crew", "made tonight", (job) => {
+        mkdirSync(path.join(job.workspace, "src"));
+        writeFileSync(path.join(job.workspace, "src", "locked.js"), "made up: locked\n");
+        expect(spawnSync("/usr/bin/chflags", ["uchg", path.join(job.workspace, "src", "locked.js")]).status).toBe(0);
+      }),
+    });
+    const idea = approvedIdea(rig.store);
+    const locked = path.join(rig.paths.built, idea.id, "src", "locked.js");
+    try {
+      expect(await runBuildNight(rig.deps)).toEqual({ built: [idea.id], failed: [], skipped: "" });
+      // Moved all the same: that is where the morning finds it.
+      expect(finishedBuildDir(rig.paths, idea.id)).toBe(path.join(rig.paths.built, idea.id));
+      expect(readFileSync(locked, "utf8")).toBe("made up: locked\n");
+      const errors = rig.lines.map((entry) => JSON.parse(entry) as Record<string, unknown>).filter((entry) => entry.message === "a finished build was moved out of the builders' reach, but some of its files could not be made anew; its own build could still change those");
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({ level: "error", ideaId: idea.id, files: 1, filesMadeAnew: 3 });
+      expect(rig.lines.join("\n")).not.toContain('"message":"finished build moved out of the builders\' reach"');
+    } finally {
+      spawnSync("/usr/bin/chflags", ["nouchg", locked]);
+      spawnSync("/usr/bin/chflags", ["nouchg", path.join(rig.paths.workspaces, idea.id, "src", "locked.js")]);
+    }
+  });
 });
 
 /** October 2026 in Boise, the month every test below runs in unless it says otherwise. */
@@ -805,19 +868,20 @@ describe("what builds cost: one row in the month's ledger for each try that star
   });
 
   it("does not believe a figure no build could have used, and counts the estimate in its place", async () => {
-    for (const figure of [-1, Number.NaN, Number.POSITIVE_INFINITY, HIGHEST_BUILD_CREDIT_LIMIT + 0.5, 1e306]) {
-      // The figure comes from a file a build job can write.
+    // The figure comes from a file a build job can write. The agent ran 3 minutes: at 10 credits
+    // a minute, 30 is the most it is believed about. 100,000 is the figure that closed a month
+    // for good when it was believed (the highest limit there is; found Oct 11).
+    for (const figure of [-1, Number.NaN, Number.POSITIVE_INFINITY, HIGHEST_BUILD_CREDIT_LIMIT + 0.5, 1e306, HIGHEST_BUILD_CREDIT_LIMIT, 60_000, 400, 30.1]) {
       const rig = makeRig({ primary: costly("kiro-crew", [{ ok: true, credits: figure, agentMs: 3 * MINUTE }]) });
       const idea = approvedIdea(rig.store);
       expect((await runBuildNight(rig.deps)).built, String(figure)).toEqual([idea.id]);
       expect(counted(rig.store), String(figure)).toEqual({ credits: 6, estimated: 6, tries: 1 });
-      expect(rig.lines.filter((line) => line.includes("was not one a build could have used; counting an estimate instead")), String(figure)).toHaveLength(1);
+      const warned = rig.lines.map((entry) => JSON.parse(entry) as Record<string, unknown>).filter((entry) => entry.message === "a builder's own credit figure was not one a build could have used; counting an estimate instead");
+      expect(warned, String(figure)).toHaveLength(1);
+      // The line says what would have been believed. The figure itself, from a file a job can write, is not logged.
+      expect(warned[0], String(figure)).toMatchObject({ level: "warn", ideaId: idea.id, backend: "kiro-crew", mostBelieved: 30 });
+      expect(Object.keys(warned[0] ?? {}).sort(), String(figure)).toEqual(["at", "backend", "ideaId", "level", "message", "mostBelieved", "name"]);
     }
-    // The highest figure the ledger takes is believed.
-    const atTheTop = makeRig({ primary: costly("kiro-crew", [{ ok: true, credits: HIGHEST_BUILD_CREDIT_LIMIT, agentMs: MINUTE }]) });
-    approvedIdea(atTheTop.store);
-    await runBuildNight(atTheTop.deps);
-    expect(counted(atTheTop.store)).toEqual({ credits: HIGHEST_BUILD_CREDIT_LIMIT, estimated: 0, tries: 1 });
 
     // With no time to estimate from either, nothing is counted, and the log says so.
     const nothingToGoOn = makeRig({ primary: costly("kiro-crew", [{ ok: true, credits: -1 }]) });
@@ -825,6 +889,118 @@ describe("what builds cost: one row in the month's ledger for each try that star
     expect((await runBuildNight(nothingToGoOn.deps)).built).toHaveLength(1);
     expect(counted(nothingToGoOn.store).tries).toBe(0);
     expect(nothingToGoOn.lines.filter((line) => line.includes("could not count what a build try cost"))).toHaveLength(1);
+  });
+
+  it("believes a figure up to 10 credits for each minute the agent ran, and up to 2 for a try of a few seconds", async () => {
+    expect([MOST_CREDITS_PER_AGENT_MINUTE, MOST_CREDITS_FOR_A_SHORT_TRY]).toEqual([10, 2]);
+    expect(mostBelievableCredits(3 * MINUTE)).toBe(30);
+    expect(mostBelievableCredits(45 * MINUTE + 90 * SECOND)).toBe(465);
+    // A short try, no time at all, and a time that is no time: the room a short try gets.
+    for (const agentMs of [0, 3 * SECOND, 12 * SECOND, undefined, -5 * MINUTE, Number.NaN, Number.POSITIVE_INFINITY]) expect(mostBelievableCredits(agentMs), String(agentMs)).toBe(2);
+    // Never more than the ledger takes, however long the time limit is set.
+    expect(mostBelievableCredits(1e12)).toBe(HIGHEST_BUILD_CREDIT_LIMIT);
+
+    const cases: Array<{ credits: number; agentMs: number; counted: { credits: number; estimated: number } }> = [
+      // The real builds: 3.09 credits in 139 s, 4.59 in 160 s. Far inside.
+      { credits: 3.09, agentMs: 139 * SECOND, counted: { credits: 3.09, estimated: 0 } },
+      { credits: 4.59, agentMs: 160 * SECOND, counted: { credits: 4.59, estimated: 0 } },
+      // Exactly ten a minute is believed; a tenth of a credit more is not.
+      { credits: 30, agentMs: 3 * MINUTE, counted: { credits: 30, estimated: 0 } },
+      { credits: 30.1, agentMs: 3 * MINUTE, counted: { credits: 6, estimated: 6 } },
+      // A one-line agent job: half a credit in a few seconds.
+      { credits: 0.51, agentMs: 6 * SECOND, counted: { credits: 0.51, estimated: 0 } },
+      { credits: 2, agentMs: 6 * SECOND, counted: { credits: 2, estimated: 0 } },
+      { credits: 2.1, agentMs: 6 * SECOND, counted: { credits: 0.2, estimated: 0.2 } },
+      // Nothing used is a figure too.
+      { credits: 0, agentMs: 3 * MINUTE, counted: { credits: 0, estimated: 0 } },
+    ];
+    for (const { credits, agentMs, counted: expected } of cases) {
+      const rig = makeRig({ primary: costly("kiro-crew", [{ ok: true, credits, agentMs }]) });
+      approvedIdea(rig.store);
+      await runBuildNight(rig.deps);
+      expect(counted(rig.store), `${credits} credits in ${agentMs} ms`).toEqual({ ...expected, tries: 1 });
+    }
+  });
+
+  it("is not closed for the month by one figure: the next idea is still built, and so is the next night's", async () => {
+    // What one line added to Kiro Crew's usage file did before: the first build's figure was
+    // believed, the month (400) was "used up" by it, and nothing was built until the next month.
+    const rig = makeRig({ config: { MAX_BUILDS_PER_NIGHT: "5" }, primary: costly("kiro-crew", [{ ok: true, credits: HIGHEST_BUILD_CREDIT_LIMIT, agentMs: 3 * MINUTE }]) });
+    const first = approvedIdea(rig.store, { title: "App A", approvedAt: "2026-10-09T17:00:00.000Z" });
+    const second = approvedIdea(rig.store, { title: "App B", approvedAt: "2026-10-09T18:00:00.000Z" });
+    expect(await runBuildNight(rig.deps)).toEqual({ built: [first.id, second.id], failed: [], skipped: "" });
+    expect(counted(rig.store)).toEqual({ credits: 12, estimated: 12, tries: 2 });
+    expect(buildBudget(rig.store, rig.config, rig.clock.now())).toMatchObject({ counted: 12, limit: 400, reached: false });
+
+    // The worst a job can do to the count now: a full-length try (45 minutes and the 90 seconds
+    // Kiro Crew is given to stop) with the highest figure that is believed for it. That is one
+    // try's worth over the line, which raising the limit opens again.
+    const worst = makeRig({ config: { MAX_BUILDS_PER_NIGHT: "5" }, primary: costly("kiro-crew", [{ ok: true, credits: 465, agentMs: 45 * MINUTE + 90 * SECOND }]) });
+    approvedIdea(worst.store, { title: "App A", approvedAt: "2026-10-09T17:00:00.000Z" });
+    const waiting = approvedIdea(worst.store, { title: "App B", approvedAt: "2026-10-09T18:00:00.000Z" });
+    expect((await runBuildNight(worst.deps)).skipped).toBe("this month's build credits are used up (465 of 400 counted): approved ideas wait until Nov 1, or until MAX_BUILD_CREDITS_PER_MONTH in .env is raised");
+    const raised = { ...worst.deps, config: testConfig(worst.paths.root, { MAX_BUILD_CREDITS_PER_MONTH: "1000" }) };
+    expect(buildBudget(worst.store, raised.config, worst.clock.now()).reached).toBe(false);
+    expect(await buildOne(waiting.id, raised)).toMatchObject({ ok: true });
+  });
+
+  it("counts a build the Mac slept through for the time its agent worked, not as a full-length try, through the real Kiro CLI backend", async () => {
+    // The whole way: the real Kiro CLI backend (its program runner is a stand-in), the night, the ledger.
+    const rig = makeRig({ fallback: null });
+    const stop = new AbortController();
+    const mac = clockedSleptWatch(rig.clock);
+    const kiroBinary = path.join(tempDir(), "kiro-cli");
+    writeFileSync(kiroBinary, "stand-in: never run");
+    const { run } = recordingRunner((call) => {
+      if (call.args.includes("settings")) return reply("false (global)\n");
+      // The agent has worked for two minutes when the lid is closed. The Mac sleeps six hours.
+      // When it wakes, the command line's own sleep watch stops the run (here the test does).
+      mac.awake(2 * MINUTE);
+      mac.asleep(6 * HOUR);
+      stop.abort();
+      return reply("", { exitCode: null, error: "the program was stopped: this process is stopping" });
+    });
+    rig.deps.backends.primary = createKiroCliBackend({ paths: rig.paths, logger: rig.deps.logger, now: rig.clock.now, kiroBinary, run, sleptWatch: mac.start });
+    rig.deps.signal = stop.signal;
+    const idea = approvedIdea(rig.store);
+
+    expect(await runBuildNight(rig.deps)).toEqual({ built: [], failed: [idea.id], skipped: "stopped" });
+    expect(rig.store.getIdea(idea.id)).toMatchObject({ state: "build_failed", failureReason: STOPPED_REASON });
+    // 2 credits a minute for 2 minutes and one look of the watch (5 seconds). Before, the six
+    // hours were taken for the agent's and cut down to the 45-minute limit: 90 credits, and five
+    // tries like it used up the month.
+    expect(counted(rig.store)).toEqual({ credits: 4.2, estimated: 4.2, tries: 1 });
+    const tries = rig.lines.map((entry) => JSON.parse(entry) as Record<string, unknown>).filter((entry) => entry.message === "build try counted");
+    expect(tries).toHaveLength(1);
+    expect(tries[0]).toMatchObject({ backend: "kiro-cli", credits: 4.2, measured: false });
+  });
+
+  it("counts an estimate for a figure a job wrote into Kiro Crew's own usage file, through the real Kiro Crew backend", async () => {
+    // The whole way: Kiro Crew's files in a made-up home, the backend that reads them, the night, the ledger.
+    const rig = makeRig({ config: { MAX_BUILDS_PER_NIGHT: "5" }, fallback: null });
+    const crew = new FakeCrew(rig.clock);
+    crew.installSkill(readFileSync(BUILD_SKILL_FILE, "utf8"));
+    crew.runForMs = 3 * MINUTE;
+    crew.credits = 4.6;
+    crew.onJobEnd = (job) => {
+      const workspace = /in the folder (\S+),/.exec(job.message)?.[1] ?? "";
+      leaveBuild(workspace, { at: rig.clock.now() });
+      // What a job can do from inside the gateway: it reads its own id from Kiro Crew's job list
+      // and adds lines to the usage file. One that takes credits away, one that adds 99,995.4.
+      const usage = path.join(crew.home, "usage", "tokens");
+      mkdirSync(usage, { recursive: true });
+      const day = rig.clock.iso().slice(0, 10);
+      for (const credits of [-4.6, 99_995.4]) appendFileSync(path.join(usage, `${day}.jsonl`), `${JSON.stringify({ slot: `cron:${job.id}:made-up`, credits })}\n`);
+    };
+    rig.deps.backends.primary = createKiroCrewBackend({ paths: rig.paths, logger: rig.deps.logger, sandboxMode: "crew", kirocrewBinary: crew.binary, crewHome: crew.home, run: crew.run, now: rig.clock.now, sleep: crew.sleep, timeZone: "America/Boise", postCancel: crew.postCancel });
+    const first = approvedIdea(rig.store, { title: "App A", approvedAt: "2026-10-09T17:00:00.000Z" });
+    const second = approvedIdea(rig.store, { title: "App B", approvedAt: "2026-10-09T18:00:00.000Z" });
+
+    expect(await runBuildNight(rig.deps)).toEqual({ built: [first.id, second.id], failed: [], skipped: "" });
+    // Each run: 4.6 real, the line that takes away left out, 99,995.4 added: 100,000 read, not
+    // believed for an agent that ran 3 minutes, 6 counted as an estimate.
+    expect(counted(rig.store)).toEqual({ credits: 12, estimated: 12, tries: 2 });
+    expect(rig.lines.filter((line) => line.includes("was not one a build could have used; counting an estimate instead"))).toHaveLength(2);
   });
 });
 

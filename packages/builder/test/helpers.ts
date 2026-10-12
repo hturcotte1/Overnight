@@ -9,6 +9,8 @@ import { createLogger, dataPaths, ensureDataDirs, parseConfig, Store } from "@ov
 import type { Config, DataPaths, Idea, Logger } from "@overnight/core";
 import { afterEach } from "vitest";
 import type { BuildBackend, BuildJob, BuildOptions, BuildOutcome, CommandResult, CommandRunner, RunOptions } from "../src/index.ts";
+import { SLEPT_WATCH_EVERY_MS, watchSlept } from "../src/slept.ts";
+import type { StartSleptWatch } from "../src/slept.ts";
 
 /** 1:00 am on Oct 10, 2026 in Boise (UTC-6 in summer time): build time. */
 export const T0 = "2026-10-10T07:00:00.000Z";
@@ -31,6 +33,43 @@ export function movableClock(startIso: string = T0) {
   };
 }
 export type Clock = ReturnType<typeof movableClock>;
+
+/**
+ * The builder's sleep watch (src/slept.ts) on a test's own clock. The real one reads the real
+ * clock, on which a test's made-up hours never pass. `start` goes to a backend as `sleptWatch`.
+ * The test then says what the Mac does while the agent "runs":
+ *   awake(ms)   time passes with the Mac awake: the watch's timer ticks every 5 seconds;
+ *   asleep(ms)  the lid is closed: time passes, nothing ticks, and the one overdue tick arrives
+ *               when the Mac wakes.
+ */
+export function clockedSleptWatch(clock: Clock) {
+  const timers = new Set<() => void>();
+  const tick = (): void => {
+    for (const timer of [...timers]) timer();
+  };
+  const start: StartSleptWatch = () =>
+    watchSlept({
+      now: clock.ms,
+      setTimer: ((timer: () => void) => (timers.add(timer), timer)) as unknown as typeof setInterval,
+      clearTimer: ((timer: () => void) => void timers.delete(timer)) as unknown as typeof clearInterval,
+    });
+  return {
+    start,
+    tick,
+    /** How many watches are running now: one while an agent runs, none before and after. */
+    running: () => timers.size,
+    awake(ms: number): void {
+      for (let left = ms; left > 0; left -= SLEPT_WATCH_EVERY_MS) {
+        clock.advance(Math.min(left, SLEPT_WATCH_EVERY_MS));
+        if (left >= SLEPT_WATCH_EVERY_MS) tick();
+      }
+    },
+    asleep(ms: number): void {
+      clock.advance(ms);
+      tick();
+    },
+  };
+}
 
 const tempDirs: string[] = [];
 afterEach(() => {
