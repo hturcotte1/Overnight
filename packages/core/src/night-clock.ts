@@ -83,9 +83,10 @@ export function nextSlotAt(job: ClockedJob, now: Date, config: NightClockConfig)
  * Why a due slot is not starting yet.
  *   build-running      (deliver) the build is running right now
  *   build-not-started  (deliver) the build is due too and its job is awake, so it is about to start
+ *   lid-closed         the Mac is on battery with its lid closed, so it is about to sleep again
  *   offline            GitHub did not answer, so there is no real internet
  */
-export type NightWait = "build-running" | "build-not-started" | "offline";
+export type NightWait = "build-running" | "build-not-started" | "lid-closed" | "offline";
 
 /** What is stored about one job's latest slot. Times are UTC, as `toISOString()` writes them. */
 export interface NightRun {
@@ -128,7 +129,7 @@ export const nightRunSchema: z.ZodType<NightRun> = z
     startedAt: isoTime.nullable(),
     closedAt: isoTime.nullable(),
     closedAs: z.enum(["done", "cut-short", "first-check"]).nullable(),
-    waiting: z.enum(["build-running", "build-not-started", "offline"]).nullable(),
+    waiting: z.enum(["build-running", "build-not-started", "lid-closed", "offline"]).nullable(),
   })
   .refine((run) => (run.closedAt === null) === (run.closedAs === null), "closedAt and closedAs are set together");
 
@@ -238,6 +239,12 @@ export interface NightFacts {
    * whether the build job is still waking to ask the clock.
    */
   build?: { open: boolean; running: boolean | null; jobAlive: boolean };
+  /**
+   * Is the Mac on battery with its lid closed, as far as could be read? Only a plain yes holds a
+   * run up: a reading that could not be made is given as false. Left out when it has not been
+   * asked yet, which skips that rule.
+   */
+  lidClosedOnBattery?: boolean;
   /** Does the internet answer? Left out when it has not been asked yet, which skips that rule. */
   online?: boolean;
   /**
@@ -276,7 +283,7 @@ export type NightDecision =
 
 /**
  * The rule, in order. It is asked twice for a run: once without the job's lock (and without
- * `online`), then again under the lock with the record read again.
+ * `lidClosedOnBattery` and `online`), then again under the lock with the record read again.
  *
  * The deliver job gives a late build 20 minutes. They are minutes in which the delivery could
  * have run, so they are counted from the start again by the first check after the Mac wakes and
@@ -317,6 +324,11 @@ export function decideNight(facts: NightFacts): NightDecision {
       if (reason !== null) return { action: "wait", reason, run: counted, changed: firstNotice || afresh || run.waiting !== reason };
     }
   }
+  // On battery with the lid closed the Mac sleeps whatever is asked. If this check is running,
+  // the Mac has woken by itself for a moment, and some of those moments last longer than the
+  // minute a just-woken job waits. A run started in one is cut short by the sleep that follows,
+  // which uses up a build's one more try. Nothing can finish then, so nothing starts.
+  if (facts.lidClosedOnBattery === true) return { action: "wait", reason: "lid-closed", run, changed: firstNotice || run.waiting !== "lid-closed" };
   if (facts.online === false) return { action: "wait", reason: "offline", run, changed: firstNotice || run.waiting !== "offline" };
   return { action: "run", run, lateMs: now.getTime() - slot.at.getTime(), firstNotice };
 }

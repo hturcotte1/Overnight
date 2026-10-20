@@ -27,7 +27,7 @@ import {
 import { repoRoot } from "../src/context.ts";
 import { crewPort, DEFAULT_CREW_PORT, gatewayAnswers } from "../src/gateway.ts";
 import { isOnline, ONLINE_CHECK_URL, ONLINE_TIMEOUT_MS } from "../src/online.ts";
-import { parsePowerSource, readPowerSource } from "../src/power.ts";
+import { isLidClosedOnBattery, parseLidClosed, parsePowerSource, readLidClosed, readPowerSource } from "../src/power.ts";
 import { realPreflightProbes } from "../src/preflight-probes.ts";
 import type { ProbeParts } from "../src/preflight-probes.ts";
 import { runQuiet } from "../src/run-quiet.ts";
@@ -394,6 +394,121 @@ describe("is this Mac plugged in?", () => {
 
   it.runIf(process.platform === "darwin")("gets one of the three answers from the real pmset on this Mac", async () => {
     expect(["mains", "battery", "unknown"]).toContain(await readPowerSource());
+  });
+});
+
+describe("is the lid closed?", () => {
+  // The shape of what `ioreg -r -k AppleClamshellState -d 4` printed on the Mac this was written
+  // on, with its lid open and on battery (Oct 12). Every value but the two lines asked about is made up.
+  const ioregSays = (...lines: string[]): string =>
+    ["+-o IOPMrootDomain  <class IOPMrootDomain, id 0x100000123, registered, matched, active, busy 0 (0 ms), retain 12>", "  | {", '  |   "Made Up File" = "/made-up/sleepimage"', ...lines, '  |   "SleepDisabled" = No', "  | }", "  | ", "  +-o MadeUpChild  <class MadeUpChild, id 0x100000124, !registered, !matched, active, busy 0, retain 5>", "      {", '        "MadeUpKey" = Yes', "      }", ""].join("\n");
+  const OPEN = ioregSays('  |   "AppleClamshellCausesSleep" = No', '  |   "AppleClamshellState" = No');
+  const CLOSED = ioregSays('  |   "AppleClamshellCausesSleep" = Yes', '  |   "AppleClamshellState" = Yes');
+
+  it("reads the one line that says so: open, or closed", () => {
+    expect(parseLidClosed(OPEN)).toBe(false);
+    expect(parseLidClosed(CLOSED)).toBe(true);
+    // The two lines alone, as they are.
+    expect(parseLidClosed('  |   "AppleClamshellCausesSleep" = No\n  |   "AppleClamshellState" = No\n')).toBe(false);
+    expect(parseLidClosed('"AppleClamshellState" = Yes')).toBe(true);
+  });
+
+  it("goes by AppleClamshellState alone, whatever the line beside it says", () => {
+    expect(parseLidClosed(ioregSays('  |   "AppleClamshellCausesSleep" = Yes', '  |   "AppleClamshellState" = No'))).toBe(false);
+    expect(parseLidClosed(ioregSays('  |   "AppleClamshellCausesSleep" = No', '  |   "AppleClamshellState" = Yes'))).toBe(true);
+    expect(parseLidClosed(ioregSays('  |   "AppleClamshellState" = Yes'))).toBe(true);
+    // The other line alone says nothing about where the lid is.
+    expect(parseLidClosed(ioregSays('  |   "AppleClamshellCausesSleep" = Yes'))).toBeNull();
+  });
+
+  it("cannot tell on a Mac without a lid: ioreg finds no such key and prints nothing", () => {
+    expect(parseLidClosed("")).toBeNull();
+    expect(parseLidClosed(ioregSays())).toBeNull();
+  });
+
+  it("cannot tell from anything else: garbage, a cut-off line, another value, the key inside another line", () => {
+    for (const other of [
+      "made-up nonsense",
+      "ioreg: command not found",
+      '  |   "AppleClamshellState" = ',
+      '  |   "AppleClamshellState" = Ye',
+      '  |   "AppleClamshellState" = Maybe',
+      '  |   "AppleClamshellState" = 1',
+      '  |   "AppleClamshellState" = "Yes"',
+      '  |   "appleclamshellstate" = Yes',
+      '  |   "AppleClamshellStateOld" = Yes',
+      '  |   "Made Up Note" = "the "AppleClamshellState" = Yes line means closed"',
+      '  |   "AppleClamshellState" = Yes and more',
+      "AppleClamshellState = Yes",
+      "\u0000\u0001\u0002",
+    ]) {
+      expect(parseLidClosed(other), other).toBeNull();
+    }
+  });
+
+  it("cannot tell when two such lines disagree, and can when they agree", () => {
+    expect(parseLidClosed('  |   "AppleClamshellState" = Yes\n    |   "AppleClamshellState" = No\n')).toBeNull();
+    expect(parseLidClosed('  |   "AppleClamshellState" = Yes\n    |   "AppleClamshellState" = Yes\n')).toBe(true);
+    expect(parseLidClosed('  |   "AppleClamshellState" = No\n    |   "AppleClamshellState" = No\n')).toBe(false);
+  });
+
+  it("asks macOS's own ioreg once, by its full path, with a bare environment and a short time limit", async () => {
+    const calls: Array<{ command: string; args: string[]; options: QuietOptions }> = [];
+    const answering = (result: Partial<QuietResult>): typeof runQuiet => async (command, args, options) => {
+      calls.push({ command, args, options });
+      return { started: true, exitCode: 0, timedOut: false, output: "", ...result };
+    };
+    expect(await readLidClosed(answering({ output: CLOSED }))).toBe(true);
+    expect(calls).toEqual([{ command: "/usr/sbin/ioreg", args: ["-r", "-k", "AppleClamshellState", "-d", "4"], options: { env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" }, timeoutMs: 5_000, keepOutput: true } }]);
+    expect(await readLidClosed(answering({ output: OPEN }))).toBe(false);
+    // A Mac without a lid: ioreg ends well and prints nothing.
+    expect(await readLidClosed(answering({ output: "" }))).toBeNull();
+  });
+
+  it("says it cannot tell, and never throws, when ioreg will not start, fails, takes too long or says something else", async () => {
+    // Each of these would say "closed" if its text were believed.
+    const answering = (result: Partial<QuietResult>): typeof runQuiet => async () => ({ started: true, exitCode: 0, timedOut: false, output: CLOSED, ...result });
+    expect(await readLidClosed(answering({}))).toBe(true);
+    expect(await readLidClosed(answering({ started: false, exitCode: null }))).toBeNull();
+    expect(await readLidClosed(answering({ exitCode: 1 }))).toBeNull();
+    expect(await readLidClosed(answering({ exitCode: null }))).toBeNull();
+    expect(await readLidClosed(answering({ timedOut: true, exitCode: null }))).toBeNull();
+    expect(await readLidClosed(answering({ timedOut: true }))).toBeNull();
+    expect(await readLidClosed(answering({ output: "made-up nonsense" }))).toBeNull();
+    const throwing: typeof runQuiet = async () => {
+      throw new Error("made-up: the runner fell over");
+    };
+    expect(await readLidClosed(throwing)).toBeNull();
+  });
+
+  it("gives up on an ioreg that hangs, through the real runner", async () => {
+    // The real runner with a stand-in program that never answers: what a time limit looks like from here.
+    const hanging: typeof runQuiet = (_command, _args, options) => runQuiet("/bin/sleep", ["30"], { ...options, timeoutMs: 100 });
+    const started = Date.now();
+    expect(await readLidClosed(hanging)).toBeNull();
+    expect(Date.now() - started).toBeLessThan(5_000);
+    // And one that cannot be started at all.
+    const missing: typeof runQuiet = (_command, args, options) => runQuiet(path.join(scratch, "no such ioreg"), args, options);
+    expect(await readLidClosed(missing)).toBeNull();
+  });
+
+  it.runIf(process.platform === "darwin")("gets one of the three answers from the real ioreg on this Mac", async () => {
+    expect([true, false, null]).toContain(await readLidClosed());
+  });
+
+  it("holds a run up only for battery and closed together, in plain words: anything not known is a no", () => {
+    expect(isLidClosedOnBattery("battery", true)).toBe(true);
+    const others: Array<[Parameters<typeof isLidClosedOnBattery>[0], boolean | null]> = [
+      ["battery", false],
+      ["battery", null],
+      ["mains", true],
+      ["mains", false],
+      ["mains", null],
+      ["unknown", true],
+      ["unknown", false],
+      ["unknown", null],
+    ];
+    for (const [power, lid] of others) expect(isLidClosedOnBattery(power, lid), `${power}, ${String(lid)}`).toBe(false);
   });
 });
 

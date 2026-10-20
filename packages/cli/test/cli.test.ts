@@ -13,6 +13,7 @@ import { BUILD_NOW_PAUSED } from "../src/commands/build-now.ts";
 import { PAUSED_LINE, RESUMED_LINE } from "../src/commands/pause.ts";
 import { PREFLIGHT_READY, PREFLIGHT_TITLE } from "../src/commands/preflight.ts";
 import type { PreflightProbes } from "../src/commands/preflight.ts";
+import type { PowerSource } from "../src/power.ts";
 import { ALREADY_RUNNING } from "../src/commands/listen.ts";
 import type { ListenFactories } from "../src/commands/listen.ts";
 import { PAUSED_QUEUE_NOTE } from "../src/commands/queue.ts";
@@ -72,6 +73,8 @@ function harness(overrides: Partial<CliIo> = {}, settings: Record<string, string
     rehearsalFolderProblem: () => "Not started: this test did not expect a rehearsal.",
     jobLockHeld: () => false,
     powerSource: async () => "mains",
+    // Never the real lid. (A night check swallows a failed look at the lid, so a refusal here would show nothing.)
+    lidClosed: async () => false,
     isOnline: () => Promise.reject(new Error("this test did not expect a look at the internet")),
     sleep: () => Promise.reject(new Error("this test did not expect to wait")),
     keepAwake: awake.keepAwake,
@@ -636,11 +639,15 @@ describe("overnight build and deliver with --if-due and --from-now (command line
     const order: string[] = [];
     const locks = fakeLocks({ order });
     const online = { answer: true, asked: 0 };
+    /** What the made-up Mac runs on and says of its lid, and each question put to it. Plugged in and open unless a test says otherwise. */
+    const mac = { power: "mains" as PowerSource, lidClosed: false as boolean | null, asked: [] as string[] };
     const waits: number[] = [];
     const h = harness({
       now: () => new Date(clock),
       jobLogger,
       takeJobLock: locks.takeLock,
+      powerSource: async () => (mac.asked.push("power?"), mac.power),
+      lidClosed: async () => (mac.asked.push("lid?"), mac.lidClosed),
       isOnline: async () => ((online.asked += 1), online.answer),
       sleep: async (ms) => {
         waits.push(ms);
@@ -648,7 +655,7 @@ describe("overnight build and deliver with --if-due and --from-now (command line
       },
       ...overrides,
     });
-    return { ...h, logs, jobLogger, order, locks, online, waits, at: (iso: string) => void (clock = Date.parse(iso)), later: (ms: number) => void (clock += ms) };
+    return { ...h, logs, jobLogger, order, locks, online, mac, waits, at: (iso: string) => void (clock = Date.parse(iso)), later: (ms: number) => void (clock += ms) };
   }
 
   it("takes each switch on build and deliver only, and never both at once", async () => {
@@ -681,6 +688,7 @@ describe("overnight build and deliver with --if-due and --from-now (command line
     expect(t.jobLogger).not.toHaveBeenCalled();
     expect(t.awake.order).toEqual([]);
     expect(t.online.asked).toBe(0);
+    expect(t.mac.asked).toEqual([]);
     expect(t.close).toHaveBeenCalledTimes(2);
   });
 
@@ -713,6 +721,8 @@ describe("overnight build and deliver with --if-due and --from-now (command line
     expect(t.order).toEqual([]);
     expect(t.jobLogger).not.toHaveBeenCalled();
     expect(t.online.asked).toBe(0);
+    // Neither the power source nor the lid is read by a check that finds nothing due.
+    expect(t.mac.asked).toEqual([]);
     expect(t.waits).toEqual([]);
     // What scripts/install-agents.sh waits for after it starts a job: the time of its last check.
     expect(readCheckedAt(t.context.store, "build")).toBe(at(300));
@@ -734,6 +744,8 @@ describe("overnight build and deliver with --if-due and --from-now (command line
     t.at("2026-10-10T07:00:30.000Z");
     expect(await t.run("build", "--if-due")).toBe(0);
     expect(t.online.asked).toBe(1);
+    // Plugged in: the power source was read once, and the lid not at all.
+    expect(t.mac.asked).toEqual(["power?"]);
     expect(t.waits).toEqual([]);
     // The lock is taken once, by the check, and the build runs under that same one.
     expect(t.order).toEqual(["lock build.lock", "load builder", "runBuildNight", "release build.lock"]);
@@ -774,6 +786,133 @@ describe("overnight build and deliver with --if-due and --from-now (command line
     expect(fakes.nightDeps).toHaveLength(1);
     expect(t.logs.build.lines[1]).toMatchObject({ level: "warn", message: "night clock: starting", lateMinutes: 122 });
     expect(readNightRun(t.context.store, "build")).toMatchObject({ closedAs: "done", waiting: null });
+  });
+
+  it("on battery with the lid closed, build and deliver --if-due start nothing: the log says why once, status and its --json say it, and the build runs once the lid is opened", async () => {
+    const builds = fakeBuild({ night: () => ({ built: ["idea_a"], failed: [], skipped: "" }) });
+    const delivers = fakeDeliver();
+    const t = clocked({
+      buildFactories: builds.load,
+      deliverFactories: delivers.load,
+      nightJobsState: () => ({ build: true, deliver: true, crew: true }),
+      jobTriggers: () => ({ build: "timer", deliver: "timer" }),
+      jobsBelongHere: () => true,
+      gatewayAnswers: async () => true,
+    });
+    const store = t.context.store;
+    await t.run("build", "--from-now");
+    await t.run("deliver", "--from-now");
+    t.out.lines.length = 0;
+    t.order.length = 0;
+    const WAITING_LINE = "night clock: waiting for the lid to be opened or the Mac to be plugged in";
+
+    // The plug is out and the lid is closed. At 1:00 am the sleeping Mac wakes by itself for two minutes.
+    t.mac.power = "battery";
+    t.mac.lidClosed = true;
+    t.at("2026-10-10T07:00:00.000Z");
+    expect(await t.run("build", "--if-due")).toBe(0);
+    // It waited its minute after the wake, then read the power source and the lid, in that order.
+    expect(t.waits).toEqual([60_000]);
+    expect(t.mac.asked).toEqual(["power?", "lid?"]);
+    // Nothing was loaded, nothing holds the Mac awake, the internet was not asked, and not a word was printed.
+    expect(builds.loads).toBe(0);
+    expect(t.awake.order).toEqual([]);
+    expect(t.online.asked).toBe(0);
+    expect(t.out.lines).toEqual([]);
+    expect(t.err.lines).toEqual([]);
+    expect(t.order).toEqual(["lock build.lock", "release build.lock"]);
+    expect(readNightRun(store, "build")).toEqual({ day: "2026-10-10", slotAt: BUILD_TIME, noticedAt: "2026-10-10T07:01:00.000Z", startedAt: null, closedAt: null, closedAs: null, waiting: "lid-closed" });
+    expect(t.logs.build.lines.map((line) => line.message)).toEqual([WAITING_LINE]);
+    expect(t.logs.build.lines[0]).toMatchObject({ level: "info", job: "build", slotDay: "2026-10-10", reason: "lid-closed" });
+
+    // The wakes that follow say nothing more.
+    for (const wake of ["2026-10-10T07:15:00.000Z", "2026-10-10T07:30:00.000Z"]) {
+      t.at(wake);
+      expect(await t.run("build", "--if-due")).toBe(0);
+    }
+    expect(t.logs.build.lines).toHaveLength(1);
+    expect(builds.loads).toBe(0);
+
+    // 6:30 am, in another such wake: the delivery is due as well. Nothing shows a build about to start, so it waits for the lid too.
+    t.at("2026-10-10T12:30:00.000Z");
+    expect(await t.run("deliver", "--if-due")).toBe(0);
+    expect(delivers.loads).toBe(0);
+    expect(readNightRun(store, "deliver")).toMatchObject({ day: "2026-10-10", slotAt: DELIVER_TIME, waiting: "lid-closed", startedAt: null });
+    expect(t.logs.deliver.lines.map((line) => line.message)).toEqual([WAITING_LINE]);
+    expect(t.online.asked).toBe(0);
+    expect(t.awake.order).toEqual([]);
+
+    // What a person sees who opens the Mac and asks, before the jobs have looked again.
+    t.later(1_000);
+    expect(await t.run("status")).toBe(0);
+    expect(t.out.lines.find((line) => line.startsWith("  Next build"))).toBe("  Next build         waiting for the lid to be opened or the Mac to be plugged in: the Oct 10, 1:00 AM build has not run yet (kiro-crew first)");
+    expect(t.out.lines.find((line) => line.startsWith("  Next deliver"))).toBe("  Next deliver       waiting for the lid to be opened or the Mac to be plugged in: the Oct 10, 6:30 AM deliver has not run yet");
+    expect(t.out.lines.find((line) => line.startsWith("  Power"))).toBe("  Power              battery: the listener is not running, so nothing of Overnight's keeps the Mac awake between runs, and it may go to sleep. With the lid closed nothing runs until it is opened");
+    // And what scripts/install-agents.sh reads: the reason by its name, beside the heartbeat it waits for.
+    expect(await t.run("status", "--json")).toBe(0);
+    expect(JSON.parse(t.out.lines.at(-1) ?? "")).toMatchObject({
+      buildTime: "01:00",
+      deliverTime: "07:00",
+      timeZone: "America/Boise",
+      power: "battery",
+      nightClock: {
+        tickSeconds: 60,
+        build: { state: "due", waiting: "lid-closed", checkedAt: "2026-10-10T07:30:00.000Z", notStarting: false, mayBeStarting: false, lastRun: null },
+        deliver: { state: "due", waiting: "lid-closed", checkedAt: "2026-10-10T12:30:00.000Z", notStarting: false, lastRun: null },
+      },
+    });
+    t.out.lines.length = 0;
+
+    // 8:00 am: the lid is opened, still on battery. One minute's wait, the internet is asked, and the build runs.
+    t.mac.lidClosed = false;
+    t.at("2026-10-10T14:00:00.000Z");
+    expect(await t.run("build", "--if-due")).toBe(0);
+    expect(t.online.asked).toBe(1);
+    expect(builds.nightDeps).toHaveLength(1);
+    expect(t.out.lines).toEqual(["Tonight's build: 1 built (idea_a), 0 failed."]);
+    expect(t.awake.order).toEqual(["keep awake", "let sleep"]);
+    expect(t.logs.build.lines.map((line) => line.message)).toEqual([WAITING_LINE, "night clock: starting", "overnight build starting", "overnight build finished"]);
+    expect(t.logs.build.lines[1]).toMatchObject({ level: "warn", lateMinutes: 421 });
+    expect(readNightRun(store, "build")).toMatchObject({ startedAt: "2026-10-10T14:01:00.000Z", closedAs: "done", waiting: null });
+    // And the delivery, a minute later.
+    t.later(60_000);
+    expect(await t.run("deliver", "--if-due")).toBe(0);
+    expect(delivers.runDeps).toHaveLength(1);
+    expect(readNightRun(store, "deliver")).toMatchObject({ closedAs: "done", waiting: null });
+  });
+
+  it("plugged in with the lid closed, build --if-due builds at its time as it always did: the first real night ran so", async () => {
+    const builds = fakeBuild();
+    const t = clocked({ buildFactories: builds.load });
+    await t.run("build", "--from-now");
+    t.mac.lidClosed = true;
+    t.at("2026-10-10T06:59:30.000Z");
+    expect(await t.run("build", "--if-due")).toBe(0);
+    t.at("2026-10-10T07:00:30.000Z");
+    expect(await t.run("build", "--if-due")).toBe(0);
+    expect(builds.nightDeps).toHaveLength(1);
+    expect(t.mac.asked).toEqual(["power?"]);
+    expect(t.logs.build.lines.map((line) => line.message)).toEqual(["night clock: starting", "overnight build starting", "overnight build finished"]);
+    expect(t.logs.build.lines[0]).toMatchObject({ level: "info", lateMinutes: 0 });
+  });
+
+  it("build-now is not held up by a closed lid on battery, and reads neither: a person is there", async () => {
+    const builds = fakeBuild();
+    const delivers = fakeDeliver();
+    const asked: string[] = [];
+    const locks = fakeLocks();
+    const h = harness({
+      buildFactories: builds.load,
+      deliverFactories: delivers.load,
+      takeJobLock: locks.takeLock,
+      powerSource: async () => (asked.push("power?"), "battery"),
+      lidClosed: async () => (asked.push("lid?"), true),
+    });
+    const idea = moveIdea(h.context.store, addIdea(h.context.store, SAMPLE_IDEAS.turns, at(-600)), ["asked", "approved"], at(-500));
+    expect(await h.run("build-now", idea.id)).toBe(0);
+    expect(builds.oneCalls.map((call) => call.ideaId)).toEqual([idea.id]);
+    expect(delivers.oneCalls.map((call) => call.ideaId)).toEqual([idea.id]);
+    expect(asked).toEqual([]);
   });
 
   it("build --if-due marks the night cut short when it is stopped, and exits with the signal's code", async () => {

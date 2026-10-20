@@ -740,6 +740,34 @@ describe("overnight status: the last night and the next, by the night clock", ()
     }
   });
 
+  it("says a due run is waiting for the lid or the plug when the Mac is on battery with its lid closed, in words and in --json", async () => {
+    // Lid closed on battery overnight. In one of the Mac's own wakes each job found itself due and stored why it waits.
+    const store = onTheClock();
+    writeNightRun(store, "build", nightRecord("build", "2026-10-12T07:01:00.000Z", { waiting: "lid-closed" }), new Date(MORNING));
+    writeNightRun(store, "deliver", nightRecord("deliver", "2026-10-12T12:31:00.000Z", { waiting: "lid-closed" }), new Date(MORNING));
+    const shown = await rows(store, clockDeps);
+    expect(shown.get("Next build")).toBe("waiting for the lid to be opened or the Mac to be plugged in: the Oct 12, 1:00 AM build has not run yet (kiro-crew first)");
+    expect(shown.get("Next deliver")).toBe("waiting for the lid to be opened or the Mac to be plugged in: the Oct 12, 6:30 AM deliver has not run yet");
+    // Nothing is wrong with the jobs: they check the time, and the wait is not "does not start".
+    expect(shown.get("Night clock")).toBe("build and deliver check the time every minute, in America/Boise");
+    expect(shown.has("Last build")).toBe(false);
+
+    // What scripts/install-agents.sh and the dashboard read: the same reason, by its name.
+    const json = capture();
+    await status({ store, config, write: json.write, now: fixedNow(MORNING), ...clockDeps }, { json: true });
+    const report = JSON.parse(json.lines[0] ?? "") as StatusReport;
+    expect(report.nightClock.build).toMatchObject({ state: "due", waiting: "lid-closed", slotDay: "2026-10-12", notStarting: false, mayBeStarting: false, checkedAt: expect.any(String) });
+    expect(report.nightClock.deliver).toMatchObject({ state: "due", waiting: "lid-closed", notStarting: false, mayBeStarting: false });
+    // The times the installer reads are where they were.
+    expect(report).toMatchObject({ buildTime: "01:00", deliverTime: "07:00", timeZone: "America/Boise" });
+
+    // A run by hand that holds the job's lock is still what is said first: that is true right now.
+    const held = await rows(store, { ...clockDeps, jobRunning: (job) => job === "build" });
+    expect(held.get("Next build")).toBe("waiting for the build that is going on this data folder right now (a build-now, or one started by hand): the Oct 12, 1:00 AM build has not run yet (kiro-crew first)");
+    // On a data folder the jobs do not wake on, a stored reason is nobody's: the settings' own next time is shown.
+    expect((await rows(store, { ...clockDeps, jobsBelongHere: () => false })).get("Next build")).toBe("Oct 13, 1:00 AM (kiro-crew first)");
+  });
+
   it("keeps to the settings' own next times when nothing wakes the job on this data folder", async () => {
     const store = onTheClock();
     const usual = { build: "Oct 13, 1:00 AM (kiro-crew first)", deliver: "Oct 13, 6:30 AM, for the link on the wrist at 07:00" };
@@ -876,8 +904,8 @@ describe("overnight status: the last night and the next, by the night clock", ()
      */
     function night() {
       const store = onTheClock("2026-10-13T06:59:00.000Z");
-      /** The made-up clock, and whether the made-up internet answers. */
-      const at = { clock: Date.parse("2026-10-13T06:59:30.000Z"), online: true };
+      /** The made-up clock, whether the made-up internet answers, and what the made-up Mac runs on and says of its lid. */
+      const at = { clock: Date.parse("2026-10-13T06:59:30.000Z"), online: true, power: "mains" as PowerSource, lidClosed: false as boolean | null };
       /** Lock files held right now: by the job's own check, or (put here by a test) by a run by hand. */
       const held = new Set<string>();
       const errors: string[] = [];
@@ -906,6 +934,8 @@ describe("overnight status: the last night and the next, by the night clock", ()
               return () => void held.delete(file);
             },
             lockHeld: (file) => held.has(file),
+            powerSource: async () => at.power,
+            lidClosed: async () => at.lidClosed,
             isOnline: async () => at.online,
             sleep: async () => {},
             writeError: (line) => void errors.push(line),
@@ -941,6 +971,37 @@ describe("overnight status: the last night and the next, by the night clock", ()
       t.at.clock += 30_000;
       expect((await t.look()).get("Next build")).toBe("Oct 14, 1:00 AM (kiro-crew first)");
       expect(t.view()).toMatchObject({ state: "done", lockHeld: false, mayBeStarting: false });
+      expect(t.errors).toEqual([]);
+    });
+
+    it("says the build waits for the lid while it is closed on battery, through the real check, and then that it is starting", async () => {
+      const t = night();
+      t.at.power = "battery";
+      t.at.lidClosed = true;
+      const mustNotStart = async (): Promise<number> => {
+        throw new Error("made-up: nothing may start on battery with the lid closed");
+      };
+      for (const time of ["2026-10-13T07:00:00.000Z", "2026-10-13T07:01:00.000Z", "2026-10-13T07:02:00.000Z"]) expect(await t.check(time, mustNotStart)).toBe(0);
+      t.at.clock += 30_000;
+      expect((await t.look()).get("Next build")).toBe(`waiting for the lid to be opened or the Mac to be plugged in: ${NOT_YET}`);
+      expect(t.view()).toMatchObject({ state: "due", waiting: "lid-closed", lockHeld: false, notStarting: false, mayBeStarting: false });
+      // Minutes later it is still a wait with a reason, not a run that "does not start".
+      t.at.clock += 10 * 60_000;
+      expect(t.view()).toMatchObject({ state: "due", waiting: "lid-closed", notStarting: false });
+
+      // The lid is opened at 1:13 am.
+      t.at.lidClosed = false;
+      let loading: Map<string, string> | undefined;
+      const code = await t.check("2026-10-13T07:13:00.000Z", async (marks) => {
+        t.at.clock += 1_500;
+        loading = await t.look();
+        marks.started();
+        marks.ended("finished");
+        return 0;
+      });
+      expect(code).toBe(0);
+      expect(loading?.get("Next build")).toBe(`starting now, or ${HELD_UP}: ${NOT_YET}`);
+      expect((await t.look()).get("Last build")).toBe("Oct 13, 1:13 AM, 13 minutes late");
       expect(t.errors).toEqual([]);
     });
 

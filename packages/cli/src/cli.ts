@@ -31,7 +31,7 @@ import { watchLastResort } from "./last-resort.ts";
 import type { WatchLastResort } from "./last-resort.ts";
 import { isOnline } from "./online.ts";
 import type { Write } from "./output.ts";
-import { readPowerSource } from "./power.ts";
+import { readLidClosed, readPowerSource } from "./power.ts";
 import type { PowerSource } from "./power.ts";
 import { readEnvFileText, rehearsalFolderProblem, REHEARSAL_WHY } from "./rehearsal-folder.ts";
 import { lockHeld, takeListenLock, takeLock } from "./single-instance.ts";
@@ -90,8 +90,10 @@ export interface CliIo {
   rehearsalFolderProblem: (dataDir: string | undefined) => string | null;
   /** Does some process hold this job lock right now? Null if that could not be told. For `status`, and for the deliver job's question about the build. */
   jobLockHeld: (file: string) => boolean | null;
-  /** For `status`: is this Mac on mains power or on battery? */
+  /** For `status` and `--if-due`: is this Mac on mains power or on battery? */
   powerSource: () => Promise<PowerSource>;
+  /** For `--if-due`: is the lid closed? Null if that cannot be told (a Mac without a lid, say). */
+  lidClosed: () => Promise<boolean | null>;
   /** For `--if-due`: is there real internet (online.ts)? */
   isOnline: () => Promise<boolean>;
   /** For `--if-due`: wait in place this many milliseconds. */
@@ -158,6 +160,7 @@ export const processIo: CliIo = {
   rehearsalFolderProblem: (dataDir) => realRehearsalFolderProblem(dataDir),
   jobLockHeld: lockHeld,
   powerSource: () => readPowerSource(),
+  lidClosed: () => readLidClosed(),
   isOnline: () => isOnline(),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   // "always": on battery too. With the lid closed on battery the Mac sleeps all the same.
@@ -246,6 +249,8 @@ async function dispatch(command: string, flags: Set<string>, extras: readonly st
       logger,
       takeLock: io.takeJobLock,
       lockHeld: io.jobLockHeld,
+      powerSource: io.powerSource,
+      lidClosed: io.lidClosed,
       isOnline: io.isOnline,
       sleep: io.sleep,
       writeError,

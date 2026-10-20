@@ -173,6 +173,20 @@ describe("the steps a record goes through", () => {
     const steps = [noticed, waitingRun(noticed, "build-running"), startedRun(noticed, at(BUILD_AT)), closedRun(startedRun(noticed, at(BUILD_AT)), "done", at(BUILD_AT)), closedRun(noticed, "first-check", at(BUILD_AT))];
     for (const step of steps) expect(nightRunSchema.parse(step)).toEqual(step);
   });
+
+  it("can wait for each of the four reasons, and no other", () => {
+    const noticed = noticedRun(slot, at(BUILD_AT));
+    for (const reason of ["build-running", "build-not-started", "lid-closed", "offline"] as const) {
+      const waiting = waitingRun(noticed, reason);
+      expect(nightRunSchema.parse(waiting), reason).toEqual({ ...noticed, waiting: reason });
+      // Stored and read back as it was.
+      const store = memoryStore();
+      writeNightRun(store, "build", waiting, at(BUILD_AT));
+      expect(readNightRun(store, "build"), reason).toEqual(waiting);
+    }
+    expect(nightRunSchema.safeParse({ ...noticed, waiting: "on-battery" }).success).toBe(false);
+    expect(nightRunSchema.safeParse({ ...noticed, waiting: "lid closed" }).success).toBe(false);
+  });
 });
 
 describe("the stored values", () => {
@@ -519,6 +533,115 @@ describe("the rule, line by line", () => {
     expect(deliver()).toMatchObject({ action: "run" });
   });
 
+  describe("the lid closed on battery (after 6 and 7, before 8)", () => {
+    const noticed = noticedRun({ day: "2026-10-12", at: at(BUILD_AT) }, now);
+    const noBuild = { open: false, running: false, jobAlive: true };
+
+    it("waits when the Mac is on battery with its lid closed: the build job", () => {
+      expect(build({ lidClosedOnBattery: true })).toEqual({ action: "wait", reason: "lid-closed", run: noticed, changed: true });
+      // Whatever the internet says.
+      expect(build({ lidClosedOnBattery: true, online: true })).toEqual({ action: "wait", reason: "lid-closed", run: noticed, changed: true });
+    });
+
+    it("waits when the Mac is on battery with its lid closed: the deliver job", () => {
+      const deliverNoticed = noticedRun({ day: "2026-10-12", at: at(DELIVER_AT) }, deliverNow);
+      expect(deliver({ lidClosedOnBattery: true })).toEqual({ action: "wait", reason: "lid-closed", run: deliverNoticed, changed: true });
+      // With no build to wait for, told so or not.
+      expect(deliver({ build: noBuild, lidClosedOnBattery: true, online: true })).toEqual({ action: "wait", reason: "lid-closed", run: deliverNoticed, changed: true });
+    });
+
+    it("skips the question when it was not asked, and runs when the answer is no", () => {
+      expect(build()).toMatchObject({ action: "run" });
+      expect(build({ online: true })).toMatchObject({ action: "run" });
+      expect(build({ lidClosedOnBattery: false })).toMatchObject({ action: "run" });
+      expect(build({ lidClosedOnBattery: false, online: true })).toEqual({ action: "run", run: noticed, lateMs: 20_000, firstNotice: true });
+      expect(deliver({ build: noBuild, lidClosedOnBattery: false, online: true })).toMatchObject({ action: "run", lateMs: 20_000 });
+    });
+
+    it("only a plain yes holds a run up: a reading that could not be made is handed over as no, and is never in the way", () => {
+      // The caller turns "unknown" power, a Mac without a lid and a tool that failed into false,
+      // or leaves the fact out. Neither is a yes.
+      // @ts-expect-error The fact is a yes or a no. "Could not tell" has no value of its own here.
+      const unknown: NightFacts = { job: "build", now, config, record: yesterdaysBuild, online: true, lidClosedOnBattery: null };
+      expect(decideNight(unknown)).toMatchObject({ action: "run" });
+      // @ts-expect-error Nor is a word a yes.
+      const word: NightFacts = { job: "build", now, config, record: yesterdaysBuild, online: true, lidClosedOnBattery: "unknown" };
+      expect(decideNight(word)).toMatchObject({ action: "run" });
+    });
+
+    it("after 6 and 7: the deliver job names the build first, for its 20 minutes", () => {
+      expect(deliver({ build: buildIsLate, lidClosedOnBattery: true })).toMatchObject({ action: "wait", reason: "build-not-started" });
+      expect(deliver({ build: { open: false, running: true, jobAlive: true }, lidClosedOnBattery: true })).toMatchObject({ action: "wait", reason: "build-running" });
+      // After the 20 minutes the lid is what is left to wait for. It does not run.
+      const waited = record("deliver", { noticedAt: DELIVER_AT, waiting: "build-not-started" });
+      expect(deliver({ record: waited, build: buildIsLate, lidClosedOnBattery: true, now: after(DELIVER_AT, 20 * MINUTE) })).toEqual({ action: "wait", reason: "lid-closed", run: waited, changed: true });
+    });
+
+    it("before 8: the lid is the reason given when the internet is away as well", () => {
+      expect(build({ lidClosedOnBattery: true, online: false })).toMatchObject({ action: "wait", reason: "lid-closed" });
+      expect(deliver({ build: noBuild, lidClosedOnBattery: true, online: false })).toMatchObject({ action: "wait", reason: "lid-closed" });
+      // With the lid open, or on mains power, the internet is asked as before.
+      expect(build({ lidClosedOnBattery: false, online: false })).toMatchObject({ action: "wait", reason: "offline" });
+    });
+
+    it("says the wait changed the first time and when the reason is a new one, and not while it stays the same", () => {
+      const stored = record("build", { noticedAt: "2026-10-12T07:01:00.000Z", waiting: "lid-closed" });
+      // The next moment's wake, a quarter of an hour on: the same answer, and nothing new to store or say.
+      const again = build({ record: stored, lidClosedOnBattery: true, now: after(BUILD_AT, 16 * MINUTE), previousCheckAt: "2026-10-12T07:01:00.000Z" });
+      expect(again).toEqual({ action: "wait", reason: "lid-closed", run: stored, changed: false });
+      // Noticed and stored, but not waiting for anything yet.
+      expect(build({ record: record("build"), lidClosedOnBattery: true })).toMatchObject({ action: "wait", reason: "lid-closed", changed: true });
+      // It was waiting for the internet, and then the plug was pulled with the lid closed.
+      expect(build({ record: record("build", { waiting: "offline" }), lidClosedOnBattery: true })).toMatchObject({ action: "wait", reason: "lid-closed", changed: true });
+      // And the other way: the lid is open again, and now the internet is away.
+      expect(build({ record: stored, lidClosedOnBattery: false, online: false })).toEqual({ action: "wait", reason: "offline", run: stored, changed: true });
+    });
+
+    it("runs once the lid is opened or the Mac is plugged in, and hands back the record as it stands", () => {
+      const stored = record("build", { noticedAt: "2026-10-12T07:01:00.000Z", waiting: "lid-closed" });
+      // 8:00 am: seven hours after the build's time.
+      const opened = after(BUILD_AT, 7 * 60 * MINUTE);
+      const decision = build({ record: stored, lidClosedOnBattery: false, online: true, now: opened });
+      expect(decision).toEqual({ action: "run", run: stored, lateMs: 7 * 60 * MINUTE, firstNotice: false });
+      expect(decision.action === "run" && decision.run).toBe(stored);
+      // The first time a check asks, before it has read the lid: the answer that sends it to read it.
+      expect(build({ record: stored, now: opened })).toMatchObject({ action: "run", run: stored });
+    });
+
+    it("keeps the slot due for as long as the lid stays closed: there is no hour after which it starts anyway", () => {
+      const stored = record("build", { noticedAt: "2026-10-12T07:01:00.000Z", waiting: "lid-closed" });
+      expect(build({ record: stored, lidClosedOnBattery: true, now: after(BUILD_AT, 23 * 60 * MINUTE + 59 * MINUTE) })).toEqual({ action: "wait", reason: "lid-closed", run: stored, changed: false });
+      // The next day's time has come: that slot is found due, and waits in its turn.
+      expect(build({ record: stored, lidClosedOnBattery: true, now: after(BUILD_AT, 24 * 60 * MINUTE) })).toMatchObject({ action: "wait", reason: "lid-closed", run: { day: "2026-10-13", waiting: null }, changed: true });
+    });
+
+    it("comes after lines 1 to 4: a first check, a closed slot, a record ahead and a run that died are answered as before", () => {
+      expect(build({ record: null, lidClosedOnBattery: true })).toMatchObject({ action: "adopt" });
+      expect(build({ record: record("build", { day: "2026-10-13" }), lidClosedOnBattery: true })).toEqual({ action: "nothing" });
+      expect(build({ record: record("build", { startedAt: BUILD_AT, closedAt: BUILD_AT, closedAs: "done" }), lidClosedOnBattery: true })).toEqual({ action: "nothing" });
+      const died = record("build", { startedAt: BUILD_AT });
+      expect(build({ record: died, lidClosedOnBattery: true })).toEqual({ action: "close", run: died });
+    });
+
+    it("does not count the deliver job's 20 minutes afresh by itself: waking does that, as on any morning", () => {
+      // The delivery was due in a moment's wake at 6:31 am, with no build to wait for, and stored that it waits for the lid.
+      const stored = record("deliver", { noticedAt: "2026-10-12T12:31:00.000Z", waiting: "lid-closed" });
+      const SHORT_WAKE = "2026-10-12T12:31:00.000Z";
+      // The next wake: still closed. The record is handed back as it stands, and nothing is stored again.
+      expect(deliver({ record: stored, build: noBuild, lidClosedOnBattery: true, now: at("2026-10-12T12:46:00.000Z"), previousCheckAt: SHORT_WAKE })).toEqual({ action: "wait", reason: "lid-closed", run: stored, changed: false });
+      // 8:00 am: opened. A build that is late as well is waited for, with the 20 minutes counted from this waking.
+      const opened = at("2026-10-12T14:00:00.000Z");
+      expect(deliver({ record: stored, build: buildIsLate, lidClosedOnBattery: false, online: true, now: opened, previousCheckAt: SHORT_WAKE })).toEqual({
+        action: "wait",
+        reason: "build-not-started",
+        run: { ...stored, noticedAt: "2026-10-12T14:00:00.000Z" },
+        changed: true,
+      });
+      // With no build to wait for it simply runs.
+      expect(deliver({ record: stored, build: noBuild, lidClosedOnBattery: false, online: true, now: opened, previousCheckAt: SHORT_WAKE })).toEqual({ action: "run", run: stored, lateMs: 90 * MINUTE, firstNotice: false });
+    });
+  });
+
   it("8. waits when the internet does not answer, and skips the question when it was not asked", () => {
     const noticed = noticedRun({ day: "2026-10-12", at: at(BUILD_AT) }, now);
     expect(build({ online: false })).toEqual({ action: "wait", reason: "offline", run: noticed, changed: true });
@@ -565,6 +688,8 @@ describe("the rule, line by line", () => {
     // @ts-expect-error The facts have no power source. The owner's decision of Oct 11: the Mac is kept awake on battery too.
     const facts: NightFacts = { job: "build", now, config, record: yesterdaysBuild, online: true, power: "battery" };
     expect(decideNight(facts)).toMatchObject({ action: "run", lateMs: 20_000 });
+    // On battery with the lid open, as the caller reports it: not a reason to wait.
+    expect(build({ lidClosedOnBattery: false, online: true })).toMatchObject({ action: "run", lateMs: 20_000 });
   });
 
   it("goes by day names on the night the clocks go back: one slot, 25 hours long", () => {
@@ -625,6 +750,8 @@ describe("a job's night, for people", () => {
 
   it("says why a due slot is waiting", () => {
     expect(view({ record: record("build", { waiting: "offline" }) })).toMatchObject({ state: "due", waiting: "offline", lastRun: null });
+    expect(view({ record: record("build", { waiting: "lid-closed" }) })).toMatchObject({ state: "due", waiting: "lid-closed", lastRun: null });
+    expect(describeNight({ job: "deliver", now: after(DELIVER_AT, MINUTE), config, record: record("deliver", { waiting: "lid-closed" }), last: null, checkedAt: null, running: false })).toMatchObject({ state: "due", waiting: "lid-closed" });
     const deliverView = describeNight({ job: "deliver", now: after(DELIVER_AT, MINUTE), config, record: record("deliver", { waiting: "build-running" }), last: null, checkedAt: null, running: false });
     expect(deliverView).toMatchObject({ state: "due", waiting: "build-running", slotAt: DELIVER_AT, nextSlotAt: "2026-10-13T12:30:00.000Z" });
     // A reason left on an earlier day's record is not today's reason.

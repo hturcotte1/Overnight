@@ -239,7 +239,8 @@ If you would rather not change it, set `BUILD_SANDBOX=crew` in `.env`. Kiro Crew
 - **Plugged in to power, or with the lid open.**
   - Plugged in is what has been seen to work: on the first real night the Mac was on mains power with its lid closed.
   - On battery with the lid open, Overnight asks macOS to stay awake, so that it keeps listening and can build. That runs the battery down. Whether it holds on this Mac has not been tried yet (pending).
-  - **With the lid closed on battery nothing runs.** The Mac sleeps whatever is asked. Nothing is heard until it is opened, and a build that was due starts a minute or two after.
+  - **With the lid closed on battery nothing runs.** The Mac sleeps whatever is asked. Nothing is heard until it is opened, and a build that was due starts a minute or two after (or a minute or two after the Mac is plugged in).
+  - A sleeping Mac wakes by itself for a moment now and then. Overnight starts no build and no delivery in such a moment: while the Mac is on battery with its lid closed, a run that is due waits, and `npx overnight status` says "waiting for the lid to be opened or the Mac to be plugged in". This has met tests only, not yet a real closed lid (pending).
 - The phone with Bee on it, with notifications allowed, so the 7:00 alarm can buzz.
 
 **In the morning**

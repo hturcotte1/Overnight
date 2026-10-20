@@ -3,9 +3,10 @@
 // `mac()` below is a small stand-in for a Mac and for the command macOS wakes every minute
 // (`overnight build --if-due`, `overnight deliver --if-due`). It follows that command's steps in
 // the same order: write the heartbeat, decide, wait a minute in place after a gap, ask whether
-// the internet answers, take the job's lock, read the record and decide again, act. Both times
-// it decides, it says when the job's check before this one was. The clock is made up, and the
-// Mac sleeps, wakes and goes offline when a test says so.
+// the Mac is on battery with its lid closed, ask whether the internet answers (unless it is),
+// take the job's lock, read the record and decide again, act. Both times it decides, it says
+// when the job's check before this one was. The clock is made up, and the Mac sleeps, wakes,
+// goes offline, runs on its battery and has its lid closed when a test says so.
 //
 // What is under test is core's rule: when exactly each job starts, and that no slot is ever
 // started twice. All times are UTC. Boise is six hours behind in October, so 1:00 am is 07:00Z,
@@ -37,6 +38,8 @@ const ms = (iso: string) => Date.parse(iso);
 const iso = (at: number) => new Date(at).toISOString();
 
 type Span = [from: string, until: string];
+/** What a check has asked so far. Each is left out until it was asked. */
+type Asked = Pick<NightFacts, "lidClosedOnBattery" | "online">;
 
 interface MacOptions {
   /** The first check. Later ones come every 60 seconds, for both jobs, while the Mac is awake. */
@@ -45,6 +48,12 @@ interface MacOptions {
   asleep?: Span[];
   /** When GitHub does not answer. */
   offline?: Span[];
+  /** When the lid is closed. By itself it changes nothing: on mains power a closed Mac stays awake and runs. */
+  lidClosed?: Span[];
+  /** When the Mac runs on its battery. By itself it changes nothing either: with the lid open it is kept awake. */
+  onBattery?: Span[];
+  /** The lid cannot be read on this Mac (no lid, or the tool fails): the reading is "could not tell". */
+  lidUnreadable?: boolean;
   /** How long a build's work takes. Default 10 minutes. */
   buildMinutes?: number;
   /** Which job's check comes first each minute. Default the build's. */
@@ -90,19 +99,31 @@ function mac(options: MacOptions) {
     };
   }
 
-  /** The check, from the lock onwards. `online` is only asked when the first answer was to run. */
-  function underTheLock(job: ClockedJob, at: number, previous: string | null, online: boolean | undefined): void {
+  /**
+   * What a check asks of the Mac and of the internet when its first answer was to run: is the Mac
+   * on battery with its lid closed (only two plain readings make a yes), and, unless it is, does
+   * the internet answer?
+   */
+  function ask(at: number): Asked {
+    const lidClosed = options.lidUnreadable === true ? null : within(options.lidClosed, at);
+    const lidClosedOnBattery = within(options.onBattery, at) && lidClosed === true;
+    return lidClosedOnBattery ? { lidClosedOnBattery } : { lidClosedOnBattery, online: !within(options.offline, at) };
+  }
+
+  /** The check, from the lock onwards. `asked` is empty unless the first answer was to run. */
+  function underTheLock(job: ClockedJob, at: number, previous: string | null, asked: Asked): void {
     if (locks.has(job)) return;
     locks.add(job);
     const now = new Date(at);
-    const decision = decideNight({ job, now, config, record: readNightRun(store, job), ...buildFacts(job, at), previousCheckAt: previous, ...(online === undefined ? {} : { online }) });
+    const decision = decideNight({ job, now, config, record: readNightRun(store, job), ...buildFacts(job, at), previousCheckAt: previous, ...asked });
     if (decision.action === "adopt") writeNightRun(store, job, closedRun(noticedRun(decision.slot, now), "first-check", now), now);
     if (decision.action === "close") writeNightRun(store, job, closedRun(decision.run, "cut-short", now), now);
     if (decision.action === "wait" && decision.changed) {
       writeNightRun(store, job, waitingRun(decision.run, decision.reason), now);
       waits.push({ job, at: iso(at), reason: decision.reason });
     }
-    if (decision.action === "run") {
+    // Only a check that has asked may start a run.
+    if (decision.action === "run" && asked.online !== undefined) {
       let run = decision.run;
       if (decision.firstNotice || run.waiting !== null) {
         run = waitingRun(run, null);
@@ -125,13 +146,13 @@ function mac(options: MacOptions) {
     noteChecked(store, job, now);
     const decision = decideNight({ job, now, config, record: readNightRun(store, job), ...buildFacts(job, at), previousCheckAt: previous });
     if (decision.action === "nothing" || (decision.action === "wait" && !decision.changed)) return;
-    if (decision.action !== "run") return underTheLock(job, at, previous, undefined);
+    if (decision.action !== "run") return underTheLock(job, at, previous, {});
     if (previous === null || at - ms(previous) > WOKE_GAP_MS) {
       processes.set(job, { doing: "settling", since: at, previous });
       settles.push({ job, at: iso(at) });
       return;
     }
-    underTheLock(job, at, previous, !within(options.offline, at));
+    underTheLock(job, at, previous, ask(at));
   }
 
   function endWork(job: ClockedJob, working: Extract<Process, { doing: "working" }>, at: number, how: "done" | "cut-short"): void {
@@ -148,7 +169,7 @@ function mac(options: MacOptions) {
       processes.delete(job);
       // The minute took far longer than a minute: the Mac slept. Start nothing; the next check starts over.
       if (at - process.since > 2 * SETTLE_MS) return;
-      return underTheLock(job, at, process.previous, !within(options.offline, at));
+      return underTheLock(job, at, process.previous, ask(at));
     }
     // The time jumped while the work was going: the Mac slept through part of the run. It is cut short.
     if (at - process.seenAt > TICK_MS) return endWork(job, process, at, "cut-short");
@@ -343,6 +364,114 @@ describe("the night clock, night by night", () => {
     expectOneStartPerSlot(night.starts);
   });
 
+  describe("the lid closed on battery from midnight, awake for two minutes every quarter of an hour, opened at 8:00 am", () => {
+    // What a closed Mac on battery really does: it sleeps whatever is asked, and wakes by itself
+    // now and then. Some of those wakes last longer than the minute a just-woken job waits (on
+    // this Mac, 8 of 329 on Oct 8 and 9). Here every one of them does.
+    const CLOSED = ms("2026-10-12T06:00:00.000Z"); // midnight
+    const OPENED = ms("2026-10-12T14:00:00.000Z"); // 8:00 am
+    const asleep: Span[] = [];
+    for (let wake = CLOSED; wake < OPENED; wake += 15 * MINUTE) asleep.push([iso(wake === CLOSED ? wake : wake + 2 * MINUTE), iso(wake + 15 * MINUTE)]);
+    const closedAllNight: Span[] = [[iso(CLOSED), iso(OPENED)]];
+    const onBattery: Span[] = [[iso(CLOSED), "2026-10-12T20:00:00.000Z"]];
+
+    it("nothing starts until 8:00, then the build starts within two checks and the delivery follows it", () => {
+      const night = mac({ from: SWITCH_OVER, asleep, lidClosed: closedAllNight, onBattery }).until(iso(OPENED - MINUTE));
+      expect(night.starts).toEqual([]);
+      expect(night.ends).toEqual([]);
+      // The build job was woken in every one of those wakes from 1:00 am on, got through its
+      // minute's wait each time, and found the lid closed. It stored that once and said it once.
+      expect(night.settles.filter((settle) => settle.job === "build")).toHaveLength(28);
+      expect(night.waits.filter((wait) => wait.job === "build")).toEqual([{ job: "build", at: "2026-10-12T07:01:00.000Z", reason: "lid-closed" }]);
+      expect(night.record("build")).toEqual({ day: "2026-10-12", slotAt: "2026-10-12T07:00:00.000Z", noticedAt: "2026-10-12T07:01:00.000Z", startedAt: null, closedAt: null, closedAs: null, waiting: "lid-closed" });
+      // The delivery was due from 6:30 am. Its build was due too, so that is what it waited for.
+      expect(night.waits.filter((wait) => wait.job === "deliver").every((wait) => wait.reason === "build-not-started")).toBe(true);
+      expect(night.record("deliver")).toMatchObject({ day: "2026-10-12", startedAt: null, closedAt: null, waiting: "build-not-started" });
+      const before = night.waits.length;
+
+      night.until("2026-10-12T20:00:00.000Z");
+      // 8:00: the first check sees the gap and waits its minute. 8:01: the lid is open, and it builds.
+      expect(night.startsOf("build")).toEqual(["2026-10-12T14:01:00.000Z"]);
+      expect(night.starts[0]).toEqual({ job: "build", at: "2026-10-12T14:01:00.000Z", slotDay: "2026-10-12", lateMs: 7 * 60 * MINUTE + MINUTE });
+      expect(night.waits.slice(before)).toEqual([
+        { job: "deliver", at: "2026-10-12T14:00:00.000Z", reason: "build-not-started" },
+        { job: "deliver", at: "2026-10-12T14:01:00.000Z", reason: "build-running" },
+      ]);
+      // The build was not cut short, so it has used up no second try.
+      expect(night.ends[0]).toEqual({ job: "build", at: "2026-10-12T14:11:00.000Z", how: "done" });
+      expect(night.startsOf("deliver")).toEqual(["2026-10-12T14:11:00.000Z"]);
+      expect(night.record("build")).toMatchObject({ waiting: null, closedAs: "done" });
+      expectOneStartPerSlot(night.starts);
+    });
+
+    it("the same when the deliver job's check comes first each minute", () => {
+      const night = mac({ from: SWITCH_OVER, asleep, lidClosed: closedAllNight, onBattery, first: "deliver" }).until(iso(OPENED - MINUTE));
+      expect(night.starts).toEqual([]);
+      expect(night.waits.filter((wait) => wait.job === "build")).toEqual([{ job: "build", at: "2026-10-12T07:01:00.000Z", reason: "lid-closed" }]);
+
+      night.until("2026-10-12T20:00:00.000Z");
+      expect(night.startsOf("build")).toEqual(["2026-10-12T14:01:00.000Z"]);
+      expect(night.ends[0]).toEqual({ job: "build", at: "2026-10-12T14:11:00.000Z", how: "done" });
+      // A minute after the build ends: its own check comes before the build's that minute.
+      expect(night.startsOf("deliver")).toEqual(["2026-10-12T14:12:00.000Z"]);
+      expectOneStartPerSlot(night.starts);
+    });
+
+    it("plugged in at 3:00 am with the lid still closed: the build starts within two checks of that", () => {
+      // On mains power a closed Mac with a listener running stays awake: the first real night ran so.
+      const untilPlugged = asleep.filter(([from]) => ms(from) < ms("2026-10-12T09:00:00.000Z"));
+      const night = mac({ from: SWITCH_OVER, asleep: untilPlugged, lidClosed: closedAllNight, onBattery: [[iso(CLOSED), "2026-10-12T09:00:00.000Z"]] }).until("2026-10-12T14:00:00.000Z");
+      expect(night.waits).toEqual([{ job: "build", at: "2026-10-12T07:01:00.000Z", reason: "lid-closed" }]);
+      expect(night.starts).toEqual([
+        { job: "build", at: "2026-10-12T09:01:00.000Z", slotDay: "2026-10-12", lateMs: 121 * MINUTE },
+        { job: "deliver", at: "2026-10-12T12:30:00.000Z", slotDay: "2026-10-12", lateMs: 0 },
+      ]);
+      expect(night.ends.map((ended) => ended.how)).toEqual(["done", "done"]);
+    });
+
+    it("the same night on mains power: the Mac stays awake, and it builds at 1:00 am and delivers at 6:30 as before", () => {
+      const night = mac({ from: SWITCH_OVER, lidClosed: closedAllNight }).until("2026-10-12T20:00:00.000Z");
+      expect(night.starts).toEqual([
+        { job: "build", at: "2026-10-12T07:00:00.000Z", slotDay: "2026-10-12", lateMs: 0 },
+        { job: "deliver", at: "2026-10-12T12:30:00.000Z", slotDay: "2026-10-12", lateMs: 0 },
+      ]);
+      expect(night.waits).toEqual([]);
+      expect(night.settles).toEqual([]);
+      expect(night.ends.map((ended) => ended.how)).toEqual(["done", "done"]);
+    });
+
+    it("on battery with the lid open all night: kept awake, and it builds at 1:00 am as before", () => {
+      const night = mac({ from: SWITCH_OVER, onBattery }).until("2026-10-12T20:00:00.000Z");
+      expect(night.startsOf("build")).toEqual(["2026-10-12T07:00:00.000Z"]);
+      expect(night.startsOf("deliver")).toEqual(["2026-10-12T12:30:00.000Z"]);
+      expect(night.waits).toEqual([]);
+    });
+
+    it("on a Mac whose lid cannot be read nothing is held up: this is the night the rule is there for", () => {
+      // The reading is "could not tell", which never blocks. So the build starts inside the
+      // 1:00 am wake, as it did before the rule, and the sleep that follows cuts it short.
+      const night = mac({ from: SWITCH_OVER, asleep, lidClosed: closedAllNight, onBattery, lidUnreadable: true }).until("2026-10-12T07:15:00.000Z");
+      expect(night.startsOf("build")).toEqual(["2026-10-12T07:01:00.000Z"]);
+      expect(night.ends).toEqual([{ job: "build", at: "2026-10-12T07:15:00.000Z", how: "cut-short" }]);
+      expect(night.waits).toEqual([]);
+    });
+
+    it("the lid closed on battery only after the build: the delivery waits for the lid, says so once, and goes out at 8:01", () => {
+      // Plugged in until 5:00 am, so the build ran at 1:00. Then the plug is pulled, lid closed.
+      const UNPLUGGED = ms("2026-10-12T11:00:00.000Z");
+      const afterUnplugging = asleep.filter(([from]) => ms(from) >= UNPLUGGED);
+      const night = mac({ from: SWITCH_OVER, asleep: afterUnplugging, lidClosed: closedAllNight, onBattery: [[iso(UNPLUGGED), "2026-10-12T20:00:00.000Z"]] }).until(iso(OPENED - MINUTE));
+      expect(night.starts).toEqual([{ job: "build", at: "2026-10-12T07:00:00.000Z", slotDay: "2026-10-12", lateMs: 0 }]);
+      expect(night.waits).toEqual([{ job: "deliver", at: "2026-10-12T12:31:00.000Z", reason: "lid-closed" }]);
+      expect(night.record("deliver")).toMatchObject({ day: "2026-10-12", noticedAt: "2026-10-12T12:31:00.000Z", startedAt: null, waiting: "lid-closed" });
+
+      night.until("2026-10-12T20:00:00.000Z");
+      expect(night.startsOf("deliver")).toEqual(["2026-10-12T14:01:00.000Z"]);
+      expect(night.waits).toHaveLength(1);
+      expectOneStartPerSlot(night.starts);
+    });
+  });
+
   it("the Mac sleeps in the middle of a build: the run is cut short when it wakes, the slot is not started again, the next night builds", () => {
     // The lid is closed at 1:05 am and opened at 3:00 am. The build needed 20 minutes.
     const night = mac({ from: SWITCH_OVER, buildMinutes: 20, asleep: [["2026-10-12T07:05:00.000Z", "2026-10-12T09:00:00.000Z"]] }).until("2026-10-12T09:00:00.000Z");
@@ -474,7 +603,7 @@ describe("the night clock, on nights nobody planned", () => {
 
     for (let seed = 1; seed <= 12; seed += 1) {
       const next = numbers(seed);
-      // Sleeps, naps and offline spells of odd lengths at odd moments.
+      // Sleeps, naps, offline spells and spells with the lid closed on battery, of odd lengths at odd moments.
       const spans = (count: number, longestMinutes: number): Span[] =>
         Array.from({ length: count }, () => {
           const start = from + next(58 * 60) * MINUTE + next(60) * 1000;
@@ -487,8 +616,12 @@ describe("the night clock, on nights nobody planned", () => {
         buildMinutes: 1 + next(120),
         first: seed % 2 === 0 ? "deliver" : "build",
         ...(seed % 3 === 0 ? { kill: { job: "build" as const, at: iso(from + next(58 * 60) * MINUTE) } } : {}),
+        // Drawn last, so the nights above are the ones they were before the lid was looked at.
+        lidClosed: spans(6, 3 * 60),
+        onBattery: [[SWITCH_OVER, iso(end)]],
       });
-      // The longest sleep is over at least four hours before this moment, and so is every offline spell.
+      // The longest sleep is over at least four hours before this moment, and so are every offline
+      // spell and every spell with the lid closed.
       night.until(iso(end));
 
       expectOneStartPerSlot(night.starts);
@@ -513,6 +646,6 @@ describe("the night clock, on nights nobody planned", () => {
     expect(seen.settles).toBeGreaterThan(20);
     expect(seen.cutShort).toBeGreaterThan(0);
     expect(seen.killed).toBeGreaterThan(0);
-    expect([...seen.waits].sort()).toEqual(["build-not-started", "build-running", "offline"]);
+    expect([...seen.waits].sort()).toEqual(["build-not-started", "build-running", "lid-closed", "offline"]);
   });
 });

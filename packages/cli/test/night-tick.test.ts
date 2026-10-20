@@ -1,6 +1,7 @@
 // The night clock's every-minute check, on fakes: a store that is a Map, made-up locks, a made-up
-// clock, a made-up internet and a wait that takes no time. Nothing is built, nothing is delivered,
-// and no real lock, log file, network or Bee is touched.
+// clock, a made-up internet, a made-up power source and lid, and a wait that takes no time.
+// Nothing is built, nothing is delivered, and no real lock, log file, network, Bee or tool of
+// macOS is touched.
 //
 // All times are UTC. The settings are Boise's: in October 1:00 am is 07:00Z and 6:30 am is 12:30Z.
 import path from "node:path";
@@ -25,6 +26,7 @@ import {
 import type { ClockedJob, NightClockConfig, NightRun } from "@overnight/core";
 import { buildJobAlive, nextStartAt, nightLockFile, nightTick, NOT_STARTING_AFTER_MS, runNotStarting, startClockFromNow, WAITING_FOR } from "../src/commands/night-tick.ts";
 import type { NightRunMarks, NightTickDeps } from "../src/commands/night-tick.ts";
+import type { PowerSource } from "../src/power.ts";
 import type { ReleaseLock } from "../src/single-instance.ts";
 import { capture, plain } from "./helpers.ts";
 import { collectingLogger } from "./night-fakes.ts";
@@ -70,6 +72,11 @@ function setUp(options: SetUp) {
     order: [] as string[],
     lockHeldAsked: [] as string[],
     online: true,
+    /** What the Mac says it runs on, and whether its lid is closed (null: cannot be told). Plugged in and open unless a test says otherwise. */
+    power: "mains" as PowerSource,
+    lid: false as boolean | null,
+    /** Each question put to the Mac about its power and its lid, in order, with the clock's time when it was put. */
+    macAsked: [] as Array<[question: "power?" | "lid?", at: string]>,
     sleeps: [] as number[],
     /** How long a wait really takes. Default: as long as it was asked to. */
     sleepTakes: null as number | null,
@@ -147,6 +154,14 @@ function setUp(options: SetUp) {
       const name = path.basename(file);
       return t.heldElsewhere.has(name) || t.heldByUs.has(name);
     },
+    powerSource: async () => {
+      t.macAsked.push(["power?", iso(t.clock)]);
+      return t.power;
+    },
+    lidClosed: async () => {
+      t.macAsked.push(["lid?", iso(t.clock)]);
+      return t.lid;
+    },
     isOnline: async () => {
       t.order.push("online?");
       return t.online;
@@ -198,6 +213,7 @@ describe("overnight build --if-due: a check that finds nothing due", () => {
     expect(t.record()).toEqual(before);
     expect(t.order).toEqual([]);
     expect(t.lockHeldAsked).toEqual([]);
+    expect(t.macAsked).toEqual([]);
     expect(t.loggersMade).toBe(0);
     expect(t.err.lines).toEqual([]);
     expect(t.sleeps).toEqual([]);
@@ -232,8 +248,9 @@ describe("overnight build --if-due: the job's first ever check", () => {
     expect(await t.tick()).toBe(0);
     expect(t.record()).toEqual({ day: "2026-10-12", slotAt: BUILD_AT, noticedAt: "2026-10-12T08:00:00.000Z", startedAt: null, closedAt: "2026-10-12T08:00:00.000Z", closedAs: "first-check", waiting: null });
     expect(t.runs).toBe(0);
-    // Under the job's lock, and without waiting or asking the internet first: nothing is going to start.
+    // Under the job's lock, and without waiting or asking the Mac or the internet first: nothing is going to start.
     expect(t.order).toEqual(["lock build.lock", "release build.lock"]);
+    expect(t.macAsked).toEqual([]);
     expect(t.sleeps).toEqual([]);
     expect(t.log.lines).toHaveLength(1);
     expect(t.log.lines[0]).toMatchObject({ level: "info", message: "night clock: first check, so this slot counts as handled; the first run comes at the next one", job: "build", slotDay: "2026-10-12" });
@@ -260,6 +277,8 @@ describe("overnight build --if-due: the job's time has come", () => {
     expect(t.runs).toBe(1);
     // The work asks for "its" lock and is handed the one the check already holds: taken once, let go once.
     expect(t.order).toEqual(["online?", "lock build.lock", "work", "release build.lock"]);
+    // On mains power the Mac is asked one thing, once, and the lid is not looked at.
+    expect(t.macAsked).toEqual([["power?", "2026-10-12T07:00:30.000Z"]]);
     expect(t.sleeps).toEqual([]);
     // What the work found when it was called: the slot noticed, stored, and not yet started.
     expect(t.seenByWork).toEqual([{ day: "2026-10-12", slotAt: BUILD_AT, noticedAt: "2026-10-12T07:00:30.000Z", startedAt: null, closedAt: null, closedAs: null, waiting: null }]);
@@ -375,6 +394,14 @@ function depsOf(t: Harness): NightTickDeps {
     logger: () => t.log.logger,
     takeLock: (file) => t.takeLock(file),
     lockHeld: (file) => t.heldElsewhere.has(path.basename(file)),
+    powerSource: async () => {
+      t.macAsked.push(["power?", iso(t.clock)]);
+      return t.power;
+    },
+    lidClosed: async () => {
+      t.macAsked.push(["lid?", iso(t.clock)]);
+      return t.lid;
+    },
     isOnline: async () => {
       t.order.push("online?");
       return t.online;
@@ -510,10 +537,208 @@ describe("overnight build --if-due: no real internet", () => {
     expect(t.runs).toBe(1);
   });
 
-  it("asks only about the internet: there is no rule about mains power, and nothing to ask it with", () => {
+  it("has four things a due run can wait for, and none of them is mains power", () => {
     const t = setUp({ at: BUILD_AT });
-    expect(Object.keys(depsOf(t)).sort()).toEqual(["config", "isOnline", "job", "lockHeld", "logger", "now", "paths", "run", "sleep", "store", "takeLock", "writeError"]);
-    expect(Object.keys(WAITING_FOR).sort()).toEqual(["build-not-started", "build-running", "offline"]);
+    expect(Object.keys(depsOf(t)).sort()).toEqual(["config", "isOnline", "job", "lidClosed", "lockHeld", "logger", "now", "paths", "powerSource", "run", "sleep", "store", "takeLock", "writeError"]);
+    expect(WAITING_FOR).toEqual({
+      "build-running": "the build to finish",
+      "build-not-started": "the build, which has not started yet",
+      "lid-closed": "the lid to be opened or the Mac to be plugged in",
+      offline: "the internet",
+    });
+  });
+});
+
+describe("overnight build --if-due: on battery with the lid closed", () => {
+  const WAITING_LINE = "night clock: waiting for the lid to be opened or the Mac to be plugged in";
+
+  it("does not run, stores why and logs it once, asks again at each check, and runs once the lid is opened", async () => {
+    const t = awakeSince({ at: "2026-10-12T07:00:30.000Z" }, "2026-10-12T06:59:30.000Z");
+    t.power = "battery";
+    t.lid = true;
+    expect(await t.tick()).toBe(0);
+    expect(t.runs).toBe(0);
+    const waiting = { day: "2026-10-12", slotAt: BUILD_AT, noticedAt: "2026-10-12T07:00:30.000Z", startedAt: null, closedAt: null, closedAs: null, waiting: "lid-closed" };
+    expect(t.record()).toEqual(waiting);
+    expect(t.logged()).toEqual([["info", WAITING_LINE]]);
+    expect(t.log.lines[0]).toMatchObject({ job: "build", slotDay: "2026-10-12", reason: "lid-closed" });
+    // Power first, then the lid. The internet was not asked: nothing was going to start whatever it said.
+    expect(t.macAsked).toEqual([
+      ["power?", "2026-10-12T07:00:30.000Z"],
+      ["lid?", "2026-10-12T07:00:30.000Z"],
+    ]);
+    expect(t.order).toEqual(["lock build.lock", "release build.lock"]);
+    expect(t.err.lines).toEqual([]);
+
+    // Ten more checks with the lid closed: asked each time, nothing more written about the slot or logged.
+    t.writes.length = 0;
+    expect(await t.minutes(10)).toEqual(Array.from({ length: 10 }, () => 0));
+    expect(t.record()).toEqual(waiting);
+    expect(t.logged()).toHaveLength(1);
+    expect(t.writes.every((key) => key === "night.build.checkedAt")).toBe(true);
+    expect(t.macAsked.filter(([question]) => question === "lid?")).toHaveLength(11);
+    expect(t.order.includes("online?")).toBe(false);
+    expect(t.runs).toBe(0);
+
+    // The lid is opened, still on battery.
+    t.lid = false;
+    expect(await t.minutes(1)).toEqual([0]);
+    expect(t.runs).toBe(1);
+    // The work found the slot no longer waiting, and it started 11 minutes late.
+    expect(t.seenByWork[0]).toEqual({ ...waiting, waiting: null });
+    expect(t.record()).toMatchObject({ startedAt: "2026-10-12T07:11:30.000Z", closedAs: "done", waiting: null });
+    expect(t.logged()).toEqual([
+      ["info", WAITING_LINE],
+      ["warn", "night clock: starting"],
+    ]);
+    expect(t.order.slice(-4)).toEqual(["online?", "lock build.lock", "work", "release build.lock"]);
+    // Once is once.
+    expect(await t.minutes(3)).toEqual([0, 0, 0]);
+    expect(t.runs).toBe(1);
+  });
+
+  it("runs once the Mac is plugged in, with the lid still closed, and does not look at the lid then", async () => {
+    const t = awakeSince({ at: "2026-10-12T07:00:30.000Z" }, "2026-10-12T06:59:30.000Z");
+    t.power = "battery";
+    t.lid = true;
+    expect(await t.tick()).toBe(0);
+    expect(t.record()).toMatchObject({ waiting: "lid-closed" });
+    t.macAsked.length = 0;
+
+    t.power = "mains";
+    expect(await t.minutes(1)).toEqual([0]);
+    expect(t.runs).toBe(1);
+    expect(t.macAsked).toEqual([["power?", "2026-10-12T07:01:30.000Z"]]);
+    expect(t.record()).toMatchObject({ startedAt: "2026-10-12T07:01:30.000Z", closedAs: "done", waiting: null });
+  });
+
+  it("holds the deliver job up in the same way, with its own line in its own log", async () => {
+    // 6:30 am. Nothing is known of a build job on this data folder, so there is no build to wait for.
+    const t = awakeSince({ job: "deliver", at: "2026-10-12T12:30:10.000Z" }, "2026-10-12T12:29:10.000Z");
+    t.power = "battery";
+    t.lid = true;
+    expect(await t.tick()).toBe(0);
+    expect(t.runs).toBe(0);
+    expect(t.record()).toEqual({ day: "2026-10-12", slotAt: DELIVER_AT, noticedAt: "2026-10-12T12:30:10.000Z", startedAt: null, closedAt: null, closedAs: null, waiting: "lid-closed" });
+    expect(t.logged()).toEqual([["info", WAITING_LINE]]);
+    expect(t.log.lines[0]).toMatchObject({ name: "deliver", job: "deliver", slotDay: "2026-10-12", reason: "lid-closed" });
+    expect(t.order).toEqual(["lock deliver.lock", "release deliver.lock"]);
+    expect(await t.minutes(5)).toEqual([0, 0, 0, 0, 0]);
+    expect(t.logged()).toHaveLength(1);
+
+    t.lid = false;
+    expect(await t.minutes(1)).toEqual([0]);
+    expect(t.runs).toBe(1);
+    expect(t.record()).toMatchObject({ startedAt: "2026-10-12T12:36:10.000Z", closedAs: "done", waiting: null });
+  });
+
+  it("names the build first when the delivery has a late build to wait for, and does not ask the Mac for that", async () => {
+    const t = awakeSince({ job: "deliver", at: "2026-10-12T12:30:10.000Z" }, "2026-10-12T12:29:10.000Z");
+    t.power = "battery";
+    t.lid = true;
+    t.heldElsewhere.add("build.lock");
+    expect(await t.tick()).toBe(0);
+    expect(t.record()).toMatchObject({ waiting: "build-running" });
+    expect(t.macAsked).toEqual([]);
+    // The build ends, and the lid is still closed: now that is what holds the delivery up.
+    t.heldElsewhere.clear();
+    expect(await t.minutes(1)).toEqual([0]);
+    expect(t.runs).toBe(0);
+    expect(t.record()).toMatchObject({ waiting: "lid-closed" });
+    expect(t.logged()).toEqual([
+      ["info", "night clock: waiting for the build to finish"],
+      ["info", WAITING_LINE],
+    ]);
+  });
+
+  it("is never held up by a reading that cannot be made", async () => {
+    const fails = async (): Promise<never> => {
+      throw new Error("made-up: the tool fell over");
+    };
+    const cases: Array<{ why: string; power?: PowerSource; lid?: boolean | null; powerSource?: NightTickDeps["powerSource"]; lidClosed?: NightTickDeps["lidClosed"]; asked: string[] }> = [
+      { why: "the power source is not known, and the lid is closed", power: "unknown", lid: true, asked: ["power?"] },
+      { why: "on battery, and this Mac has no lid to read", power: "battery", lid: null, asked: ["power?", "lid?"] },
+      { why: "on battery with the lid open", power: "battery", lid: false, asked: ["power?", "lid?"] },
+      { why: "on mains power with the lid closed", power: "mains", lid: true, asked: ["power?"] },
+      { why: "the question about power fails outright", lid: true, powerSource: fails, asked: [] },
+      { why: "the question about the lid fails outright", power: "battery", lidClosed: fails, asked: ["power?"] },
+    ];
+    for (const one of cases) {
+      const t = awakeSince({ at: "2026-10-12T07:00:30.000Z" }, "2026-10-12T06:59:30.000Z");
+      if (one.power !== undefined) t.power = one.power;
+      if (one.lid !== undefined) t.lid = one.lid;
+      const deps: NightTickDeps = { ...depsOf(t), ...(one.powerSource ? { powerSource: one.powerSource } : {}), ...(one.lidClosed ? { lidClosed: one.lidClosed } : {}) };
+      expect(await nightTick(deps), one.why).toBe(0);
+      expect(t.runs, one.why).toBe(1);
+      expect(t.record(), one.why).toMatchObject({ startedAt: "2026-10-12T07:00:30.000Z", closedAs: "done", waiting: null });
+      expect(t.macAsked.map(([question]) => question), one.why).toEqual(one.asked);
+      // The internet was asked, as before any run, and nothing was said on the error stream.
+      expect(t.order, one.why).toEqual(["online?", "lock build.lock", "work", "release build.lock"]);
+      expect(t.err.lines, one.why).toEqual([]);
+    }
+  });
+
+  it("in one of the sleeping Mac's own wakes: waits its minute, then reads the lid, and starts nothing", async () => {
+    // Lid closed on battery since midnight. At 1:00 am the Mac wakes by itself for two minutes.
+    const t = awakeSince({ at: "2026-10-12T07:00:00.000Z" }, "2026-10-12T06:46:00.000Z");
+    t.power = "battery";
+    t.lid = true;
+    expect(await t.tick()).toBe(0);
+    expect(t.sleeps).toEqual([SETTLE_MS]);
+    // Both were asked after the minute's wait: as the Mac stood when the build would have started.
+    expect(t.macAsked).toEqual([
+      ["power?", "2026-10-12T07:01:00.000Z"],
+      ["lid?", "2026-10-12T07:01:00.000Z"],
+    ]);
+    expect(t.runs).toBe(0);
+    expect(t.record()).toMatchObject({ day: "2026-10-12", noticedAt: "2026-10-12T07:01:00.000Z", startedAt: null, waiting: "lid-closed" });
+    expect(t.logged()).toEqual([["info", WAITING_LINE]]);
+
+    // The next wake, a quarter of an hour on, and the one after: the same, with nothing more stored or said.
+    t.writes.length = 0;
+    for (const wake of ["2026-10-12T07:15:00.000Z", "2026-10-12T07:30:00.000Z"]) expect(await t.tick(wake)).toBe(0);
+    expect(t.sleeps).toEqual([SETTLE_MS, SETTLE_MS, SETTLE_MS]);
+    expect(t.writes.every((key) => key === "night.build.checkedAt")).toBe(true);
+    expect(t.logged()).toHaveLength(1);
+    expect(t.runs).toBe(0);
+
+    // 8:00 am: the lid is opened. One minute's wait, and the build starts, seven hours late.
+    t.lid = false;
+    expect(await t.tick("2026-10-12T14:00:00.000Z")).toBe(0);
+    expect(t.runs).toBe(1);
+    expect(t.record()).toMatchObject({ startedAt: "2026-10-12T14:01:00.000Z", closedAs: "done", waiting: null });
+    expect(t.log.lines.at(-1)).toMatchObject({ level: "warn", message: "night clock: starting", lateMinutes: 421 });
+  });
+
+  it("asks nothing of the Mac in a wake that ends during the minute's wait", async () => {
+    const t = awakeSince({ at: "2026-10-12T07:00:00.000Z" }, "2026-10-12T06:46:00.000Z");
+    t.power = "battery";
+    t.lid = true;
+    t.sleepTakes = 15 * MINUTE;
+    expect(await t.tick()).toBe(0);
+    expect(t.macAsked).toEqual([]);
+    expect(t.order).toEqual([]);
+    expect(t.loggersMade).toBe(0);
+    expect(t.record()).toMatchObject({ day: "2026-10-11" });
+  });
+
+  it("decides again under the lock with the same reading: a record another process closed in that instant is left closed", async () => {
+    const t = awakeSince({ at: "2026-10-12T07:00:30.000Z" }, "2026-10-12T06:59:30.000Z");
+    t.power = "battery";
+    t.lid = true;
+    const takeLock = t.takeLock;
+    const deps: NightTickDeps = {
+      ...depsOf(t),
+      takeLock: (file) => {
+        const now = new Date(t.clock);
+        writeNightRun(t.store, "build", closedRun(startedRun(noticedRun(currentSlot("build", now, config), now), now), "done", now), now);
+        return takeLock(file);
+      },
+    };
+    expect(await nightTick(deps)).toBe(0);
+    expect(t.runs).toBe(0);
+    expect(t.record()).toMatchObject({ closedAs: "done", waiting: null });
+    expect(t.loggersMade).toBe(0);
   });
 });
 
@@ -988,7 +1213,7 @@ describe("when the clock will next start a job by itself", () => {
     const late = setUp({ at: "2026-10-12T20:30:00.000Z" });
     for (const [key, value] of t.values) late.values.set(key, value);
     const startedAt: string[] = [];
-    const deps = { job: "build" as const, store: late.store, config: moved, paths, now: () => new Date(late.clock), logger: () => late.log.logger, takeLock: late.takeLock, lockHeld: () => false, isOnline: async () => true, sleep: async () => {}, writeError: late.err.write };
+    const deps = { job: "build" as const, store: late.store, config: moved, paths, now: () => new Date(late.clock), logger: () => late.log.logger, takeLock: late.takeLock, lockHeld: () => false, powerSource: async () => "mains" as const, lidClosed: async () => false, isOnline: async () => true, sleep: async () => {}, writeError: late.err.write };
     while (late.clock <= named.getTime() + MINUTE) {
       await nightTick({
         ...deps,

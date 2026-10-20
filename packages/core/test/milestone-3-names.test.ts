@@ -41,13 +41,18 @@ describe("what Milestone 3 added to core", () => {
     same<NightClockConfig, Pick<Config, "timeZone" | "buildTime" | "deliverTime">>(true);
     same<NightSlot, { day: string; at: Date }>(true);
     // No "on-battery": the owner's decision of Oct 11 is that the Mac is kept awake on battery too.
-    same<NightWait, "build-running" | "build-not-started" | "offline">(true);
+    // "lid-closed" was added on Oct 12: on battery with the lid closed the Mac sleeps whatever is
+    // asked, so a run started in a moment's wake could only be cut short.
+    same<NightWait, "build-running" | "build-not-started" | "lid-closed" | "offline">(true);
     same<NightRun, { day: string; slotAt: string; noticedAt: string; startedAt: string | null; closedAt: string | null; closedAs: "done" | "cut-short" | "first-check" | null; waiting: NightWait | null }>(true);
     // `previousCheckAt` was added in the fix round after the plan: the deliver job's 20 minutes
     // for a late build must not run out while the Mac is asleep, and only the caller knows when
     // the job's check before this one was.
-    same<keyof NightFacts, "job" | "now" | "config" | "record" | "build" | "online" | "previousCheckAt">(true);
+    same<keyof NightFacts, "job" | "now" | "config" | "record" | "build" | "lidClosedOnBattery" | "online" | "previousCheckAt">(true);
     same<NightFacts["previousCheckAt"], string | null | undefined>(true);
+    // Added with "lid-closed". One yes or no, already worked out by the caller from two readings:
+    // the clock itself is told nothing about the power source or the lid.
+    same<NightFacts["lidClosedOnBattery"], boolean | undefined>(true);
     same<NonNullable<NightFacts["build"]>, { open: boolean; running: boolean | null; jobAlive: boolean }>(true);
     same<
       NightDecision,

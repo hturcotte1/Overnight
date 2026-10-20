@@ -10,6 +10,9 @@
 // When the job's slot is due, a check goes on, in this order:
 //   - If the check before this one was long ago, the Mac has only just woken (or been switched
 //     on). It waits one minute in place first, so a Mac that woke for a moment starts nothing.
+//   - It asks whether the Mac is on battery with its lid closed. Such a Mac sleeps whatever is
+//     asked, and is only awake now because it woke by itself for a while. Nothing started then
+//     could finish, so the slot stays due until the lid is opened or the Mac is plugged in.
 //   - It asks whether there is real internet. Without it the slot stays due and the next check
 //     asks again.
 //   - It takes the job's lock, reads the record again and decides again. Only then does it act.
@@ -43,6 +46,8 @@ import {
 } from "@overnight/core";
 import type { ClockedJob, DataPaths, Logger, NightClockConfig, NightDecision, NightFacts, NightRun, NightWait, Store } from "@overnight/core";
 import type { Write } from "../output.ts";
+import { isLidClosedOnBattery } from "../power.ts";
+import type { PowerSource } from "../power.ts";
 import { buildLockFile, deliverLockFile } from "../single-instance.ts";
 import type { ReleaseLock } from "../single-instance.ts";
 
@@ -69,6 +74,10 @@ export interface NightTickDeps {
   takeLock: (file: string) => ReleaseLock | null;
   /** Does some process hold this lock right now? Null if that could not be told. The deliver job asks it of the build lock. */
   lockHeld: (file: string) => boolean | null;
+  /** Is this Mac on mains power or on battery (power.ts)? Asked only when a run is about to start. */
+  powerSource: () => Promise<PowerSource>;
+  /** Is the lid closed (power.ts)? Null if that cannot be told. Asked only on battery, when a run is about to start. */
+  lidClosed: () => Promise<boolean | null>;
   /** Does the internet answer (online.ts)? */
   isOnline: () => Promise<boolean>;
   sleep: (ms: number) => Promise<void>;
@@ -85,6 +94,7 @@ export interface NightTickDeps {
 export const WAITING_FOR: Record<NightWait, string> = {
   "build-running": "the build to finish",
   "build-not-started": "the build, which has not started yet",
+  "lid-closed": "the lid to be opened or the Mac to be plugged in",
   offline: "the internet",
 };
 
@@ -112,17 +122,39 @@ function buildFacts(deps: Pick<NightTickDeps, "store" | "config" | "paths" | "lo
   };
 }
 
+/** What a check has asked of the Mac and of the internet so far. Each is left out until it was asked. */
+interface Asked {
+  lidClosedOnBattery?: boolean;
+  online?: boolean;
+}
+
 /**
  * The clock's answer at `now`, from the record as stored at this moment. `previousCheckAt` is the
- * job's heartbeat from before this check wrote its own; `online` is left out until it was asked.
+ * job's heartbeat from before this check wrote its own.
  */
-function decide(deps: NightTickDeps, now: Date, previousCheckAt: string | null, online: boolean | undefined): NightDecision {
-  const facts: NightFacts = { job: deps.job, now, config: deps.config, record: readNightRun(deps.store, deps.job), previousCheckAt, ...(online === undefined ? {} : { online }) };
+function decide(deps: NightTickDeps, now: Date, previousCheckAt: string | null, asked: Asked): NightDecision {
+  const facts: NightFacts = { job: deps.job, now, config: deps.config, record: readNightRun(deps.store, deps.job), previousCheckAt, ...asked };
   const alone = decideNight(facts);
   // How the build stands only matters to a delivery that is otherwise ready to go. Asking it
   // means looking at the build lock, which the checks that find nothing due have no need to do.
   if (deps.job !== "deliver" || (alone.action !== "run" && alone.action !== "wait")) return alone;
   return decideNight({ ...facts, build: buildFacts(deps, now) });
+}
+
+/**
+ * Is the Mac on battery with its lid closed? Two small questions to macOS (power.ts), the second
+ * asked only on battery, so that a Mac on mains power is asked one thing and held up by nothing.
+ * Only two plain answers make a yes. Anything else, a question that fails included, is a no: a
+ * reading that cannot be made never holds a run up.
+ */
+async function closedOnBattery(deps: Pick<NightTickDeps, "powerSource" | "lidClosed">): Promise<boolean> {
+  try {
+    const power = await deps.powerSource();
+    if (power !== "battery") return false;
+    return isLidClosedOnBattery(power, await deps.lidClosed());
+  } catch {
+    return false;
+  }
 }
 
 /** True when the job's check before this one was so long ago that the Mac was asleep or off in between, or there was none. */
@@ -144,10 +176,10 @@ export async function nightTick(deps: NightTickDeps): Promise<number> {
     const previous = readCheckedAt(store, job);
     noteChecked(store, job, deps.now());
 
-    const first = decide(deps, deps.now(), previous, undefined);
+    const first = decide(deps, deps.now(), previous, {});
     if (first.action === "nothing" || (first.action === "wait" && !first.changed)) return 0;
 
-    let online: boolean | undefined;
+    const asked: Asked = {};
     if (first.action === "run") {
       if (wokeJustNow(previous, deps.now())) {
         // Just woken: stay put for a minute before starting anything.
@@ -157,7 +189,10 @@ export async function nightTick(deps: NightTickDeps): Promise<number> {
         // the next check starts over.
         if (deps.now().getTime() - since > 2 * SETTLE_MS) return 0;
       }
-      online = await deps.isOnline();
+      // After the wait, so that both answers are as the Mac stands when the run would start. With
+      // the lid closed on battery nothing starts whatever the internet says, so it is not asked.
+      asked.lidClosedOnBattery = await closedOnBattery(deps);
+      if (!asked.lidClosedOnBattery) asked.online = await deps.isOnline();
     }
 
     release = deps.takeLock(lockFile);
@@ -166,7 +201,7 @@ export async function nightTick(deps: NightTickDeps): Promise<number> {
 
     // Under the lock: read the record again and decide again. The first answer was only a hint.
     const now = deps.now();
-    const decision = decide(deps, now, previous, online);
+    const decision = decide(deps, now, previous, asked);
     if (decision.action === "adopt") {
       writeNightRun(store, job, closedRun(noticedRun(decision.slot, now), "first-check", now), now);
       deps.logger().info("night clock: first check, so this slot counts as handled; the first run comes at the next one", { job, slotDay: decision.slot.day });
@@ -185,9 +220,9 @@ export async function nightTick(deps: NightTickDeps): Promise<number> {
       return 0;
     }
     if (decision.action === "nothing") return 0;
-    // Only a check that has asked about the internet may start a run. (Its first answer was to
-    // wait or to tidy up, and things changed in the instant since.) The next check asks.
-    if (online === undefined) return 0;
+    // Only a check that has asked about the lid and the internet may start a run. (Its first
+    // answer was to wait or to tidy up, and things changed in the instant since.) The next check asks.
+    if (asked.online === undefined) return 0;
     return await runSlot(deps, decision.run, decision.firstNotice, now, lockFile, release);
   } catch (error) {
     deps.writeError(`"overnight ${job} --if-due" could not check the night clock. ${errorSummary(error)}`);

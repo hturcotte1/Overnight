@@ -365,10 +365,14 @@ function rehearsalCli(options: { settings?: Record<string, string>; given?: stri
   const lastResort = fakeLastResort();
   const sleepWatch = fakeSleepWatch();
   const logs = { build: collectingLogger("build"), deliver: collectingLogger("deliver") };
+  /** Each question put to the made-up Mac about its power and its lid. It answers as the Mac that holds a night job up: on battery, lid closed. */
+  const macAsked: string[] = [];
   const io: Partial<CliIo> = {
     write: out.write,
     writeError: err.write,
     open,
+    powerSource: async () => (macAsked.push("power?"), "battery"),
+    lidClosed: async () => (macAsked.push("lid?"), true),
     givenDataDir: () => (options.given === null ? undefined : dataDir),
     rehearsalFolderProblem: (given) => rehearsalFolderProblem({ given, home: mac.home, envFileText: null }),
     buildFactories: build.load,
@@ -399,7 +403,7 @@ function rehearsalCli(options: { settings?: Record<string, string>; given?: stri
       store.close();
     }
   };
-  return { mac, dataDir, out, err, open, opened, order, build, deliverCalls, deliverSteps, stop, lastResort, sleepWatch, logs, look, beeLog: path.join(dataDir, REHEARSAL_BEE_LOG), run: (...argv: string[]) => runCli(argv, io) };
+  return { mac, dataDir, out, err, open, opened, order, build, deliverCalls, deliverSteps, stop, lastResort, sleepWatch, logs, macAsked, look, beeLog: path.join(dataDir, REHEARSAL_BEE_LOG), run: (...argv: string[]) => runCli(argv, io) };
 }
 
 describe("overnight rehearse new", () => {
@@ -578,6 +582,8 @@ describe("overnight rehearse run", () => {
     expect(t.err.lines).toEqual([]);
     // The stop signals and the last resort are watched for the whole run, and let go of afterwards.
     expect([t.stop.handlers(), t.lastResort.handlers()]).toEqual([0, 0]);
+    // A rehearsal is not held up by a closed lid on battery, as a night job is: someone is at the Mac. Neither was even read.
+    expect(t.macAsked).toEqual([]);
   });
 
   it("says in both logs that it is a rehearsal, under its own name, and logs ids only", async () => {
@@ -724,7 +730,8 @@ describe("a data folder that holds a rehearsal idea", () => {
     let clock = Date.parse("2026-10-12T06:00:00.000Z");
     const t = rehearsalCli({
       settings: { TZ: "America/Boise", BUILD_TIME: "01:00", DELIVER_TIME: "07:00" },
-      overrides: { now: () => new Date(clock), isOnline: async () => true, sleep: async () => {}, jobLockHeld: () => false },
+      // Plugged in, lid open and online, all made up: the real Mac is asked nothing.
+      overrides: { now: () => new Date(clock), powerSource: async () => "mains", lidClosed: async () => false, isOnline: async () => true, sleep: async () => {}, jobLockHeld: () => false },
     });
     expect(await t.run("rehearse", "new", TITLE, PITCH)).toBe(0);
     const id = t.out.lines[0] ?? "";

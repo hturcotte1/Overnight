@@ -416,6 +416,8 @@ export function whenWords(at: Date, timeZone: string, beside: Date): string {
 /** What a due run is waiting for, when a reason is stored. */
 const WAITING_WORDS: Record<NonNullable<NightView["waiting"]>, string> = {
   offline: "waiting for the internet",
+  // On battery with the lid closed nothing is started. Stored in one of the moments the sleeping Mac woke by itself.
+  "lid-closed": "waiting for the lid to be opened or the Mac to be plugged in",
   "build-running": "waiting for the build to finish first",
   "build-not-started": "waiting for the build to finish first",
 };
