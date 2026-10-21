@@ -48,7 +48,7 @@ Overnight listens through Bee for the moments you say "someone should build...".
    - It works from a one-page brief, the only thing it is given, inside Overnight's own sandbox.
    - It runs the app's own build and test as it works, and writes build notes. (The smoke test that decides whether to publish is step 6, not this.)
    - A build that was stopped or cut off (the job was stopped, the Mac restarted or went to sleep) is not a failed build. The next nightly run tries it once more, and nobody is told in between (§6).
-   - **Overnight keeps its own time (Milestone 3).** macOS only wakes the build job every minute; Overnight's own code, which knows its time zone (`TZ`), decides when it is 1:00. Each day's build starts at most once. (This is built and tested. The jobs on Henry's Mac are still started by macOS's calendar until they are moved over: pending, §10.)
+   - **Overnight keeps its own time (Milestone 3).** macOS only wakes the build job every minute; Overnight's own code, which knows its time zone (`TZ`), decides when it is 1:00. Each day's build starts at most once. (Proved under the real macOS job system with throwaway jobs on Oct 12, and what the live jobs on Henry's Mac have run since Oct 20. The first night on it, Oct 20 to 21, is still to be read from the logs: §10.)
    - **A missed night catches up.** If the Mac was asleep, switched off or had no internet at 1:00, the build starts a minute or two after that is no longer so, any time before the next night's build (§6, The night clock).
    - **A monthly ceiling.** No build starts once the Kiro credits Overnight has counted for the month reach `MAX_BUILD_CREDITS_PER_MONTH` (400 unless set). Approved ideas then wait for next month. Nothing buzzes; `overnight status` says why (§6).
 6. **Verify and publish.** At 6:30 a.m., by the same clock, Overnight rebuilds each app and runs its smoke test in a headless browser, all inside a sandbox, because an AI wrote that code. Passing builds are screenshotted and published to GitHub Pages. A morning the Mac slept through runs when the Mac is next awake and online (§7).
@@ -375,7 +375,7 @@ The build skill (`crew/build-skill.md`) adds the working rules for the agent: st
 
 ### The night clock (built in Milestone 3)
 
-**Why.** On the first real night macOS's calendar started both night jobs exactly an hour late, because it was still counting in the time zone the Mac had before its last restart (§10). So macOS no longer decides when a night runs. It only wakes the two jobs; Overnight's own code, which knows `TZ`, decides.
+**Why.** On the first real night macOS's calendar started both night jobs exactly an hour late, because it was still counting in the time zone the Mac had when it last restarted, and the zone had been changed since (§10). So macOS no longer decides when a night runs. It only wakes the two jobs; Overnight's own code, which knows `TZ`, decides.
 
 **The rule, in plain words** (`packages/core/src/night-clock.ts`, and `packages/cli/src/commands/night-tick.ts` for what one look does):
 - macOS starts each night job every 60 seconds, and once when it is loaded (at login, and when it is installed), as `overnight build --if-due` and `overnight deliver --if-due`. Nearly every one of these looks ends at once. It writes down that the job is awake (its "heartbeat"), finds nothing due, and is gone, without taking a lock, printing a word or opening a log file.
@@ -478,7 +478,7 @@ The build skill (`crew/build-skill.md`) adds the working rules for the agent: st
   - runs the sandbox check (below).
 - **Cancel before remove.** The job is always removed afterwards. A run that may still be going is cancelled first, because `kirocrew cron remove` takes a job off the list but does not end a run in progress, and kirocrew has no cancel command. Overnight asks the gateway's own local web address to cancel it (measured: the run's processes were gone within a second).
 - In `overnight` mode, Overnight's own `kirocrew` commands run inside the gateway's sandbox profile too, so nothing of Crew's runs outside the fence at night. (They read the profile from the repo; the gateway job reads its own copy, which matches the repo's only if `install crew` has been run since the rules last changed.) They start in `~/.overnight/tmp/build/`, because kirocrew stops with an error when it may not look at the folder it starts in, and the repo is closed to it.
-- Real Kiro Crew builds so far: seven, each about 2 to 4 minutes and 2.6 to 4.6 Kiro credits (`docs/spikes.md`). The sixth was the rehearsal on Oct 10, with the real Kiro Crew install. The seventh was the first real night's, started by the nightly launchd job. Milestone 3 has added none yet: its real builds are among the proofs still to be run (§10).
+- Real Kiro Crew builds so far: eight, each 119 to 224 seconds and 2.6 to 4.6 Kiro credits (`docs/spikes.md`). The sixth was the rehearsal on Oct 10, with the real Kiro Crew install. The seventh was the first real night's, started by the nightly launchd job. The eighth was Milestone 3's proof on Oct 12, under its new rules on a throwaway gateway: "Zebra Dice Roller", 134 s, 2.959 credits (P3, §10).
 
 **The sandbox around Kiro Crew (Henry's decision, Oct 10).**
 - Measured: Crew's own sandbox on macOS, even at `strict`, lets a build job read the GitHub login from the Keychain, use the Bee login, read the transcript database, use the network and write anywhere in the home folder. It can't be given extra paths to hide, and its command jobs don't get `strict` at all.
@@ -685,7 +685,7 @@ The report the dashboard reads (`reports/<id>.json`) carries what each check fou
 
 ### What a build job can and cannot reach
 
-Measured on Oct 10 with the Milestone 2 sandbox profiles (§6). What Milestone 3 added is marked; those rules are tested with the real sandbox on made-up home folders and have not yet met a real Kiro Crew or Kiro CLI build (§10). "Build job" means the build agent and anything it starts. The entry-by-entry lists are in `crew/README.md`.
+Measured on Oct 10 with the Milestone 2 sandbox profiles (§6). What Milestone 3 added is marked; those rules are tested with the real sandbox on made-up home folders, and on Oct 12 they passed a real build with each builder, Kiro Crew on a throwaway gateway (P1 to P3, §10). "Build job" means the build agent and anything it starts. The entry-by-entry lists are in `crew/README.md`.
 
 **Out of reach, with either builder:**
 - The GitHub login. The Keychain is cut off, the `gh` program can't be run, and its settings folder is closed.
@@ -720,7 +720,7 @@ Measured on Oct 10 with the Milestone 2 sandbox profiles (§6). What Milestone 3
 
 **At verify time the fence is tighter** (`packages/deliver/sandbox/deliver.sb`, §7). Agent-written code can read only its own copy of the app, our test files, `node`, `npm`, `npx`, Playwright and its browser, and npm's package store. It can write only its own run folder. It reaches no macOS system service at all, no network but two local ports, and no information about any other program, not even the list. While an app is tested, its code cannot read, list, change or run anything in `built/` or `workspaces/` (now pinned by a test against the real sandbox). What remains there: a program that hides on purpose can stay running inside that sandbox after its step. It can no longer change what is published, because the folders it could write are taken away.
 
-**What has met the real install, and what has not.** The Milestone 2 rules were measured on Oct 10 with a throwaway Kiro Crew home, started by hand. The real install, started by launchd, then passed the nightly check and built an app on the first real night (§10). **Pending:** the Milestone 3 rules (socket files, the dashboard's port, the two Kiro CLI rules, the two new lines of the check) against a real Kiro Crew gateway and a real Kiro CLI build; and the gateway job reinstalled so that it runs behind them.
+**What has met the real install, and what has not.** The Milestone 2 rules were measured on Oct 10 with a throwaway Kiro Crew home, started by hand. The real install, started by launchd, then passed the nightly check and built an app on the first real night (§10). The Milestone 3 rules (socket files, the dashboard's port, the two Kiro CLI rules, the two new lines of the check) passed against a real Kiro Crew gateway and a real Kiro CLI build on Oct 12 (P1 to P3). The live gateway job was reinstalled behind them on Oct 20, and `preflight` then passed 13 of 13, the sandbox check among them. No real idea has been built under them yet: Bee has sent no new speech since Oct 10.
 
 ## 10. Milestones
 
@@ -743,8 +743,8 @@ The spikes:
 7. Publishing a hello-world `dist/` folder to a public `overnight-apps` repo with GitHub Pages turned on gives a working link.
 8. `kiro-cli chat --no-interactive` (no tools) returns valid detector JSON for a few synthetic transcripts.
 9. Added on Oct 10, during the Milestone 2 fix rounds: `kiro-cli chat --no-interactive` reads its whole prompt from standard input, so the prompt need not be on the command line. Passed.
-10. Added in Milestone 3 (`spikes/10-night-clock.ts`): does macOS really wake the two night jobs every minute, and does Overnight's own clock then start the build once, at its minute, and catch up after a sleep? **Written; its two real modes (`run` and `sitting`) are pending.** Only `check` and `dry`, which load no job, have run.
-11. Added in Milestone 3 (`spikes/11-hardening-proof.ts`): do the two builder sandbox profiles, with the new rules, still let Kiro Crew and Kiro CLI do their work? **Written; its two real modes (`p1` and `p2`) are pending.** Only `check`, which starts no gateway, has run.
+10. Added in Milestone 3 (`spikes/10-night-clock.ts`): does macOS really wake the two night jobs every minute, and does Overnight's own clock then start the build once, at its minute, and catch up after a sleep? **`run` passed on Oct 12** (P4, below). **`sitting`, the Mac asleep across the build's time, is still pending.**
+11. Added in Milestone 3 (`spikes/11-hardening-proof.ts`): do the two builder sandbox profiles, with the new rules, still let Kiro Crew and Kiro CLI do their work? **Passed on Oct 12: `p1` and `p2`** (P1 and P2, below).
 12. Added in Milestone 3 (`spikes/12-sqlite-read-only.ts`): can a second program read the database beside the listener without ever making it wait? Passed on Oct 11. The rule that came out of it: never leave a read open.
 
 **M1: Hear, notice, ask (Sat Oct 10 – Sun Oct 11).** **Built on Oct 9. It has run as a background job ever since: in quiet mode at first, and with asking on since Oct 10.** Tests, typecheck, lint and the golden set pass. On Oct 10 the whole listening half ran for real: speech heard, an ordinary conversation judged not an idea, a spoken idea detected, the wrist asked, the tick seen, the idea queued (see `docs/spikes.md`). Asking has been on since then. Not yet tried with real speech: a rejection and an expiry.
@@ -769,10 +769,10 @@ The spikes:
 - **Two things only the real set-up could show, both fixed the same evening:**
   - Kiro's sign-in lasts an hour and cannot be renewed from inside the build sandbox, so our own code now renews it outside the sandbox before every build (§6).
   - macOS does not let a background job whose program is `sandbox-exec` read a file under `~/Documents`, so the gateway job is pointed at its own copy of the sandbox profile in the data folder (§6).
-- **The first real night, Oct 10 to 11** (`docs/spikes.md`, "The first real night"). The idea was heard through Bee on the morning of Oct 10 and approved on the wrist. That night the build job started by itself, renewed Kiro's sign-in, passed the sandbox check, and Kiro Crew built the app in 160 s for 4.59 credits, with a gateway that had been idle for three hours. In the morning the deliver job checked it in the sandbox (6.6 s), published it (live after 26 s), created the real Bee to-do with the link and wrote the Bee fact. Both jobs ended with exit code 0. Nobody touched the Mac in between.
+- **The first real night, Oct 10 to 11** (`docs/spikes.md`, "The first real night"). The idea was heard through Bee on the morning of Oct 10, asked about on the wrist, and approved by ticking the to-do in the Bee app on the phone. That night the build job started by itself, renewed Kiro's sign-in, passed the sandbox check, and Kiro Crew built the app in 160 s for 4.59 credits, with a gateway that had been idle for three hours. In the morning the deliver job checked it in the sandbox (6.6 s), published it (live after 26 s), created the real Bee to-do with the link and wrote the Bee fact. Both jobs ended with exit code 0. Nobody touched the Mac in between.
 - **One thing was off: both jobs ran exactly an hour late** (2:00 and 7:30 instead of 1:00 and 6:30), so the alarm was set for about 7:32 instead of 7:00. macOS's scheduler was still working in the time zone the Mac had when it last restarted (the zone was changed a day later). A restart fixes it. Making Overnight's own code decide when it is time, instead of trusting macOS's calendar, is Milestone 3.
 - **Confirmed by the wearer:** the watch buzzed at 7:32 am and the to-do said the app was built.
-- **After a restart on Oct 11**, macOS registered the two jobs for 1:00:00 AM and 6:30:00 AM Mountain Daylight Time (its own log), and all four jobs came back by themselves. **Still pending:** a night that shows it, written down. (The live jobs stay on macOS's calendar until the switch-over below.)
+- **After a restart on Oct 11**, macOS registered the two jobs for 1:00:00 AM and 6:30:00 AM Mountain Daylight Time (its own log), and all four jobs came back by themselves. The next night showed it: the build job fired at 1:00:01 am on Oct 12 (it had nothing to build). (Since the switch-over of Oct 20 the night jobs no longer go by macOS's calendar: M3 below.)
 - **Found by the independent check on Oct 10 and left for Milestone 3** (none blocked a night). What Milestone 3 did with each:
   - *A build job can read the list of running programs.* Closed for the Kiro CLI builder. Accepted for Kiro Crew, which needs it (§9, limit 6).
   - *A build job can connect to other programs' socket files.* Refused in both profiles (§6).
@@ -786,7 +786,9 @@ The spikes:
   - *The morning's printed line did not say when a page was pushed but not seen live.* Fixed (§7).
 - **Decided Oct 10:** a Kiro Crew job listing the names in the home folder is accepted (§9, limit 5).
 
-**M3: Dashboard and hardening (Wed Oct 14 – Fri Oct 16).** **Built on Oct 11, ahead of plan. Reviewed by four independent reviews the same night and fixed. Tests, typecheck and lint pass (3,546 tests in 116 files on Oct 12; one race test in the builder's safe-read tests used to fail now and then in its own clean-up, and was fixed that night: 30 runs in a row passed). Proved against the real tools in the small hours of Oct 12 (proofs P1, P2, P3, P5 and the first half of P4: `docs/spikes.md`, "Still to be proved for real"): the new sandbox rules passed a real build with each builder, the every-minute jobs kept time under real launchd, and a clean clone passes everything. It is not yet what runs at night:** the live night jobs still run the Milestone 2 code, on macOS's calendar, until the sleep test with Henry at the Mac is done and the jobs are moved over.
+**M3: Dashboard and hardening (Wed Oct 14 – Fri Oct 16).** **Done. Built on Oct 11, ahead of plan. Reviewed by four independent reviews the same night and fixed. Proved against the real tools in the small hours of Oct 12 (proofs P1, P2, P3, P5 and the first half of P4: `docs/spikes.md`, "Still to be proved for real"): the new sandbox rules passed a real build with each builder, the every-minute jobs kept time under real launchd, and a clean clone passes everything. Switched on for the live system on Oct 20, 5:09 to 5:12 pm, and `preflight` then passed 13 of 13.** The switch-over went ahead without P4's sitting, which is still pending (below), as is the look at whether the Mac stays awake on battery.
+- Tests, typecheck and lint pass: 3,546 tests in 116 files on Oct 12, and 3,588 in 116 files on Oct 20 with the closed-lid rule. (One race test in the builder's safe-read tests used to fail now and then in its own clean-up, and was fixed on Oct 12: 30 runs in a row passed.)
+- **Committed on Oct 20, just before the switch-over: the closed-lid rule** (§6, The night clock). On battery with the lid closed, a run that is due waits until the lid is opened or the Mac is plugged in, so that a sleeping Mac's own brief wakes start nothing the next sleep would cut short. It has met tests and a simulated night, and its two readings were made on this Mac on battery with the lid open. **Not tried with a real closed lid.**
 
 *Henry's decisions of Oct 11:*
 1. On battery, with the lid open, Overnight keeps the Mac awake, so that it keeps listening and can build at night.
@@ -822,53 +824,59 @@ Two things followed from decision 1. There is no "builds only on mains power" ru
 
 *Known after the review round, and still open:*
 - **The seal and a locked file** (§6, "What sealing does not cover"): needs a decision.
-- **Spike 11's deciding step** was found wanting by the review: it passed when macOS's log could not be read, and failed on another program's refusals. It was rewritten on Oct 12, after the review round. As the script now stands, that step first proves the log was read, counts only the refusals made to this run's own programs, and prints the one refusal that is expected (next line) without failing. The rewrite has not been through a real `p1` or `p2` either.
+- **Spike 11's deciding step** was found wanting by the review: it passed when macOS's log could not be read, and failed on another program's refusals. It was rewritten on Oct 12, after the review round. As the script now stands, that step first proves the log was read, counts only the refusals made to this run's own programs, and prints the one refusal that is expected (next line) without failing. The rewritten step then ran in the real `p1` and `p2` that night: the log was read (4 of 4 test refusals found) and no socket file was refused to the run's own programs.
 - **Node and the system log.** Inside the new Kiro CLI profile, Node asks for the system log's socket file when it starts and is refused. That is expected and harmless, and it must not be read as a failed proof. A socket path is only ever to be added to a profile's list when it lies in a folder the job may already write: never one that a program outside the sandbox listens on (Kiro's desktop app keeps two such socket files in this account's temporary folder).
 - **The detector's evaluation has no refusal of the real data folder** (§5). In a clean clone, which has no `.env`, it must be run with `OVERNIGHT_DATA_DIR` on the command.
 - Two small gaps in `preflight`'s clock check (§3).
 
-*Still to be proved for real, in this order* (the plan; `docs/spikes.md` has the detail and will get the results). All in the daytime, on scratch data folders, with throwaway job names and a throwaway Kiro Crew home on another port. Budget: about 10 Kiro credits, and never past 20 without asking Henry.
-- **P1** (no credits): a throwaway Kiro Crew gateway under the new rules. The fourteen-line check passes, and fails by name on a loosened copy. Overnight's own `kirocrew` commands add, start, cancel and remove a job under the new rules. Kiro CLI answers a settings question inside its profile. **Pending.**
-- **P2** (about half a credit): one one-line Kiro CLI chat and one one-line Kiro Crew agent job, each inside its profile. **Pending.**
-- **P3** (4 to 8 credits): two rehearsal builds without publishing, one by each builder. Both delivered; `built/<id>` there and `workspaces/<id>` gone; a measured row and an estimated row in the ledger; a run with the ceiling set to 1 refused before any agent starts; `build`, `deliver` and `build-now` refused on that folder. **Pending.**
-- **P4** (no credits): the every-minute jobs under real launchd, with throwaway names (spike 10, `run`). Then one sitting with Henry (spike 10, `sitting`): the power plug pulled and the lid closed across the build's time. It has to be on battery: plugged in, the running listener keeps this Mac awake with the lid closed, as on the first real night. **Pending.** The sitting answers one open question for certain: how soon after waking macOS starts a job. It shows the wakes a sleeping Mac makes by itself only if one happens in those few minutes (the script prints macOS's own power log for the time). Two more questions are not answered by spike 10 itself. Whether Overnight's sleep watch sees a real sleep as it saw a frozen process: the watch is not in the spike's run, which only notices the sleep with a timer of its own that works the same way. And whether `caffeinate -i -s` keeps this Mac awake on battery with the lid open: that is a look of its own, by hand (`docs/spikes.md` has the steps). **Both pending.**
-- **P5** (about 1 credit): a clean clone. `npm ci`, typecheck, lint and tests; the tests again under an empty made-up home folder; the README's commands as written; the two odd spellings of a real folder refused by `rehearse new`; the detector's evaluation once. **Pending.**
-- **The switch-over** of the live system: merge, restart the listener, reinstall the gateway and the two night jobs, `preflight` with thirteen ticks. **Pending.** Until `restart listen` has run, the live listener still keeps the Mac awake on mains power only.
-- **The first night on Overnight's own clock**, read from the logs the next morning. **Pending.**
+*What was still to be proved for real after the build, and what became of it* (`docs/spikes.md`, "Still to be proved for real", has the detail). P1 to P5 ran in the small hours of Oct 12, on scratch data folders, with throwaway job names and a throwaway Kiro Crew home on another port, and without Bee. They used 5.86 Kiro credits in all, within the budget of about 10.
+- **P1** (no credits): a throwaway Kiro Crew gateway under the new rules; the fourteen-line check passes, and fails by name on a loosened copy; Overnight's own `kirocrew` commands add, start, cancel and remove a job; Kiro CLI answers a settings question inside its profile. **Passed, Oct 12.**
+- **P2** (about half a credit): one one-line Kiro CLI chat and one one-line Kiro Crew agent job, each inside its profile. **Passed, Oct 12.**
+- **P3** (4 to 8 credits): two rehearsal builds without publishing, one by each builder, both delivered and sealed, the ledger right, the ceiling refusing a third run. **Passed, Oct 12:** Kiro Crew in 134 s for 2.959 credits, Kiro CLI in 116 s (3.8, an estimate).
+- **P4** (no credits): spike 10's `run`, the every-minute jobs under real launchd with throwaway names. **Passed, Oct 12:** each job looked at the clock when loaded and then every 60 s; the build started once, 20 s after its minute. Spike 10's `sitting` (the power plug pulled and the lid closed across the build's time, with Henry at the Mac) is **pending**. So are two looks the sitting does not make: whether Overnight's sleep watch sees a real sleep, and whether `caffeinate -i -s` keeps this Mac awake on battery with the lid open (`docs/spikes.md` has the steps). **Both pending.**
+- **P5** (about 1 credit): a clean clone. `npm ci`, typecheck, lint and all tests; the tests again under an empty made-up home folder; the README's commands; the two odd spellings of a real folder refused; the detector's evaluation (precision 0.96, recall 1.00). **Passed, Oct 12.**
+- **The switch-over** of the live system. **Done, Oct 20, 5:09 to 5:12 pm:** merged into the live working copy; `status` added the ledger table; the listener was restarted and now keeps the Mac awake with `caffeinate -i -s`; `install crew` gave the gateway a copy of the sandbox rules equal to the repo's; `install build` and `install deliver` each looked at the clock; `preflight` said Ready, 13 of 13.
+- **The first night on Overnight's own clock**, read from the logs the next morning. **Pending** (the first such night is Oct 20 to 21).
 - **The dashboard on the real data folder**, beside the running listener, with Henry at the screen. **Pending.**
 
-**M4: Real nights and filming (Sat Oct 17 – Sun Oct 18).**
-- Run every night on real ideas and fix what breaks.
-- Film the demo footage.
-- Optional: one meaningful pull request to `bee-computer/bee-cli`, fixing a real gap we hit, with a test. It goes toward the Open Source side prize.
+**M4: Real nights and filming (Sat Oct 17 – Sun Oct 18).** **One real night so far.**
+- The plan: run every night on real ideas and fix what breaks; film the demo footage.
+- What happened: the first real night (Oct 10 to 11, M2 above) is the one real run of the whole loop so far. Since Oct 10 Bee has sent no new speech, so there has been no second real idea.
+- So the demo uses invented data wherever the dashboard is shown (`npm run dashboard:demo`, labelled "DEMO DATA: invented" on every page, §1 and §11). What the real night made is its public app, linked from the README.
+- Not done: the optional pull request to `bee-computer/bee-cli`, so the Open Source side prize is not entered.
 
-**M5: Submission (Mon Oct 19 – Wed Oct 21).**
-- Video, Devpost description, product feedback and friction log.
-- README polish with an architecture diagram.
-- MIT license visible.
-- **Submit Wednesday night.**
+**M5: Submission (Mon Oct 19 – Wed Oct 21).** **Prepared on Oct 20; the last steps are Henry's.**
+- Ready: `docs/submission.md` (every Devpost field as text to paste, including the Bee track and AWS Builder answers, product feedback per tool and three feature requests); the README as the front page, with an architecture diagram and the two public apps; product feedback (`docs/product-feedback.md`) and the friction log (`docs/friction-log.md`, 56 entries); the MIT `LICENSE` at the repo root.
+- The video is made (`submission/overnight-demo.webm`, 2 min 40 s, §11).
+- Henry does: upload the video to YouTube as public; paste its link into `docs/submission.md` and the README's first lines; fill in the Devpost form from `docs/submission.md`, with the Bee track and the AWS Builder side challenge; submit. Target Wednesday night, Oct 21; deadline Fri Oct 23, 12:00 PT.
 
-## 11. Demo video (aim for 2:50)
+## 11. Demo video (2 min 40 s, made on Oct 20)
 
-- **0:00** Morning. The watch buzzes and a link opens a working app nobody typed. "I said this out loud yesterday."
-- **0:15** Yesterday at lunch. A real conversation where the idea comes up naturally. Everyone on camera agreed.
-- **0:35** Wrist: "💡 Build tonight?" → tick.
-- **0:50** Night. The dashboard timeline, with Kiro Crew working (sped up). The dashboard runs in filming mode. If the invented demo is shown instead of a real night, its "DEMO DATA" label stays in the picture (§1).
-- **1:30** Morning delivery: to-do buzz, link, the app in use on the phone.
-- **1:55** How it works: Bee stream → Kiro detector → wrist approval → Kiro Crew → verify + GitHub Pages → Bee to-do + fact.
-- **2:25** Why it matters, plus the guardrails: approval gate, transcripts stored only on the Mac, publishing kept out of the coding agent, and sandboxed agents. (The last one may be said: the sandbox check passed on the real install on the first real night, §10.)
-- **2:45** Close: "Say it at lunch. Use it at breakfast."
+The video is `submission/overnight-demo.webm`: 1280 x 720, no sound track, a caption in every scene. `submission/record.ts` films it from one browser page; `submission/README.md` lists the scenes and how to make it again.
+
+- **0:00** Title: "Say it at lunch. Use it at breakfast."
+- **0:06** The idea, in three lines.
+- **0:16** How it works: the seven steps, drawn one by one.
+- **0:36** The dashboard playing an invented, sped-up night (`--demo --play`), then one invented idea's page. Its "DEMO DATA: invented" label stays in the picture (§1).
+- **1:38** The first real night: its facts from `docs/spikes.md`, the real public Plant Watering Tracker at phone size, and the morning to-do's words in a card that says it is an illustration, not a screenshot of Bee's app.
+- **2:10** The guardrails, one line at a time. Its line "What was heard is stored only on this Mac" means Overnight's copy; Bee keeps its own in its cloud.
+- **2:26** Built with, then the close.
+
+What the first plan had and the video does not: footage of a real conversation, of the watch, or of a tick on the wrist. Bee has sent no new speech since Oct 10, so there was no second real idea to film, and the one real approval was ticked on the phone. The video shows no person, no quote of what was said and no name.
 
 ## 12. Submission checklist
 
-- [ ] Devpost: track **Bee**; side challenge **AWS Builder** (also Open Source if the PR happens)
-- [ ] Text description: what it does, how it works, who it's for
-- [ ] Public GitHub repo, MIT license visible, working README, no personal data
-- [ ] Video under 3 minutes, public, English
-- [ ] Product feedback for each tool: Bee CLI and stream, Bee to-dos and facts, Kiro Crew, Kiro CLI, GitHub Pages, Playwright
-- [ ] AWS Builder: describe Kiro Crew use inside the product feedback answer
-- [ ] Friction log entries: task, steps, expected vs. actual, severity, workaround, suggestion
-- [ ] Feature requests, for example:
-  - hosted third-party Bee app IDs
+Ticked on Oct 20 where the work is done. The text to paste is in `docs/submission.md`. What is left unticked needs Henry.
+
+- [ ] Devpost: track **Bee**; side challenge **AWS Builder**. (No pull request to `bee-cli` was made, so not Open Source.) *Henry, in the Devpost form.*
+- [x] Text description: what it does, how it works, who it's for (`docs/submission.md`)
+- [x] Public GitHub repo, MIT license visible, working README, no personal data. (Looked at on Oct 20 for email addresses: only GitHub's noreply one and made-up test addresses. The docs say the wearer is Henry's dad, without a name.) The Oct 20 changes reach GitHub when they are pushed.
+- [ ] Video under 3 minutes, public, English, no copyrighted music. *Made (§11). Henry: upload it as public, then paste the link into `docs/submission.md` and the README's first lines.*
+- [x] Product feedback for each tool: Bee CLI and stream, Bee to-dos and facts, Kiro Crew, Kiro CLI, GitHub Pages, Playwright (in full in `docs/product-feedback.md`, condensed in `docs/submission.md`)
+- [x] AWS Builder: describe Kiro Crew use inside the product feedback answer (`docs/submission.md`, and the Kiro Crew section of `docs/product-feedback.md`)
+- [x] Friction log entries: task, steps, expected vs. actual, severity, workaround, suggestion (`docs/friction-log.md`, F-001 to F-056)
+- [x] Feature requests. The three in `docs/submission.md`:
+  - a yes/no prompt on the watch, or at least an event when a to-do is ticked
   - keep short recordings
   - a reliable "this is the wearer" speaker label
+- [ ] Submit on Devpost. Target Wednesday night, Oct 21; deadline Fri Oct 23, 12:00 PT. *Henry.*

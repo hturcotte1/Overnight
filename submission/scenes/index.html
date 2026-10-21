@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1280, initial-scale=1">
+<title>Overnight demo scenes</title>
+<!--
+  The title and text scenes of the demo video (submission/record.ts plays them in order).
+  1280 x 720, light mode, in the dashboard's own colours and type (packages/dashboard/public/app.css).
+  Nothing is fetched from outside, except the real public app in the phone frame (scene "app").
+  No real quote, name, email, token, key link or local path is in this file.
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f5f3ee; --card: #ffffff; --ink: #1a1e2b; --muted: #5f667c; --line: #e4e1d8;
+    --rail: #dcd9cf; --accent: #4a5aec; --ok: #13704a; --warn: #80520e; --bad: #b82c2c; --sun: #f0a400;
+    --chip: #eef0ff; --night: #121830;
+    --shadow: 0 1px 2px rgba(20, 24, 40, .06), 0 8px 24px rgba(20, 24, 40, .06);
+    --c1: #5b6cff; --c2: #6a63f5; --c3: #7c5cf0; --c4: #8f58e0; --c5: #c0569f; --c6: #e67a4a; --c7: #f0a400;
+    --font: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1280px; height: 720px; overflow: hidden; }
+  body { background: var(--bg); color: var(--ink); font: 16px/1.45 var(--font); }
+
+  .scene { position: absolute; inset: 0; padding: 56px 64px; opacity: 0; visibility: hidden; transition: opacity .45s ease, visibility 0s linear .45s; }
+  .scene.on { opacity: 1; visibility: visible; transition: opacity .45s ease, visibility 0s; }
+  [data-r] { opacity: 0; transform: translateY(14px); transition: opacity .5s ease, transform .5s ease; }
+  [data-r].in { opacity: 1; transform: none; }
+
+  .kicker { margin: 0; font-size: 20px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+  .h1 { margin: 6px 0 0; font-size: 46px; line-height: 1.12; font-weight: 800; letter-spacing: -.02em; }
+  .lede { margin: 12px 0 0; font-size: 28px; line-height: 1.3; color: var(--muted); font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 22px; box-shadow: var(--shadow); }
+  .moon { width: 1em; height: 1em; display: inline-block; vertical-align: -.12em; }
+
+  /* the caption strip, shared by the scenes that need one */
+  .strip { position: absolute; left: 50%; bottom: 30px; transform: translateX(-50%); width: max-content; max-width: 1160px; padding: 16px 28px 17px; border-radius: 18px; background: var(--ink); color: #fff; text-align: center; box-shadow: 0 10px 30px rgba(20, 24, 40, .22); opacity: 0; transition: opacity .35s ease; z-index: 50; }
+  .strip.on { opacity: 1; }
+  .strip b { display: block; font-size: 30px; line-height: 1.25; font-weight: 800; letter-spacing: -.005em; }
+  .strip span { display: block; margin-top: 4px; font-size: 21px; line-height: 1.3; font-weight: 600; color: #c9cde0; }
+  .strip span:empty { display: none; }
+
+  /* 1. title */
+  #title { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+  .brandmark { width: 120px; height: 120px; border-radius: 30px; }
+  .brandname { margin: 22px 0 0; font-size: 110px; line-height: 1; font-weight: 800; letter-spacing: -.035em; }
+  .tagline { margin: 26px 0 0; font-size: 44px; line-height: 1.2; font-weight: 700; color: var(--ink); }
+  .entry { margin: 40px 0 0; display: inline-flex; align-items: center; gap: 12px; padding: 12px 26px; border-radius: 999px; background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 28px; font-weight: 700; color: var(--muted); }
+  .entry i { width: 12px; height: 12px; border-radius: 50%; background: var(--sun); }
+  .rainbow { margin: 44px 0 0; display: flex; align-items: center; }
+  .rainbow i { width: 18px; height: 18px; border-radius: 50%; }
+  .rainbow i + i { margin-left: 34px; position: relative; }
+  .rainbow i + i::before { content: ""; position: absolute; right: 100%; top: 7px; width: 34px; height: 4px; background: inherit; opacity: .55; }
+
+  /* 2. the idea */
+  #idea { display: flex; flex-direction: column; justify-content: center; padding: 0 76px; }
+  .lines { list-style: none; margin: 34px 0 0; padding: 0; display: grid; gap: 30px; }
+  .line { display: grid; grid-template-columns: 72px 1fr; gap: 24px; align-items: center; font-size: 40px; line-height: 1.2; font-weight: 800; letter-spacing: -.015em; }
+  .line .dot { width: 72px; height: 72px; border-radius: 50%; display: grid; place-items: center; color: #fff; }
+  .dot svg, .gdot svg, .sdot svg { width: 36px; height: 36px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+  .line small { display: block; font-size: 26px; font-weight: 600; color: var(--muted); letter-spacing: 0; margin-top: 4px; }
+
+  /* 3. how it works */
+  .bands { position: absolute; left: 64px; right: 64px; top: 196px; height: 300px; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 0; }
+  .band { position: relative; border-radius: 22px; margin: 0 5px; padding-top: 16px; text-align: center; font-size: 17px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; opacity: 0; transition: opacity .6s ease; }
+  .band.in { opacity: 1; }
+  .band--day { grid-column: 1 / span 3; background: color-mix(in srgb, var(--sun) 13%, var(--bg)); color: var(--warn); }
+  .band--night { grid-column: 4 / span 1; background: var(--night); color: #c3c9ff; }
+  .band--morning { grid-column: 5 / span 3; background: color-mix(in srgb, var(--c6) 12%, var(--bg)); color: #8a3d17; }
+  .rail { position: absolute; left: 64px; right: 64px; top: 252px; list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  .st { position: relative; text-align: center; padding: 0 12px; --c: var(--c1); opacity: 0; transition: opacity .5s ease; }
+  .st:nth-child(2) { --c: var(--c2); } .st:nth-child(3) { --c: var(--c3); } .st:nth-child(4) { --c: var(--c4); }
+  .st:nth-child(5) { --c: var(--c5); } .st:nth-child(6) { --c: var(--c6); } .st:nth-child(7) { --c: var(--c7); }
+  .st.in { opacity: 1; }
+  .st::before { content: ""; position: absolute; top: 34px; left: calc(-50% + 40px); width: calc(100% - 80px); height: 5px; border-radius: 3px; background: var(--c); transform: scaleX(0); transform-origin: left center; transition: transform .55s ease .1s; }
+  .st:first-child::before { display: none; }
+  .st.in::before { transform: scaleX(1); }
+  .sdot { position: relative; z-index: 1; display: grid; place-items: center; width: 72px; height: 72px; margin: 0 auto 14px; border-radius: 50%; background: var(--c); color: #fff; transform: scale(.5); transition: transform .5s cubic-bezier(.2, 1.6, .4, 1); }
+  .st.in .sdot { transform: scale(1); }
+  .st.now .sdot { box-shadow: 0 0 0 8px color-mix(in srgb, var(--c) 28%, transparent); }
+  .st b { display: block; font-size: 22px; line-height: 1.2; font-weight: 800; }
+  .st > span:last-child { display: block; margin-top: 6px; font-size: 17px; line-height: 1.3; font-weight: 600; color: var(--muted); }
+  .st.dark b { color: #fff; } .st.dark > span:last-child { color: #c3c9ff; }
+
+  /* 5a. the first real night */
+  .rows { list-style: none; margin: 30px 0 0; padding: 0; display: grid; gap: 16px; }
+  .row { display: grid; grid-template-columns: 200px 1fr; gap: 24px; align-items: start; padding: 16px 24px; }
+  .row time { font-size: 23px; font-weight: 800; color: var(--accent); font-variant-numeric: tabular-nums; padding-top: 3px; }
+  .row p { margin: 0; font-size: 26px; line-height: 1.3; font-weight: 600; }
+  .row p strong { font-weight: 800; }
+  .footnote { margin: 18px 0 0; font-size: 21px; line-height: 1.35; color: var(--muted); font-weight: 600; }
+
+  /* 5b. the real app, at phone size */
+  #app { display: grid; grid-template-columns: 400px 1fr; gap: 64px; align-items: center; padding: 0 56px 0 100px; }
+  .phone { position: relative; width: 399px; height: 674px; padding: 12px; border-radius: 50px; background: #1a1e2b; box-shadow: 0 18px 50px rgba(20, 24, 40, .28), inset 0 0 0 2px #3a4060; }
+  .phone .screen { width: 375px; height: 650px; border-radius: 38px; overflow: hidden; background: #fff; }
+  .phone iframe { display: block; width: 375px; height: 650px; border: 0; }
+  .tap { position: absolute; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%; background: rgba(74, 90, 236, .35); border: 3px solid rgba(74, 90, 236, .85); pointer-events: none; opacity: 0; z-index: 10; }
+  .tap.go { animation: tap .9s ease-out forwards; }
+  @keyframes tap { 0% { opacity: 0; transform: scale(.4); } 25% { opacity: 1; transform: scale(1); } 100% { opacity: 0; transform: scale(1.7); } }
+  .apptext .h1 { font-size: 50px; }
+  .apptext .said { margin: 18px 0 0; font-size: 32px; line-height: 1.25; font-weight: 800; }
+  .apptext .doing { margin: 22px 0 0; font-size: 24px; line-height: 1.35; font-weight: 600; color: var(--muted); min-height: 66px; }
+  .address { margin: 26px 0 0; display: inline-block; white-space: nowrap; padding: 8px 16px; border-radius: 999px; background: var(--chip); font-size: 20px; font-weight: 700; color: var(--accent); }
+
+  /* 5c. the to-do */
+  #todo { display: flex; flex-direction: column; align-items: center; padding-top: 96px; }
+  .nobreak { display: inline-block; }
+  .todo-label { font-size: 26px; font-weight: 800; color: var(--muted); }
+  .todo { margin: 16px 0 0; width: 1120px; padding: 26px 34px 28px; display: grid; grid-template-columns: 34px 1fr; gap: 20px; align-items: start; }
+  .tick { width: 34px; height: 34px; margin-top: 5px; border-radius: 50%; border: 3px solid var(--rail); }
+  .todo p { margin: 0; font-size: 30px; line-height: 1.35; font-weight: 700; }
+  .todo .url { display: block; color: var(--accent); }
+  .todo small { display: block; margin-top: 10px; font-size: 20px; font-weight: 700; color: var(--muted); }
+  .fact { margin: 22px 0 0; width: 1120px; padding: 18px 34px 20px; }
+  .fact .lab { font-size: 18px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .fact p { margin: 6px 0 0; font-size: 23px; line-height: 1.35; font-weight: 600; }
+
+  /* 6. guardrails */
+  .guards { list-style: none; margin: 26px 0 0; padding: 0; display: grid; gap: 15px; }
+  .guard { display: grid; grid-template-columns: 50px 1fr; gap: 20px; align-items: start; }
+  .gdot { width: 50px; height: 50px; border-radius: 50%; display: grid; place-items: center; background: var(--chip); color: var(--accent); }
+  .gdot svg { width: 26px; height: 26px; }
+  .guard p { margin: 0; padding-top: 6px; font-size: 28px; line-height: 1.28; font-weight: 700; }
+  .guard p small { display: block; margin-top: 3px; font-size: 21px; font-weight: 600; color: var(--muted); }
+
+  /* 7. built with */
+  .tools { margin: 44px 0 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; }
+  .tool { padding: 22px 18px 24px; }
+  .tool b { display: block; font-size: 25px; white-space: nowrap; line-height: 1.15; font-weight: 800; }
+  .tool span { display: block; margin-top: 10px; font-size: 20px; line-height: 1.3; font-weight: 600; color: var(--muted); }
+  .tool i { display: block; width: 36px; height: 6px; border-radius: 3px; margin-bottom: 16px; }
+  .stats { margin: 52px 0 0; display: flex; align-items: center; gap: 28px; }
+  .stat { padding: 22px 30px; }
+  .stat b { display: block; font-size: 60px; line-height: 1; font-weight: 800; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .stat span { display: block; margin-top: 8px; font-size: 22px; font-weight: 700; color: var(--muted); }
+  .repo { font-size: 36px; font-weight: 800; color: var(--accent); }
+  .repo small { display: block; margin-top: 6px; font-size: 22px; font-weight: 700; color: var(--muted); }
+
+  /* 8. close */
+  #close { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+  #close .brandmark { width: 104px; height: 104px; border-radius: 26px; }
+  #close .tagline { margin-top: 36px; font-size: 62px; line-height: 1.15; font-weight: 800; letter-spacing: -.02em; }
+  #close .repo { margin-top: 30px; }
+  #close .rainbow { margin-top: 40px; }
+</style>
+</head>
+<body>
+
+<!-- 1. Title -->
+<section class="scene" id="title">
+  <svg class="brandmark" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#121830"/><path fill="#ffc54a" d="M18.6 13.6A6.9 6.9 0 0 1 10.4 5.4a7 7 0 1 0 8.2 8.2z"/></svg>
+  <h1 class="brandname">Overnight</h1>
+  <p class="tagline">Say it at lunch. Use it at breakfast.</p>
+  <p class="entry"><i></i>Build, Ship, Shape: Bee track and AWS Builder</p>
+  <div class="rainbow" aria-hidden="true"><i style="background:var(--c1)"></i><i style="background:var(--c2)"></i><i style="background:var(--c3)"></i><i style="background:var(--c4)"></i><i style="background:var(--c5)"></i><i style="background:var(--c6)"></i><i style="background:var(--c7)"></i></div>
+</section>
+
+<!-- 2. The idea -->
+<section class="scene" id="idea">
+  <p class="kicker">The idea</p>
+  <ul class="lines">
+    <li class="line" data-r>
+      <span class="dot" style="background:var(--c1)"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></span>
+      <span>People say “someone should make an app that…”<small>and then the idea is forgotten.</small></span>
+    </li>
+    <li class="line" data-r>
+      <span class="dot" style="background:var(--c3)"><svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="3"/><path d="M9.5 7l.6-3.5h3.8l.6 3.5M9.5 17l.6 3.5h3.8l.6-3.5"/></svg></span>
+      <span>Overnight hears it through Bee and asks on the wrist.<small>Bee is a wearable that listens. Here it runs on an Apple Watch.</small></span>
+    </li>
+    <li class="line" data-r>
+      <span class="dot" style="background:var(--c5)"><svg viewBox="0 0 24 24"><path d="M20 14.3A8.3 8.3 0 0 1 9.7 4a8.5 8.5 0 1 0 10.3 10.3z"/></svg></span>
+      <span>Tick yes, and it builds the app while you sleep.<small>In the morning the link is on your wrist.</small></span>
+    </li>
+  </ul>
+</section>
+
+<!-- 3. How it works -->
+<section class="scene" id="how">
+  <p class="kicker">How it works</p>
+  <h2 class="h1">From something said out loud to a link on the wrist</h2>
+  <div class="bands" aria-hidden="true">
+    <div class="band band--day" data-band="1">By day</div>
+    <div class="band band--night" data-band="4">1:00 AM</div>
+    <div class="band band--morning" data-band="5">6:30 to 7:00 AM</div>
+  </div>
+  <ol class="rail">
+    <li class="st"><span class="sdot"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg></span><b>Bee hears it</b><span>its live stream, to this Mac</span></li>
+    <li class="st"><span class="sdot"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></svg></span><b>Kiro spots an idea</b><span>Kiro CLI, with no tools</span></li>
+    <li class="st"><span class="sdot"><svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="3"/><path d="M9.5 7l.6-3.5h3.8l.6 3.5M9.5 17l.6 3.5h3.8l.6-3.5"/></svg></span><b>Asked on the wrist</b><span>a Bee to-do: tick it to say yes</span></li>
+    <li class="st dark"><span class="sdot"><svg viewBox="0 0 24 24"><path d="M20 14.3A8.3 8.3 0 0 1 9.7 4a8.5 8.5 0 1 0 10.3 10.3z"/></svg></span><b>Kiro Crew builds it</b><span>inside Overnight's own sandbox</span></li>
+    <li class="st"><span class="sdot"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5.5c0 4.5-3 7.6-7 9.5-4-1.9-7-5-7-9.5V6l7-3z"/><path d="M9 12l2.2 2.2L15 10.4"/></svg></span><b>Tested</b><span>in a second sandbox</span></li>
+    <li class="st"><span class="sdot"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.6 2.4 2.6 14.6 0 17M12 3.5c-2.6 2.4-2.6 14.6 0 17"/></svg></span><b>Published</b><span>on GitHub Pages</span></li>
+    <li class="st"><span class="sdot"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg></span><b>On the wrist at 7:00</b><span>the link, and a Bee fact</span></li>
+  </ol>
+</section>
+
+<!-- 5a. The first real night -->
+<section class="scene" id="night">
+  <p class="kicker">The first real night: not demo data</p>
+  <h2 class="h1">Oct 10 to 11: the whole loop, for real</h2>
+  <ul class="rows">
+    <li class="row card" data-r><time>Oct 10, morning</time><p>An app idea was said out loud near the watch. Kiro spotted it, the wrist was asked, and it was ticked on the phone.</p></li>
+    <li class="row card" data-r><time>Oct 11, 2:00 AM</time><p>The build job started by itself and passed the nightly sandbox check. Kiro Crew built <strong>“Plant Watering Tracker”</strong> in 2 min 40 s, for 4.59 Kiro credits.</p></li>
+    <li class="row card" data-r><time>7:30 AM</time><p>The app passed its test in the sandbox and was published, live 26 s later. Then came the to-do with the link, and a Bee fact.</p></li>
+    <li class="row card" data-r><time>7:32 AM</time><p>The watch buzzed, and the to-do on it said the app was built.</p></li>
+  </ul>
+  <p class="footnote" data-r>Both jobs ran an hour late that night: macOS's scheduler still had the Mac's old time zone. Fixed since.</p>
+</section>
+
+<!-- 5b. The real app, at phone size -->
+<section class="scene" id="app">
+  <div class="phone" id="phone">
+    <div class="screen"><iframe id="appframe" title="Plant Watering Tracker" loading="eager"></iframe></div>
+    <div class="tap" id="tap"></div>
+  </div>
+  <div class="apptext">
+    <p class="kicker">The real app, live on GitHub Pages</p>
+    <h2 class="h1">Plant Watering Tracker</h2>
+    <p class="said">Built by Kiro Crew overnight, from an idea said out loud.</p>
+    <p class="doing" id="doing">This is the page as it is on the web today.</p>
+    <span class="address">hturcotte1.github.io/overnight-apps/plant-watering-tracker</span>
+  </div>
+</section>
+
+<!-- 5c. The to-do on the wrist (an illustration, not a screenshot of Bee's app) -->
+<section class="scene" id="todo">
+  <div class="todo-label">The to-do Overnight put on the wrist</div>
+  <div class="todo card">
+    <span class="tick" aria-hidden="true"></span>
+    <p>☀️ Built overnight: Plant Watering Tracker → <span class="url">https://hturcotte1.github.io/overnight-apps/plant-watering-tracker/</span><small>Bee to-do · the watch buzzed at 7:32 AM, Oct 11</small></p>
+  </div>
+  <div class="fact card">
+    <div class="lab">And the fact Bee was given</div>
+    <p>Overnight built "Plant Watering Tracker" on Oct 11: <span class="nobreak">https://hturcotte1.github.io/overnight-apps/plant-watering-tracker/</span></p>
+  </div>
+</section>
+
+<!-- 6. Guardrails -->
+<section class="scene" id="guard">
+  <p class="kicker">Guardrails</p>
+  <h2 class="h1">An AI writes the code. These rules keep it in its place.</h2>
+  <ul class="guards">
+    <li class="guard" data-r><span class="gdot"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><p>Nothing is built until the wearer ticks it.</p></li>
+    <li class="guard" data-r><span class="gdot"><svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="11" rx="2"/><path d="M8 20h8M12 16v4"/></svg></span><p>What was heard is stored only on this Mac.<small>Kiro reads it to spot ideas, with Kiro's content sharing switched off.</small></p></li>
+    <li class="guard" data-r><span class="gdot"><svg viewBox="0 0 24 24"><path d="M7 3.5h7l4 4v13H7z"/><path d="M14 3.5v4h4M10 12h5M10 15.5h5"/></svg></span><p>The builder only gets a short brief (title and pitch), never the words that were said.</p></li>
+    <li class="guard" data-r><span class="gdot"><svg viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></svg></span><p>Kiro Crew runs inside Overnight's own macOS sandbox. A check every night proves the GitHub login, the Bee login and the transcripts are out of its reach.</p></li>
+    <li class="guard" data-r><span class="gdot"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.6 2.4 2.6 14.6 0 17M12 3.5c-2.6 2.4-2.6 14.6 0 17"/></svg></span><p>Publishing is done by Overnight, never by the agent.</p></li>
+    <li class="guard" data-r><span class="gdot"><svg viewBox="0 0 24 24"><path d="M4 17a8 8 0 1 1 16 0"/><path d="M12 17l4-5"/></svg></span><p>A monthly cap on Kiro credits.</p></li>
+  </ul>
+</section>
+
+<!-- 7. Built with -->
+<section class="scene" id="built">
+  <p class="kicker">Built with</p>
+  <h2 class="h1">The tools, and what each one does</h2>
+  <div class="tools">
+    <div class="tool card" data-r><i style="background:var(--c1)"></i><b>Bee CLI</b><span>and its live stream: hearing, to-dos and facts</span></div>
+    <div class="tool card" data-r><i style="background:var(--c3)"></i><b>Kiro CLI</b><span>the detector, with no tools</span></div>
+    <div class="tool card" data-r><i style="background:var(--c4)"></i><b>Kiro Crew</b><span>the builder, overnight</span></div>
+    <div class="tool card" data-r><i style="background:var(--c6)"></i><b>GitHub Pages</b><span>where the apps go live</span></div>
+    <div class="tool card" data-r><i style="background:var(--c7)"></i><b>Playwright</b><span>tests each app in a headless browser</span></div>
+  </div>
+  <div class="stats" data-r>
+    <div class="stat card"><b>3,588</b><span>tests pass</span></div>
+    <div class="repo">github.com/hturcotte1/Overnight<small>Open source, MIT license. TypeScript on Node.</small></div>
+  </div>
+</section>
+
+<!-- 8. Close -->
+<section class="scene" id="close">
+  <svg class="brandmark" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#121830"/><path fill="#ffc54a" d="M18.6 13.6A6.9 6.9 0 0 1 10.4 5.4a7 7 0 1 0 8.2 8.2z"/></svg>
+  <p class="tagline">Say it at lunch. Use it at breakfast.</p>
+  <p class="repo">github.com/hturcotte1/Overnight<small>Overnight · Build, Ship, Shape · Bee track and AWS Builder</small></p>
+  <div class="rainbow" aria-hidden="true"><i style="background:var(--c1)"></i><i style="background:var(--c2)"></i><i style="background:var(--c3)"></i><i style="background:var(--c4)"></i><i style="background:var(--c5)"></i><i style="background:var(--c6)"></i><i style="background:var(--c7)"></i></div>
+</section>
+
+<div class="strip" id="strip"><b></b><span></span></div>
+
+<script>
+  // The recorder (submission/record.ts) drives these: show a scene, reveal its parts, set the caption.
+  const APP_URL = "https://hturcotte1.github.io/overnight-apps/plant-watering-tracker/";
+  const strip = document.getElementById("strip");
+  let current = null;
+
+  window.show = (id) => {
+    const next = document.getElementById(id);
+    if (current && current !== next) current.classList.remove("on");
+    for (const el of next.querySelectorAll(".in, .now")) el.classList.remove("in", "now");
+    next.classList.add("on");
+    current = next;
+    window.caption("", "");
+    if (id === "night" || id === "app") {
+      const frame = document.getElementById("appframe");
+      if (!frame.src) frame.src = APP_URL;
+    }
+  };
+
+  /** Reveal the next hidden part of the scene that is showing. */
+  window.reveal = () => {
+    const next = current.querySelector("[data-r]:not(.in)");
+    if (next) next.classList.add("in");
+  };
+
+  /** How it works: light step n (1 to 7) and the band it starts. */
+  window.step = (n) => {
+    const steps = current.querySelectorAll(".st");
+    steps.forEach((el, i) => { if (i < n) el.classList.add("in"); el.classList.toggle("now", i === n - 1); });
+    for (const band of current.querySelectorAll("[data-band]")) if (Number(band.dataset.band) <= n) band.classList.add("in");
+  };
+
+  window.caption = (main, sub) => {
+    if (!main) { strip.classList.remove("on"); return; }
+    strip.querySelector("b").textContent = main;
+    strip.querySelector("span").textContent = sub || "";
+    strip.classList.add("on");
+  };
+
+  window.doing = (text) => { document.getElementById("doing").textContent = text; };
+
+  /** A ring where a finger would tap, at a point given in page pixels. */
+  window.tapAt = (x, y) => {
+    const phone = document.getElementById("phone").getBoundingClientRect();
+    const tap = document.getElementById("tap");
+    tap.style.left = `${x - phone.left}px`;
+    tap.style.top = `${y - phone.top}px`;
+    tap.classList.remove("go");
+    void tap.offsetWidth;
+    tap.classList.add("go");
+  };
+
+  window.show((location.hash || "#title").slice(1));
+</script>
+</body>
+</html>

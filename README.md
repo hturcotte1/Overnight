@@ -2,9 +2,25 @@
 
 > Say it at lunch. Use it at breakfast.
 
-Overnight listens through [Bee](https://bee.computer/) (on an Apple Watch) for the moments you say "someone should build...". It asks on your wrist whether to build the idea. While you sleep, [Kiro](https://kiro.dev/) builds a small working web app; Overnight then tests and publishes it. In the morning your watch buzzes with the link.
+Overnight listens through [Bee](https://bee.computer/) (on an Apple Watch) for the moments someone says "someone should build...". It asks on the wrist whether to build the idea. At night [Kiro Crew](https://kiro.dev/) builds a small web app from a one-page brief, inside a macOS sandbox that keeps the owner's logins and transcripts out of its reach. In the morning Overnight tests the app in a second sandbox, publishes it to GitHub Pages, and the watch buzzes with the link. Built for Amazon's "Build, Ship, Shape" developer hackathon (Bee track, plus the AWS Builder side prize). The full plan is in [SPEC.md](SPEC.md); the submission text is in [docs/submission.md](docs/submission.md).
 
-Built for Amazon's "Build, Ship, Shape" developer hackathon (Bee track, plus the AWS Builder side prize). The full plan is in [SPEC.md](SPEC.md).
+- **Demo video:** (paste the YouTube link here)
+- **Built on the first real night**, from an idea heard through Bee on Oct 10: [plant-watering-tracker](https://hturcotte1.github.io/overnight-apps/plant-watering-tracker/)
+- **Built in a rehearsal**, from an invented idea (Bee was a stand-in): [practice-dice-roller](https://hturcotte1.github.io/overnight-apps/practice-dice-roller/)
+
+```mermaid
+flowchart TD
+    W["Apple Watch with the Bee app"] -->|speech| B["Bee cloud"]
+    B -->|live stream| L["overnight listen: saves every line on the Mac"]
+    L -->|after 2 quiet minutes| D["Kiro CLI with no tools: is this an app idea?"]
+    D -->|an idea| A["Bee to-do with an alarm: Build tonight?"]
+    A -->|ticked| Q["Approved idea"]
+    Q -->|a one-page brief| C["1:00 am: Kiro Crew builds the app inside Overnight's own macOS sandbox"]
+    C --> V["6:30 am: rebuilt and tested with Playwright in a second sandbox"]
+    V -->|passed| P["Published on GitHub Pages"]
+    P --> T["7:00 am: Bee to-do with the link, and a Bee fact"]
+    T --> W
+```
 
 ## Status
 
@@ -13,15 +29,18 @@ Built for Amazon's "Build, Ship, Shape" developer hackathon (Bee track, plus the
 | 0 | Prove each outside piece (Bee, Kiro, GitHub Pages) with a small script against the real tools | Done. Results in [docs/spikes.md](docs/spikes.md) |
 | 1 | Hear, notice, ask: an always-on listener that saves what Bee hears, spots ideas with Kiro, asks through a Bee to-do and tracks the answer | Done. Running on real Bee data; the first real idea was heard, asked about on the wrist and approved on Oct 10 |
 | 2 | Build and deliver: Kiro Crew builds approved ideas overnight; Overnight tests, publishes and sends the link | Done. **The first real night, Oct 10 to 11, worked end to end** (see below) |
-| 3 | Dashboard and hardening: a read-only page that shows the night; Overnight's own clock for the night jobs; finished builds kept out of the builders' reach; a monthly ceiling on build credits | Built and reviewed; its tests pass. **Not yet proved against the real tools, and not yet what runs at night** (see below) |
-| 4 to 5 | Real nights, submission | Later |
+| 3 | Dashboard and hardening: a read-only page that shows the night; Overnight's own clock for the night jobs; finished builds kept out of the builders' reach; a monthly ceiling on build credits | Done. Proved with real builds and the real macOS job system on Oct 12, and switched on for the live system on Oct 20 (`preflight`: 13 of 13) |
+| 4 | Real nights | One real night so far (Oct 10 to 11). Bee has sent no new speech since Oct 10 |
+| 5 | Submission | Prepared: [docs/submission.md](docs/submission.md), this README, the [product feedback](docs/product-feedback.md) and the [friction log](docs/friction-log.md) |
 
-So today Overnight hears, notices an idea, asks on the wrist, builds overnight, publishes and delivers, for real. What has and has not been proven:
+What has and has not been proven:
 
-- **Proven for real, on scratch data:** Kiro Crew and Kiro CLI each built an invented app inside Overnight's sandbox. The morning's checks ran on apps a Kiro agent built, and on apps made to misbehave. Stopping a build or a delivery half-way leaves nothing running and nothing stuck.
-- **Rehearsed for real on Oct 10:** an invented idea went the whole way with the real Kiro Crew install inside the sandbox: built in 2 minutes 19 seconds, checked, published by the real publisher and live 21 seconds later, at [practice-dice-roller](https://hturcotte1.github.io/overnight-apps/practice-dice-roller/). Bee was a stand-in. The backup builder (Kiro CLI) and the morning's checks also ran as a background job, the way the night jobs do.
-- **The first real night, Oct 10 to 11:** an idea heard through Bee and approved on the wrist the morning before was built overnight by Kiro Crew in 2 minutes 40 seconds, checked, published, and put on the wearer's Bee to-do list with its link, with nobody touching the Mac: [plant-watering-tracker](https://hturcotte1.github.io/overnight-apps/plant-watering-tracker/). Both night jobs ran an hour late, because macOS's scheduler was still on the time zone the Mac had before its last restart; a restart fixes that.
-- **Milestone 3, built on Oct 11:** the hour-late night is why Overnight now keeps its own time. The dashboard has been run on invented data and on the rehearsal's scratch folder. Everything else in Milestone 3 has only met tests and stand-ins so far. **Still pending:** the new sandbox rules against a real Kiro Crew and a real Kiro CLI build; the every-minute jobs under the real macOS job system; a real sleep of the Mac in the middle of a run; whether the Mac stays awake on battery; this README tried from a clean clone; moving the live night jobs over to the new code; the first night on Overnight's own clock; and the dashboard on real data. [SPEC.md §10](SPEC.md) has the list.
+- **Proven for real, on scratch data:** Kiro Crew and Kiro CLI each built invented apps inside Overnight's sandbox, under the Milestone 2 rules and again under the Milestone 3 rules. The morning's checks ran on apps a Kiro agent built, and on apps made to misbehave. Stopping a build or a delivery half-way leaves nothing running and nothing stuck.
+- **Rehearsed for real on Oct 10:** an invented idea went the whole way with the real Kiro Crew install inside the sandbox: built in 2 minutes 19 seconds, checked, published by the real publisher and live 21 seconds later. Bee was a stand-in. The backup builder (Kiro CLI) and the morning's checks also ran as a background job, the way the night jobs do.
+- **The first real night, Oct 10 to 11:** an idea heard through Bee, asked about on the wrist and ticked in the Bee app on the phone the morning before, was built overnight by Kiro Crew in 2 minutes 40 seconds for 4.59 Kiro credits, checked, published, and put on the wearer's Bee to-do list with its link, with nobody touching the Mac. The watch buzzed with it at 7:32 am. Both night jobs ran an hour late, because macOS's scheduler was still on the time zone the Mac had when it last restarted (it was changed after that). That is why Overnight now keeps its own time.
+- **Milestone 3, proved on Oct 12 and live since Oct 20:** the new sandbox rules passed a real build with each builder; the every-minute night jobs kept time under the real macOS job system (with throwaway jobs); a clean clone passed `npm ci`, typecheck, lint and every test. The live system was switched over on Oct 20, and `preflight` then passed all 13 checks.
+- **Not tried for real yet:** ticking the to-do on the watch (the real one was ticked on the phone); a rejection or an expiry with real speech; a night with the lid closed on battery (the rule that makes a run wait for the lid is written and tested only); whether the Mac stays awake on battery with the lid open; whether Overnight notices a real sleep in the middle of a run (it was tested with a frozen program); the first night on Overnight's own clock, read from the logs; and the dashboard on the real data folder. [SPEC.md §10](SPEC.md) has the list.
+- **Only one real idea so far.** Since Oct 10 Bee has sent no new speech, so there has been no second real idea. The dashboard pictures below use invented demo data.
 
 ## How the listening half works
 
@@ -81,16 +100,19 @@ On the first real night macOS's own calendar started both night jobs an hour lat
 - **A missed night catches up.** If the Mac was asleep or switched off at 1:00, the build starts a minute or two after it is awake again, any time before the next night's build. The morning's delivery does the same, and gives a build that is running late 20 minutes to finish first.
 - **No internet, no start.** A run waits until the internet answers, because a build or a publish started without it would fail for good.
 - **If the Mac sleeps in the middle of a run,** the run is stopped when it wakes. A build stopped that way on its first start gets one more try on a later night; one that was already on its second start counts as failed.
+- **On battery with the lid closed, a run that is due waits** until the lid is opened or the Mac is plugged in, so that a moment's wake of a sleeping Mac starts nothing that the next sleep would cut short.
 
 `npx overnight status` shows the last and the next build and delivery, whether each was on time, and what a run that is due is waiting for. After changing `TZ`, `BUILD_TIME` or `DELIVER_TIME`, install the two night jobs again (see "Setting up the night"): that starts their clocks from now.
 
-None of this has run under the real macOS job system yet, and the live jobs on the author's Mac are still on macOS's calendar until they are moved over. Both are pending.
+What has been tried for real: on Oct 12, two throwaway jobs under the real macOS job system each looked at the clock when loaded and then every 60 seconds, and the build started once, 20 seconds after its minute. The live jobs on the author's Mac were moved over to this way on Oct 20. Not tried for real yet: a Mac asleep across the build's time, and the lid rule with a real closed lid.
 
 ## The dashboard
 
 ![The dashboard's Today page, on invented demo data](docs/images/dashboard-today-dark.png)
 
-A web page on this Mac that shows the night as it happens: what was heard (as counts and bars, never the words), what was asked, what is being built, and each idea's story from "heard" to "delivered". It only reads, and it answers only on this Mac.
+*The Today page in the middle of a night. These pictures show the dashboard's invented demo data, not Overnight's real data; the page says "DEMO DATA: invented" in its top corner. A few names and figures echo the real rehearsal and the real night.*
+
+A web page on this Mac that shows the night as it happens: how much was heard (as counts and bars; the lines themselves are never shown, only each idea's short quote), what was asked, what is being built, and each idea's story from "heard" to "delivered". It only reads, and it answers only on this Mac.
 
 ```bash
 npm run dashboard:demo            # invented data: the way to have a look
@@ -108,7 +130,12 @@ npm run dashboard:filming         # real data with what was said hidden
 
 One honest footnote: when no other Overnight program is running, the database library itself leaves two small side files next to the database when the dashboard reads it (`overnight.db-shm` and an empty `overnight.db-wal`). The database does not change, and the next Overnight command removes them.
 
-More pictures, all from the invented demo data: [on a phone](docs/images/dashboard-today-phone.png), [one idea](docs/images/dashboard-idea.png), [the nights](docs/images/dashboard-nights.png). They were taken on Oct 11, before the last round of small changes to the look. The dashboard has not yet been looked at on the real data folder; that is pending.
+<p>
+<img src="docs/images/dashboard-idea.png" alt="One idea's page on invented demo data: its seven steps from heard to delivered, the app's screenshots and the build's figures" width="49%">
+<img src="docs/images/dashboard-nights.png" alt="The Nights page on invented demo data: what each night built and delivered" width="49%">
+</p>
+
+*Left: one invented idea's page, from "heard" to "delivered". Right: the Nights page, one card per invented night. Both are invented demo data, as the label on each page says.* There is also [the Today page on a phone](docs/images/dashboard-today-phone.png), from the same invented data. The pictures were taken on Oct 11, before the last round of small changes to the look. The dashboard has not yet been looked at on the real data folder; that is pending.
 
 ## What's in the repo
 
@@ -127,11 +154,12 @@ More pictures, all from the invented demo data: [on a phone](docs/images/dashboa
 | `fixtures/detector/` | 66 synthetic transcripts the detector is scored against. Each file's first line says it is synthetic |
 | `launchd/`, `scripts/install-agents.sh` | The four macOS background jobs: the listener, the Kiro Crew gateway, the nightly build, the morning delivery. The last two wake every minute and ask Overnight's own clock |
 | `spikes/` | The Milestone 0 scripts, one from Milestone 2 and three from Milestone 3 (10 to 12) |
-| `docs/` | Spike results, the friction log (every surprise with Bee, Kiro and Playwright), product feedback per tool, and pictures of the dashboard |
+| `submission/` | How the demo video was made: its scenes and the recording script (the video file and its check frames are not committed) |
+| `docs/` | Spike results, the friction log (every surprise with Bee, Kiro and Playwright), product feedback per tool, the submission text, and pictures of the dashboard |
 
 ## Setup
 
-**Tried on one Mac only:** Apple silicon, macOS 26, Node from nodejs.org unpacked under the home folder, and the other tools in `~/.local/bin`. Following these steps on a fresh Mac from a clean copy of the repo has not been tried yet; that is pending.
+**Tried on one Mac only:** Apple silicon, macOS 26, Node from nodejs.org unpacked under the home folder, and the other tools in `~/.local/bin`. A clean clone on that Mac passed on Oct 12: `npm ci`, typecheck, lint, every test, `status`, `ideas`, `resume` and `pause` as written below, and the detector's evaluation. A fresh Mac has not been tried.
 
 You need:
 
@@ -163,7 +191,7 @@ npm test
 - `npm install` downloads the Bee CLI, which is about 480 MB. npm may warn that it skipped an install script for `@beeai/cli`; that's harmless.
 - **`TZ`** decides when Overnight asks, builds and delivers, whatever zone the Mac's own clock is in. It starts as `America/Boise`.
 - **The two Kiro settings.** By default Kiro may use what it is sent to improve its service, and the detector sends it what was said. The Kiro CLI builder also refuses to build unless both settings read "false", and a setting that was never set does not count. On a brand-new Kiro install these commands also create two files that a sandboxed build needs to find in place.
-- Whether `npm test` passes on a Mac with no Kiro, no GitHub CLI and no test browser has not been tried (pending, with the clean-clone trial). The dashboard's browser tests are skipped when the test browser is not installed.
+- Under an empty made-up home folder, with none of Kiro's files, the tests pass; the few tests about a real home folder are skipped there (Oct 12). A Mac with no Kiro, no GitHub CLI and no test browser installed at all has not been tried. The dashboard's browser tests are skipped when the test browser is not installed.
 
 ## Running it
 
@@ -291,7 +319,7 @@ scripts/install-agents.sh uninstall crew
 - A published app stays public until its folder is removed from the apps repo.
 - Installing the night jobs again later starts their clocks from now.
 
-**Going back from the Milestone 3 code to the Milestone 2 code.** This matters once the night jobs run the new code. Do it in the daytime, with no build or delivery running, and do every step: the old code does not know about the new folders or the new way the jobs are started. (Written from trials on scratch copies; it has not been needed on the real system.)
+**Going back from the Milestone 3 code to the Milestone 2 code.** The live night jobs have run the new code since Oct 20. Do it in the daytime, with no build or delivery running, and do every step: the old code does not know about the new folders or the new way the jobs are started. (Written from trials on scratch copies; it has not been needed on the real system.)
 
 1. **Move finished builds back.** The old code only looks for a built app in `workspaces/`. Move every folder in `~/.overnight/built/` that is named exactly after an idea back into `~/.overnight/workspaces/`. Leave the rest where it is: the folders named `<id>.old-<time>`, a folder named `<id>.sealing` if there is one, and the file `.overnight-probe-marker`. If you skip this, the old code fails each good app that was waiting ("The app's folder does not exist.") and tells the wearer it could not be finished. The same goes for an app whose publish failed and that you mean to publish again with `build-now`.
 2. **Check out the previous version of the code.**
@@ -314,7 +342,9 @@ On a Mac, some tests start the real macOS sandbox around harmless commands in ma
 
 `npm run eval:detector` uses the data folder `.env` names, like every other command. With no `.env` it uses `~/.overnight`. It only ever sends the synthetic transcripts.
 
-The detector's last evaluation: precision 1.00 and recall 1.00 on 66 synthetic transcripts (targets: 0.85 and 0.7). That measures the plumbing and the prompt on made-up speech, not real-world accuracy.
+The detector's last evaluation (Oct 12, in the clean clone): precision 0.96 and recall 1.00 on 66 synthetic transcripts (targets: 0.85 and 0.7). Earlier runs scored between 0.88 and 1.00 precision. That measures the plumbing and the prompt on made-up speech, not real-world accuracy.
+
+On Oct 20: 3,588 tests in 116 files pass, with typecheck and lint clean.
 
 ## Privacy
 

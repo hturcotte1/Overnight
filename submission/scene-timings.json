@@ -1,0 +1,50 @@
+[
+  {
+    "scene": "1 title",
+    "start": 0
+  },
+  {
+    "scene": "2 the idea",
+    "start": 6
+  },
+  {
+    "scene": "3 how it works",
+    "start": 16.1
+  },
+  {
+    "scene": "4 the dashboard, an invented night",
+    "start": 35.8
+  },
+  {
+    "scene": "4b one idea's own page",
+    "start": 84.4
+  },
+  {
+    "scene": "5a the first real night",
+    "start": 97.9
+  },
+  {
+    "scene": "5b the real app",
+    "start": 110.5
+  },
+  {
+    "scene": "5c the to-do on the wrist",
+    "start": 121.7
+  },
+  {
+    "scene": "6 guardrails",
+    "start": 129.7
+  },
+  {
+    "scene": "7 built with",
+    "start": 146
+  },
+  {
+    "scene": "8 close",
+    "start": 154.1
+  },
+  {
+    "scene": "end",
+    "start": 160.1
+  }
+]
