@@ -941,7 +941,7 @@ The plan as it was written beforehand, for a daytime with the Mac plugged in and
 
 What is known about the hours between steps 1 and 5, from scratch copies with stand-ins: the old calendar jobs run the new code as plain `build` and `deliver`. That worked: two builds were made, sealed and counted, and nothing was written to the night clock. `preflight` in that state gives eleven ticks and two crosses (the jobs are still on the calendar; the gateway is behind another copy of the rules). And from the moment of the merge, Overnight's own `kirocrew` commands and the Kiro CLI builder run under the new sandbox rules, whatever the gateway job was installed with.
 
-**The first night on Overnight's own clock. Pending.** To read the next morning: one "night clock: starting" line with 0 minutes late in `build.log`, the same in `deliver.log`, and "Last build … on time" in `status`.
+**The first night on Overnight's own clock, Oct 20 to 21: on time.** `build.log`: "night clock: starting" at 1:00:21 a.m., 0 minutes late; `deliver.log`: the same at 6:30:29 a.m., 0 minutes late. Nothing was approved, so neither had work to do; both closed their day's slot once.
 
 **The dashboard on the real data folder, beside the running listener, with Henry at the screen. Pending.**
 

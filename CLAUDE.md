@@ -74,7 +74,7 @@ Built and working (Milestones 0 and 1):
 - `node packages/bee/src/smoke.ts`: read-only check that Bee is reachable and logged in
 - `node spikes/<name>.ts`: the spikes (see `docs/spikes.md`). Spikes 10 and 11 take a mode and a scratch folder; `node spikes/12-sqlite-read-only.ts` needs no Bee, no Kiro and no data folder.
 
-Built in Milestone 2 and hardened in Milestone 3. The rehearsal (Oct 10) and the first real night (Oct 10 to 11) worked. Milestone 3 was proved on the real tools on Oct 12, and the live jobs were moved over to it on Oct 20 (`preflight` 13 of 13). Still pending: a night with the lid closed on battery, whether the Mac stays awake on battery, and the first night on Overnight's own clock (SPEC.md §10):
+Built in Milestone 2 and hardened in Milestone 3. The rehearsal (Oct 10) and the first real night (Oct 10 to 11) worked. Milestone 3 was proved on the real tools on Oct 12, and the live jobs were moved over to it on Oct 20 (`preflight` 13 of 13). The first night on Overnight's own clock (Oct 20 to 21) started on time. Still pending: a night with the lid closed on battery, and whether the Mac stays awake on battery (SPEC.md §10):
 
 - `npx overnight build [--if-due]`: tonight's builds, now. With `--if-due` it asks Overnight's own clock first and does nothing unless a build is due. The `build` job runs it that way every minute, so the build starts at `BUILD_TIME`, at most once a day. Nothing is built while paused, or once the month's `MAX_BUILD_CREDITS_PER_MONTH` is used up.
 - `npx overnight deliver [--if-due]`: the morning, now: test each build in the sandbox, publish, tell the wearer. The `deliver` job runs it with `--if-due` every minute; the morning starts 30 minutes before `DELIVER_TIME`.

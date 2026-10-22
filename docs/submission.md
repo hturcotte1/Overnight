@@ -94,7 +94,7 @@ Friction log: https://github.com/hturcotte1/Overnight/blob/main/docs/friction-lo
 
 ## What has not been tried for real
 
-Only one real idea has gone all the way so far. Not yet tried for real: ticking the to-do on the watch, a rejection or expiry with real speech, a night on Overnight's own clock (switched on Oct 20), the dashboard on real data, a night with the lid closed on battery (the rule is written and tested, not tried with a real lid), and whether the Mac stays awake on battery. Where the video shows the dashboard, it is invented demo data, marked "DEMO DATA: invented".
+Only one real idea has gone all the way so far. Not yet tried for real: ticking the to-do on the watch, a rejection or expiry with real speech, the dashboard on real data, a night with the lid closed on battery (the rule is written and tested, not tried with a real lid), and whether the Mac stays awake on battery. Where the video shows the dashboard, it is invented demo data, marked "DEMO DATA: invented".
 
 ## Links
 
