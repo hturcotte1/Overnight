@@ -27,5 +27,13 @@ screenshots/
 
 submission/*.webm
 submission/frames/
+# The launch film: the finished MP4 (over GitHub's 100 MB limit), rendered frames, the real dashboard
+# and app captures (real screenshots), the rendered score, compiled tools and review stills.
+submission/*.mp4
+submission/film/frames/
+submission/film/capture/
+submission/film/audio/
+submission/film/.build/
+submission/film/review/
 submission/devpost-paste.txt
 submission/agent-prompt.txt

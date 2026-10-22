@@ -67,7 +67,7 @@ Bee is how Overnight hears and talks to the wearer, called live at runtime throu
 
 Kiro Crew is the builder. For each approved idea Overnight adds one unattended agent job that follows our build skill, starts it with `kirocrew cron trigger`, and reads Kiro Crew's own files for when it ended and what it cost (for a monthly ceiling of 400 credits). A zero-credit command job checks our sandbox before each night's builds. Kiro CLI is the idea detector and the fallback builder.
 
-The numbers: eight Kiro Crew builds of small apps, all of which built, in 119 to 224 seconds and 2.6 to 4.6 credits each. The real night: 160 seconds, 4.59 credits. A detector call: 3 to 8 seconds, about 0.016 credits.
+The numbers: nine Kiro Crew builds of small apps, all of which built, in 119 to 224 seconds and 2.6 to 4.6 credits each. The real night: 160 seconds, 4.59 credits. A detector call: 3 to 8 seconds, about 0.016 credits.
 
 ## Product feedback
 
@@ -100,5 +100,6 @@ Only one real idea has gone all the way so far. Not yet tried for real: ticking 
 
 - Code: https://github.com/hturcotte1/Overnight
 - The first real night's app: https://hturcotte1.github.io/overnight-apps/plant-watering-tracker/
+- The launch film's app (an idea typed in; built for real by Kiro Crew on Oct 21): https://hturcotte1.github.io/overnight-apps/game-night-scores/
 - A rehearsal app (an invented idea; Bee was a stand-in): https://hturcotte1.github.io/overnight-apps/practice-dice-roller/
 - Demo video: (paste the YouTube link here)

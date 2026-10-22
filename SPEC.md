@@ -850,19 +850,22 @@ Two things followed from decision 1. There is no "builds only on mains power" ru
 - The video is made (`submission/overnight-demo.webm`, 2 min 40 s, §11).
 - Henry does: upload the video to YouTube as public; paste its link into `docs/submission.md` and the README's first lines; fill in the Devpost form from `docs/submission.md`, with the Bee track and the AWS Builder side challenge; submit. Target Wednesday night, Oct 21; deadline Fri Oct 23, 12:00 PT.
 
-## 11. Demo video (2 min 40 s, made on Oct 20)
+## 11. Demo video: the launch film (2 min 40 s, made Oct 21 to 22)
 
-The video is `submission/overnight-demo.webm`: 1280 x 720, no sound track, a caption in every scene. `submission/record.ts` films it from one browser page; `submission/README.md` lists the scenes and how to make it again.
+The film is `submission/overnight-demo.mp4` (1920 x 1080, 30 fps, H.264 with an AAC score; on the repo's `submission-video` release, not committed). Every frame is drawn by `submission/film/scenes/` (WebGL2 shaders and SVG, a pure function of time) and rendered by `submission/film/render.mjs`; `score.swift` synthesizes the score and sound design from nothing, and `compose.swift` writes the MP4.
 
-- **0:00** Title: "Say it at lunch. Use it at breakfast."
-- **0:06** The idea, in three lines.
-- **0:16** How it works: the seven steps, drawn one by one.
-- **0:36** The dashboard playing an invented, sped-up night (`--demo --play`), then one invented idea's page. Its "DEMO DATA: invented" label stays in the picture (§1).
-- **1:38** The first real night: its facts from `docs/spikes.md`, the real public Plant Watering Tracker at phone size, and the morning to-do's words in a card that says it is an illustration, not a screenshot of Bee's app.
-- **2:10** The guardrails, one line at a time. Its line "What was heard is stored only on this Mac" means Overnight's copy; Bee keeps its own in its cloud.
-- **2:26** Built with, then the close.
+- **0:00** Darkness, then a man at a table at night, rim-lit, an Apple Watch on his wrist. "Someone should make an app for that." (an invented, generic line).
+- **0:12** The camera pushes into the watch; the Bee to-do "💡 Build tonight? Game Night Scores" arrives; it is ticked in the Bee app on a phone. "One tap."
+- **0:26** Night: 1:00 A.M. over the stars. "While you sleep, Kiro Crew builds it."
+- **0:34** Real footage: the dashboard during the real Kiro Crew build of Game Night Scores on Oct 21 (started by hand at 10:22 p.m., 2 min 20 s, 2.81 credits), sped up, inside a light boundary: "Inside Overnight's own sandbox. No Bee login. No transcripts. No GitHub login."
+- **0:58** Sunrise, 7:00 A.M.; the morning to-do with the link on the wrist (its exact words; for this build nothing was sent to a wrist, and the label says so).
+- **1:12** Real footage: the live Game Night Scores app in use, in an illustrated phone. "It's live."
+- **1:26** The wordmark. "Say it at lunch. Use it at breakfast."
+- **1:36** How it works, in six beats: Bee hears it, Kiro spots it, the wrist asks, Kiro Crew builds it, Overnight tests and publishes it, the link is on the wrist at 7.
+- **2:08** "It already works": the first real night with live Bee data (Oct 10 to 11, Plant Watering Tracker) and the numbers: 9 real Kiro Crew builds, 13 of 13 preflight checks pass, 3,588 tests.
+- **2:30** End card.
 
-What the first plan had and the video does not: footage of a real conversation, of the watch, or of a tick on the wrist. Bee has sent no new speech since Oct 10, so there was no second real idea to film, and the one real approval was ticked on the phone. The video shows no person, no quote of what was said and no name.
+The person, the wrist, the watch and the phones are illustrations, and each such shot says "Illustration"; the dashboard footage and both apps are real, and say so; the typed-in idea says "Idea typed in for this film; the build and the app are real." Two independent reviews (one for impact, one for accuracy, honesty and privacy) checked the first cut, and a polish pass applied every finding. The sound was measured (about -14 LUFS, peak below -1 dBTP), never heard by the team that made it.
 
 ## 12. Submission checklist
 

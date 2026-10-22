@@ -6,6 +6,7 @@ Overnight listens through [Bee](https://bee.computer/) (on an Apple Watch) for t
 
 - **Demo video:** (paste the YouTube link here)
 - **Built on the first real night**, from an idea heard through Bee on Oct 10: [plant-watering-tracker](https://hturcotte1.github.io/overnight-apps/plant-watering-tracker/)
+- **Built for the launch film**, from an idea typed in (Bee was a stand-in), by a real Kiro Crew build on Oct 21 in 2 min 20 s: [game-night-scores](https://hturcotte1.github.io/overnight-apps/game-night-scores/)
 - **Built in a rehearsal**, from an invented idea (Bee was a stand-in): [practice-dice-roller](https://hturcotte1.github.io/overnight-apps/practice-dice-roller/)
 
 ```mermaid
@@ -154,7 +155,7 @@ One honest footnote: when no other Overnight program is running, the database li
 | `fixtures/detector/` | 66 synthetic transcripts the detector is scored against. Each file's first line says it is synthetic |
 | `launchd/`, `scripts/install-agents.sh` | The four macOS background jobs: the listener, the Kiro Crew gateway, the nightly build, the morning delivery. The last two wake every minute and ask Overnight's own clock |
 | `spikes/` | The Milestone 0 scripts, one from Milestone 2 and three from Milestone 3 (10 to 12) |
-| `submission/` | How the demo video was made: its scenes and the recording script (the video file and its check frames are not committed) |
+| `submission/` | How the launch film was made: `film/` holds its scenes (WebGL and SVG, rendered frame by frame from a time value), the capture scripts, the score (synthesized in Swift) and the composer. The film itself, its captured frames and its sound are not committed; the film is on the repo's `submission-video` release |
 | `docs/` | Spike results, the friction log (every surprise with Bee, Kiro and Playwright), product feedback per tool, the submission text, and pictures of the dashboard |
 
 ## Setup
